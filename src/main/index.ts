@@ -350,7 +350,12 @@ function afterBoot(services: Awaited<ReturnType<typeof createCoreServices>>): vo
     void (async () => {
       try {
         stall.mark("reading the sync token from the keychain");
-        log.info("reading the sync token (the keychain may ask; the app stays usable)");
+        log.info(
+          "reading the sync token — if the keychain asks, answer it: this call " +
+            "holds the main thread until you do. The app is already up and its " +
+            "windows are open, which is the whole reason this runs here and not " +
+            "during boot.",
+        );
         const unlocked = await services.unlockSync();
         if (unlocked.tookMs >= 2_000) {
           // Loud on purpose. This is the exact call that froze the last
