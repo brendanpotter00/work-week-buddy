@@ -6,7 +6,7 @@ No timers to start. No projects to tag. No categories. It watches the same signa
 
 > **Status: built, not yet running on a real machine.**
 >
-> Every layer is implemented and tested — 732 tests across 52 files. The app
+> Every layer is implemented and tested — 831 tests across 58 files. The app
 > builds, launches as a menu-bar app with no Dock icon, creates its database,
 > and its own `--doctor` command reports honestly on what is and is not working.
 >
@@ -131,6 +131,7 @@ view. This does: it opens the dashboard and the onboarding windows for real and
 fails if either renders the wrong view, if either one's content is wider than
 its viewport, or if the fixed 560 × 640 onboarding window cannot hold its own
 contents. It runs in CI's macOS job. `docs/IMPL_UI.md` §7.3 has the full list.
+
 ## The cloud half
 
 One `npx wrangler login` — a browser flow against your own account, which is why

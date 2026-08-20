@@ -252,6 +252,28 @@ describe.runIf(isMac)("install.sh, executed end to end into a scratch tree", () 
   });
 });
 
+describe("the launch form install.sh gates on", () => {
+  it("never starts Electron with a script path", () => {
+    // `electron out/main/index.js` puts app.getAppPath() at out/main/, so
+    // preloadPath() looks for out/main/out/preload/index.js. The preload never
+    // loads, window.wwb is undefined, and every window renders empty — with no
+    // error that names the cause. `electron .` reads package.json's `main` and
+    // puts getAppPath() at the project root, which is where the packaged app
+    // has it too.
+    //
+    // `selftest` carried the broken form for a while and got away with it,
+    // because a self-test opens no window. install.sh HARD-GATES on --selftest,
+    // so "got away with it" was the whole of the safety margin.
+    const pkg = JSON.parse(readFileSync(join(REPO, "package.json"), "utf8")) as {
+      scripts: Record<string, string>;
+    };
+    for (const [name, body] of Object.entries(pkg.scripts)) {
+      const bad = /\belectron\s+(?!\.(\s|$))[^\s]+/.exec(body);
+      expect(bad?.[0], `npm run ${name}: ${body}`).toBeUndefined();
+    }
+  });
+});
+
 describe.runIf(isMac)("make-signing-cert.sh, executed for real into a scratch dir", () => {
   it("mints an importable PKCS#12 without going anywhere near a keychain", () => {
     const dir = join(root, "signing");

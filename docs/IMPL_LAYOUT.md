@@ -268,7 +268,7 @@ describe("guardrails", () => {
     "test": "vitest run",
     "test:watch": "vitest",
     "test:native": "vitest run --dir src/native --passWithNoTests",
-    "selftest": "electron-vite build && electron out/main/index.js --selftest",
+    "selftest": "electron-vite build && electron . --selftest",
     "doctor": "tsx scripts/doctor.ts"
   },
   "dependencies": {
@@ -302,6 +302,16 @@ describe("guardrails", () => {
   }
 }
 ```
+
+**Every Electron invocation is `electron .`, never `electron out/main/index.js`.**
+With a script path, `app.getAppPath()` resolves to `out/main/` and
+`preloadPath()` looks for `out/main/out/preload/index.js` — the preload never
+loads, `window.wwb` is `undefined`, and every window renders empty (§8 and
+`docs/IMPL_UI.md` §1.10). `electron .` reads `main` from `package.json` and puts
+`getAppPath()` at the project root, which is where the packaged app has it. This
+bit `smoke`, and `selftest` had the same form: harmless only because a self-test
+opens no window, which is luck rather than correctness — `scripts/install.sh`
+hard-gates on `--selftest`.
 
 **Two pins that are requirements, not preferences:**
 
