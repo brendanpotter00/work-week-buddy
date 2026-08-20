@@ -148,6 +148,37 @@ describe("bringup-cloud.sh", () => {
     }
   });
 
+  it("generates a config the real wrangler can actually build from", () => {
+    // The fake wrangler proves the ORDER of the calls and nothing about whether
+    // the config it is handed is deployable. `wrangler deploy --dry-run` is the
+    // real binary — it resolves the config, bundles the Worker and reports the
+    // bindings — and it is fully offline, so it can run here.
+    //
+    // What it catches: `main = "src/index.ts"` is relative to the CONFIG file,
+    // not to the cwd. Generating the config anywhere but beside the template
+    // would break the deploy with a missing-entrypoint error nobody would
+    // connect to this test file.
+    expect(bringup(["--this", "personal"]).code).toBe(0);
+
+    const r = spawnSync(
+      "npx",
+      [
+        "wrangler", "deploy", "--dry-run",
+        "--config", "worker/wrangler.generated.toml",
+        "--outdir", join(scratch, "bundle"),
+      ],
+      {
+        cwd: REPO,
+        encoding: "utf8",
+        env: { ...process.env, WRANGLER_SEND_METRICS: "false" },
+      },
+    );
+    const out = `${r.stdout ?? ""}${r.stderr ?? ""}`;
+    expect(r.status, out).toBe(0);
+    expect(out).toContain("env.DB");
+    expect(out).toContain("D1 Database");
+  }, 120_000);
+
   it("prints the two tokens it actually uploaded", () => {
     const r = bringup(["--this", "personal"]);
     expect(r.code, r.out).toBe(0);
