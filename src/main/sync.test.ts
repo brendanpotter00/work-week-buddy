@@ -16,7 +16,7 @@ import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 
 import { insertClosed, pendingCount, pendingRows } from "../store/intervals";
-import { getSyncState, setSyncState } from "../store/sync-state";
+import { getSyncState, readMachines, setSyncState } from "../store/sync-state";
 import { SILENCE_MS, isoWeekOf } from "../sync/backup";
 import { makeRow, openTestDb, t } from "../../test/fakes/seed-db";
 import {
@@ -27,6 +27,9 @@ import {
   TOKEN_PERSONAL,
   TOKEN_WORK,
 } from "../../test/sync/fake-cloud";
+import { fakeSettings } from "../../test/helpers/runtime";
+import { createMachineNaming, type MachineNaming } from "./device-name";
+import type { SettingsStore } from "./settings";
 import { NOT_CONFIGURED } from "./sync-seam";
 import { createSyncService, resolveSyncConfig, type SyncService } from "./sync";
 
@@ -77,7 +80,14 @@ interface Made {
  */
 function make(
   db: DatabaseSync,
-  over: { configured?: boolean; token?: string; dir?: string; now?: () => number } = {},
+  over: {
+    configured?: boolean;
+    token?: string;
+    dir?: string;
+    now?: () => number;
+    /** A thunk, because a rename mid-session has to reach the NEXT heartbeat. */
+    label?: () => string;
+  } = {},
 ): Made {
   const cloud = new FakeCloud();
   const dir = over.dir ?? tmp();
@@ -91,7 +101,7 @@ function make(
     config: resolved.config,
     configError: resolved.error,
     machineId: MACHINE_PERSONAL,
-    machineLabel: () => "Personal",
+    machineLabel: over.label ?? (() => "Personal"),
     appVersion: "0.1.0-test",
     osVersion: "26.5.1",
     tz: "UTC",
@@ -440,5 +450,127 @@ describe("resolveSyncConfig", () => {
       config: { baseUrl: BASE_URL, token: "tok" },
       error: null,
     });
+  });
+});
+
+// ── device naming, over the real Worker ─────────────────────────────────────
+
+/**
+ * A rename made with no network must not fail, and must not be lost.
+ *
+ * The whole reconciliation story: the rename is durable locally the instant it
+ * is made, the heartbeat that would have carried it simply does not land, and
+ * the next cycle that reaches the cloud carries the CURRENT name rather than
+ * the one this Mac booted with. Nothing retries the rename, because there is
+ * nothing to retry — the heartbeat reads the label instead of remembering it.
+ */
+describe("renaming and the cloud", () => {
+  interface Wired extends Made {
+    settings: ReturnType<typeof fakeSettings>;
+    naming: MachineNaming;
+  }
+
+  /**
+   * The production wiring, exactly: `settings.json` is the one authority for
+   * the name, the sync service READS it per heartbeat, and the naming service
+   * writes it. Hand the service a captured string here instead and every test
+   * below would pass while the shipped app sent its boot-time name forever.
+   */
+  function wire(db: DatabaseSync, initial = "MacBook Pro"): Wired {
+    const settings = fakeSettings({ machineLabel: initial });
+    const made = make(db, { label: () => settings.get("machineLabel") });
+    let tick = NOW;
+    const naming = createMachineNaming({
+      db,
+      machineId: MACHINE_PERSONAL,
+      settings: settings as unknown as SettingsStore,
+      appVersion: "0.1.0-test",
+      osVersion: "26.5.1",
+      pushHeartbeat: async () => {
+        await made.service.heartbeatNow();
+      },
+      now: () => (tick += 1000),
+    });
+    return { ...made, settings, naming };
+  }
+
+  function cloudLabel(cloud: FakeCloud): string | null {
+    const rows = cloud.d1.query<{ label: string | null }>(
+      "SELECT label FROM machine WHERE machine_id = ?",
+      MACHINE_PERSONAL,
+    );
+    return rows[0]?.label ?? null;
+  }
+
+  it("a rename made OFFLINE reaches the cloud on the next successful sync", async () => {
+    const db = openTestDb();
+    const { service, cloud, naming, settings } = wire(db);
+    await naming.init();
+
+    // Establish the old name in the cloud, then pull the plug.
+    await service.runCycle("launch");
+    expect(cloudLabel(cloud)).toBe("MacBook Pro");
+    cloud.offline = true;
+
+    const res = await naming.rename("The loft mini");
+    await res.pushed;
+
+    // The rename SUCCEEDED. It is durable in settings and in the local row, and
+    // the dashboard already shows it — the cloud simply has not heard yet.
+    expect(res.label).toBe("The loft mini");
+    expect(settings.get("machineLabel")).toBe("The loft mini");
+    expect(readMachines(db)[0]?.label).toBe("The loft mini");
+    expect(cloudLabel(cloud)).toBe("MacBook Pro");
+
+    // The network comes back. Nothing re-triggers the rename and no queue holds
+    // it — the ordinary wake cycle carries it, because the heartbeat reads the
+    // label rather than remembering it.
+    cloud.offline = false;
+    await service.runCycle("wake");
+
+    expect(cloudLabel(cloud)).toBe("The loft mini");
+  });
+
+  it("pushes immediately when the network is there, rather than waiting for a launch", async () => {
+    const db = openTestDb();
+    const { cloud, naming } = wire(db);
+    await naming.init();
+
+    const res = await naming.rename("The loft mini");
+    await res.pushed;
+
+    expect(cloudLabel(cloud)).toBe("The loft mini");
+    // Liveness, not an upload: the heartbeat moved no interval.
+    expect(cloud.count()).toBe(0);
+  });
+
+  it("mirrors the heartbeat locally, so the breakdown agrees with the cloud", async () => {
+    const db = openTestDb();
+    const { service } = make(db, { label: () => "The loft mini" });
+
+    await service.runCycle("launch");
+
+    expect(readMachines(db)).toEqual([
+      {
+        machineId: MACHINE_PERSONAL,
+        label: "The loft mini",
+        osVersion: "26.5.1",
+        appVersion: "0.1.0-test",
+        lastSeenMs: NOW,
+      },
+    ]);
+  });
+
+  it("writes no machine row when there is no cloud to beat to", async () => {
+    const db = openTestDb();
+    const { service } = make(db, { configured: false });
+
+    await service.runCycle("launch");
+
+    // The heartbeat is the cloud mirror and it never ran. Boot's own
+    // `naming.init()` writes the row on an unconfigured install; asserted here
+    // so the two writers stay distinct rather than quietly covering for each
+    // other.
+    expect(readMachines(db)).toEqual([]);
   });
 });
