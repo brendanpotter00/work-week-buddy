@@ -16,7 +16,10 @@
  *     rows would make the first assertion pass too, by way of a backfill that
  *     can half-fail and leave a year of history disagreeing with itself.
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach } from "vitest";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 
 import { DEFAULT_POLICY } from "../store/policy";
@@ -32,10 +35,17 @@ import {
   MAX_MACHINE_LABEL,
   type MachineNaming,
 } from "./device-name";
-import type { SettingsStore } from "./settings";
+import { SettingsStore } from "./settings";
 
 const MACHINE = "00000000-0000-0000-0000-00000000AAAA";
 const P = DEFAULT_POLICY;
+
+/** Throwaway `userData` directories, for the one test that uses a real one. */
+const dirs: string[] = [];
+
+afterEach(() => {
+  for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+});
 
 /** Two intervals before the rename and one after, all on this machine. */
 function seedHistory(db: DatabaseSync): void {
@@ -302,6 +312,33 @@ describe("propagation", () => {
     expect(res.label).toBe("The loft mini");
     expect(settings.get("machineLabel")).toBe("The loft mini");
     expect(readMachines(db)[0]?.label).toBe("The loft mini");
+  });
+
+  it("survives a relaunch, through the real settings file", async () => {
+    // `fakeSettings` above holds the name in memory. This is the same flow
+    // against `SettingsStore`, so the rename is proved DURABLE rather than
+    // merely applied: the app that reopens tomorrow reads it back off disk.
+    const dir = mkdtempSync(join(tmpdir(), "wwb-naming-"));
+    dirs.push(dir);
+    const db = openTestDb();
+
+    const settings = new SettingsStore(() => dir);
+    await settings.load();
+    const naming = createMachineNaming({
+      db,
+      machineId: MACHINE,
+      settings,
+      appVersion: "0.1.0-test",
+    });
+    await naming.init();
+    await naming.rename("The loft mini");
+
+    expect(JSON.parse(readFileSync(join(dir, "settings.json"), "utf8"))).toMatchObject({
+      machineLabel: "The loft mini",
+    });
+
+    const reopened = new SettingsStore(() => dir);
+    expect((await reopened.load()).machineLabel).toBe("The loft mini");
   });
 
   it("works with no cloud at all", async () => {
