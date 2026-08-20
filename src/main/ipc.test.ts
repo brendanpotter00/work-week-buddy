@@ -215,3 +215,64 @@ describe("push fan-out", () => {
     expect(win.sent.filter((m) => m.channel === "wwb:push:status")).toHaveLength(1);
   });
 });
+
+describe("the sync configuration channels", () => {
+  it("takes a token and never gives one back", async () => {
+    h = await makeHarness();
+    const written: Array<{ workerUrl?: string; token?: string }> = [];
+    let tokenPresent = false;
+    await register({
+      syncConfig: {
+        read: () => ({
+          workerUrl: "https://wwb-sync.example.workers.dev",
+          tokenPresent,
+          configured: tokenPresent,
+          error: null,
+          vaultAvailable: true,
+        }),
+        write: async (patch) => {
+          written.push(patch);
+          if (patch.token !== undefined) tokenPresent = true;
+          return {
+            workerUrl: patch.workerUrl ?? "https://wwb-sync.example.workers.dev",
+            tokenPresent,
+            configured: tokenPresent,
+            error: null,
+            vaultAvailable: true,
+          };
+        },
+      },
+    });
+
+    const before = await invoke("wwb:sync:config");
+    expect(before).toMatchObject({ tokenPresent: false, configured: false });
+
+    const after = await invoke("wwb:sync:setConfig", { token: "not-a-real-token-aaaaaaaa" });
+    expect(after).toMatchObject({ tokenPresent: true, configured: true });
+    // The token reached the vault and NOT the renderer. A secret that crosses
+    // this boundary is a secret in a devtools console.
+    expect(written).toEqual([{ token: "not-a-real-token-aaaaaaaa" }]);
+    expect(JSON.stringify(after)).not.toContain("not-a-real-token");
+  });
+
+  it("reports an unconfigured install when no gateway is wired", async () => {
+    h = await makeHarness();
+    await register();
+    expect(await invoke("wwb:sync:config")).toMatchObject({
+      configured: false,
+      tokenPresent: false,
+      vaultAvailable: false,
+    });
+  });
+
+  it("carries the Worker URL through the ordinary settings channel", async () => {
+    h = await makeHarness();
+    const deps = await register();
+    const updated = await invoke("wwb:settings:set", {
+      syncWorkerUrl: "https://wwb-sync.example.workers.dev",
+    });
+    // A URL is not a credential, so it lives in settings.json like any other.
+    expect(updated).toMatchObject({ syncWorkerUrl: "https://wwb-sync.example.workers.dev" });
+    expect(deps.settings.get("syncWorkerUrl")).toBe("https://wwb-sync.example.workers.dev");
+  });
+});

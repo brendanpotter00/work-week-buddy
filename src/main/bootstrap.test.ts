@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { App, PowerMonitor } from "electron";
 
 import {
+  createSyncConfigGateway,
   onWindowAllClosed,
   policyFromSettings,
   wirePowerMonitor,
@@ -16,10 +17,15 @@ import {
   wireWindowLifecycle,
   withTimeout,
 } from "./bootstrap";
+import { createTokenStore, type SecretVault } from "./token";
+import type { SyncConfig } from "./sync";
 import { parsePlatformUuid } from "./machine-id";
 import { MIN, T0, fakeSettings, makeHarness, rows, type Harness } from "../../test/helpers/runtime";
 import { countIntervals } from "../store";
 import type { SettingsStore } from "./settings";
+import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 class Emitter {
   readonly handlers = new Map<string, Array<(...a: never[]) => void>>();
@@ -96,6 +102,27 @@ describe("power events", () => {
     expect(stored).toHaveLength(1);
     // Not wake time. The whole night is not work.
     expect(stored[0]!.ended_at_ms).toBe(lastSignal);
+  });
+
+  it("resume runs the full sync cycle, not just a flush", async () => {
+    h = await makeHarness();
+    const cycles: string[] = [];
+    const pm = new Emitter();
+    wirePowerMonitor({
+      powerMonitor: pm as unknown as Pick<PowerMonitor, "on">,
+      runtime: h.runtime,
+      tray: null,
+      sync: { runCycle: async (reason) => void cycles.push(reason) },
+    });
+
+    pm.fire("resume");
+    await vi.advanceTimersByTimeAsync(0);
+
+    // Wake is not only "upload what is queued". It is also the pull that
+    // backfills the other Mac, the heartbeat that keeps the 72-hour alarm
+    // meaningful, and the weekly pass a machine that never quits would
+    // otherwise never reach.
+    expect(cycles).toEqual(["wake"]);
   });
 
   it("UI-T07: resume re-evaluates the deadline BEFORE flushing", async () => {
@@ -241,5 +268,92 @@ describe("policy and machine id", () => {
     // changes forks one Mac's history into two and the union merge then
     // double-counts every overlap.
     expect(parsePlatformUuid("nothing here")).toBeNull();
+  });
+});
+
+describe("the sync configuration gateway", () => {
+  const dirs: string[] = [];
+  const tmp = (): string => {
+    const dir = mkdtempSync(join(tmpdir(), "wwb-gateway-"));
+    dirs.push(dir);
+    return dir;
+  };
+
+  afterEach(() => {
+    for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  });
+
+  const vault: SecretVault = {
+    isEncryptionAvailable: () => true,
+    encryptString: (plain) => Buffer.from(`v1:${Buffer.from(plain, "utf8").toString("base64")}`),
+    decryptString: (enc) => Buffer.from(enc.toString("utf8").slice(3), "base64").toString("utf8"),
+  };
+
+  function gateway(dir: string) {
+    const settings = fakeSettings();
+    const applied: Array<SyncConfig | null> = [];
+    const g = createSyncConfigGateway({
+      settings: settings as unknown as SettingsStore,
+      tokens: createTokenStore(() => dir, vault),
+      sync: {
+        reconfigure: async (config) => void applied.push(config),
+      },
+    });
+    return { g, settings, applied };
+  }
+
+  it("needs both halves before it reports configured", async () => {
+    const dir = tmp();
+    const { g } = gateway(dir);
+    expect(g.read()).toMatchObject({ configured: false, tokenPresent: false, error: null });
+
+    expect(await g.write({ workerUrl: "https://wwb-sync.example.workers.dev" })).toMatchObject({
+      configured: false,
+      tokenPresent: false,
+    });
+    expect(await g.write({ token: "not-a-real-token-aaaaaaaaaaaa" })).toMatchObject({
+      configured: true,
+      tokenPresent: true,
+    });
+  });
+
+  it("applies the change to the live service, so no relaunch is needed", async () => {
+    const dir = tmp();
+    const { g, applied } = gateway(dir);
+    await g.write({
+      workerUrl: "https://wwb-sync.example.workers.dev",
+      token: "not-a-real-token-aaaaaaaaaaaa",
+    });
+    expect(applied.at(-1)).toEqual({
+      baseUrl: "https://wwb-sync.example.workers.dev",
+      token: "not-a-real-token-aaaaaaaaaaaa",
+    });
+  });
+
+  it("puts the URL in settings and the token nowhere a grep can find it", async () => {
+    const dir = tmp();
+    const { g, settings } = gateway(dir);
+    await g.write({
+      workerUrl: "https://wwb-sync.example.workers.dev",
+      token: "not-a-real-token-aaaaaaaaaaaa",
+    });
+
+    expect(settings.get("syncWorkerUrl")).toBe("https://wwb-sync.example.workers.dev");
+    for (const name of readdirSync(dir)) {
+      expect(readFileSync(join(dir, name)).toString("utf8")).not.toContain("not-a-real-token");
+    }
+    // …and it never comes back out over the boundary either.
+    expect(JSON.stringify(g.read())).not.toContain("not-a-real-token");
+  });
+
+  it("says why a malformed URL is unusable instead of silently doing nothing", async () => {
+    const { g } = gateway(tmp());
+    const state = await g.write({
+      workerUrl: "wwb-sync.example.workers.dev",
+      token: "not-a-real-token-aaaaaaaaaaaa",
+    });
+    expect(state.configured).toBe(false);
+    expect(state.tokenPresent).toBe(true);
+    expect(state.error).toMatch(/not a URL/);
   });
 });

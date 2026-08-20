@@ -32,6 +32,21 @@ One **Cloudflare D1** database that both Macs write to, through a small insert-o
 
 Rows are append-only, stamped with the machine that made them, and keyed by a UUID minted before the first upload attempt. Two machines physically cannot write the same row, so there is no merge logic, no conflict UI, and no "which version wins" anywhere in the codebase.
 
+### Turning sync on
+
+The cloud half is optional and the app ships without it. Until you deploy the Worker there is no URL and no token, and that is a **state, not a failure**: tracking runs at full speed, the dashboard reads the same local database it always reads, the weekly local export still runs, and `--doctor` reports `not configured` rather than an error.
+
+Two settings turn it on:
+
+| | Where it is stored | Why |
+|---|---|---|
+| Worker base URL | `settings.json` under Application Support | A URL is not a credential |
+| Per-machine bearer token | Electron `safeStorage`, backed by the macOS Keychain (`sync-token.bin`) | It is |
+
+Both are written through one IPC call (`wwb:sync:setConfig`), applied to the running app without a relaunch, and the token is never read back out — the renderer only ever learns whether one exists. Deleting `sync-token.bin` returns the app to the unconfigured state; nothing else changes.
+
+Once configured, `flush()` runs on interval close, on wake and at launch; `pull()` runs after every successful flush; and once a week the app exports itself to disk, compares its fingerprint against the cloud's, and checks the 72-hour silence alarm.
+
 ## What it costs
 
 Nothing. No server to run, no Apple Developer account, no paid tier anywhere. Roughly 10 rows a day against a 100,000/day free cap.

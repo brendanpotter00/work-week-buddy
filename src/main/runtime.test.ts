@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { MIN, T0, makeHarness, rows, type Harness } from "../../test/helpers/runtime";
 import { countIntervals, readJournal } from "../store";
+import { NOT_CONFIGURED } from "./sync-seam";
 
 let h: Harness;
 
@@ -419,13 +420,30 @@ describe("live status", () => {
 });
 
 describe("flush", () => {
-  it("reports honestly that sync is not wired rather than a meaningless green", async () => {
+  it("reports honestly that sync is not configured rather than a meaningless green", async () => {
+    // No seam attached is the same fact as no Worker URL: the cloud is not
+    // reachable and the row is safe in the mirror. `ok: true` here would be a
+    // green light for an upload that never happened.
     h = await makeHarness();
     h.source.key(Date.now());
     advance(16 * MIN);
     const res = await h.runtime.flushNow();
     expect(res.ok).toBe(false);
-    expect(res.error).toMatch(/not wired/);
+    expect(res.error).toBe(NOT_CONFIGURED);
     expect(res.pendingAfter).toBe(1);
+  });
+
+  it("the doctor reports the unconfigured state as a state, not as a failure", async () => {
+    h = await makeHarness();
+    h.source.key(Date.now());
+    advance(16 * MIN);
+    const report = await h.runtime.doctor();
+    expect(report.sync.configured).toBe(false);
+    // Not configured is NOT an error. A fresh install must not wear a red
+    // badge for a cloud its owner has not asked for yet.
+    expect(report.sync.lastFlushError).toBeNull();
+    expect(report.sync.pendingRows).toBe(1);
+    // Not a degraded reason either: the tray must not wear a ⚠︎ for it.
+    expect(h.runtime.liveStatus().degraded).toEqual([]);
   });
 });

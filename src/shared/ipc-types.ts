@@ -256,10 +256,18 @@ export interface DoctorReport {
     needsPermission: boolean | null;
   };
   sync: {
+    /**
+     * THREE STATES, NOT TWO. False means no Worker URL and no token — which is
+     * neither healthy nor failing, and must not be painted as either. Every
+     * timestamp below is null in that state and none of them is a problem.
+     */
+    configured: boolean;
     pendingRows: number;
     lastFlushOkMs: number | null;
     lastFlushError: string | null;
     lastPullMs: number | null;
+    /** A pull can fail while the flush that preceded it succeeded. Separate field, separate truth. */
+    lastPullError: string | null;
     watermark: number;
     lastCloudWriteMs: number | null;
     silentForMs: number | null;
@@ -315,6 +323,33 @@ export interface UiSettings {
   minIntervalS: number;
   countJigglerTime: 0 | 1;
   graceS: number;
+  /**
+   * The Worker's base URL, e.g. `https://wwb-sync.<account>.workers.dev`. An
+   * ordinary setting in `settings.json`: a URL is not a credential.
+   *
+   * Its other half, the bearer token, is NOT here and never crosses this
+   * boundary in either direction. It lives in Electron `safeStorage`, and the
+   * renderer may only write it (`wwb:sync:setConfig`) or ask whether one
+   * exists (`SyncConfigState.tokenPresent`).
+   */
+  syncWorkerUrl: string;
+}
+
+/**
+ * Enough for a settings pane to render the sync section honestly, and not one
+ * byte more. `tokenPresent` rather than the token: a secret that reaches the
+ * renderer is a secret in a devtools console, in a heap snapshot, and in
+ * whatever an extension can read.
+ */
+export interface SyncConfigState {
+  workerUrl: string;
+  tokenPresent: boolean;
+  /** Both halves present and usable. This is the `configured` in the doctor. */
+  configured: boolean;
+  /** Why a URL or token that IS set is nonetheless unusable. */
+  error: string | null;
+  /** False when this system has no keychain, so no token can be stored at all. */
+  vaultAvailable: boolean;
 }
 
 // ── the contract ────────────────────────────────────────────────────────────
@@ -334,6 +369,12 @@ export interface InvokeContract {
   "wwb:doctor:get": { req: void; res: DoctorReport };
   "wwb:doctor:selftest": { req: void; res: SelfTestResult };
   "wwb:sync:flush": { req: void; res: FlushResult };
+  "wwb:sync:config": { req: void; res: SyncConfigState };
+  /** Either half may be omitted. The token is write-only; it never comes back. */
+  "wwb:sync:setConfig": {
+    req: { workerUrl?: string; token?: string };
+    res: SyncConfigState;
+  };
   "wwb:machine:rename": { req: { label: string }; res: AppInfo };
   "wwb:settings:get": { req: void; res: UiSettings };
   "wwb:settings:set": { req: Partial<UiSettings>; res: UiSettings };
@@ -367,6 +408,8 @@ export const INVOKE_CHANNELS = [
   "wwb:doctor:get",
   "wwb:doctor:selftest",
   "wwb:sync:flush",
+  "wwb:sync:config",
+  "wwb:sync:setConfig",
   "wwb:machine:rename",
   "wwb:settings:get",
   "wwb:settings:set",

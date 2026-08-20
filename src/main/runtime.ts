@@ -43,7 +43,6 @@ import {
   countIntervals,
   insertClosed,
   openFromSnapshot,
-  pendingRows,
   readJournal,
   recover,
   rowFromClosed,
@@ -72,6 +71,7 @@ import type {
   Toggles,
 } from "../shared/ipc-types";
 import { createDeadline, type Deadline } from "./deadline";
+import { unconfiguredSync, type SyncSeam } from "./sync-seam";
 import { buildMetrics } from "./metrics";
 import { PermissionTracker } from "./onboarding";
 
@@ -128,20 +128,27 @@ export interface AppRuntime {
   evaluateLevels(atMs: number): void;
 
   on(event: "change", cb: (kind: RuntimeChange) => void): () => void;
+  /**
+   * The sync service's way into the one fan-out there is.
+   *
+   * Rows arriving from the other Mac change what the dashboard shows, and
+   * `RuntimeChange` is the only push source in the app — so a pull announces
+   * itself here rather than growing a second subscription nobody remembers to
+   * unsubscribe. Deliberately narrow: sync may announce sync, and nothing else.
+   */
+  notifySync(kind: "sync" | "rows-pulled"): void;
 }
 
 /**
- * The seam to `src/sync/`.
+ * The seam to `src/sync/`, re-exported so callers keep one import.
  *
- * `src/sync/` is being built in parallel and does not exist on `main` at the
- * time of writing, so nothing here imports it. When it lands, `index.ts` passes
- * an adapter in; until then `flushNow()` reports honestly that the upload path
- * is not wired rather than returning a green `ok: true` that means nothing.
+ * The runtime deliberately does not import `src/main/sync.ts`: it is handed a
+ * `SyncSeam` by `bootstrap.ts` and has no idea a Cloudflare Worker exists.
+ * That is what lets `runtime.test.ts` drive the whole tracker against a
+ * four-method fake and assert, directly, that closing an interval reaches the
+ * flusher.
  */
-export interface SyncSeam {
-  flush(): Promise<FlushResult>;
-  snapshot(): DoctorReport["sync"];
-}
+export type { SyncHealth, SyncSeam, SyncSnapshot } from "./sync-seam";
 
 export interface RuntimeOptions {
   readonly db: DatabaseSync;
@@ -163,7 +170,10 @@ export interface RuntimeOptions {
   readonly unschedule?: (t: NodeJS.Timeout) => void;
   readonly setRepeating?: (fn: () => void, ms: number) => NodeJS.Timeout;
   readonly clearRepeating?: (t: NodeJS.Timeout) => void;
-  /** Null until `src/sync/` lands. See `SyncSeam`. */
+  /**
+   * Omitted or null behaves EXACTLY like an unconfigured install: honest, not
+   * green, and never a throw. There is no third behaviour to test for.
+   */
   readonly sync?: SyncSeam | null;
   /**
    * "Is a meeting app running." The mic alone is never a work signal — dictation
@@ -216,8 +226,16 @@ class Runtime implements AppRuntime {
 
   private readonly listeners = new Set<(kind: RuntimeChange) => void>();
 
+  /**
+   * Never null. An absent seam degrades to the unconfigured one, so there is a
+   * single code path here and one fewer branch that could quietly stop calling
+   * the flusher.
+   */
+  private readonly sync: SyncSeam;
+
   constructor(private readonly o: RuntimeOptions) {
     this.machineId = o.machineId;
+    this.sync = o.sync ?? unconfiguredSync(o.db, () => this.now());
     this.cfg = {
       idleTimeoutMs: o.config?.idleTimeoutMs ?? DEFAULTS.idleTimeoutMs,
       minIntervalMs: o.config?.minIntervalMs ?? DEFAULTS.minIntervalMs,
@@ -282,14 +300,17 @@ class Runtime implements AppRuntime {
     this.keepAwake = false;
     this.o.source.stop();
 
-    if (this.o.sync) {
-      try {
-        await this.o.sync.flush();
-      } catch {
-        // Best-effort. The mirror IS the outbox: nothing is lost by a failed
-        // flush, and blocking quit on the network is how you get a force-quit.
-      }
+    try {
+      await this.sync.flush();
+    } catch {
+      // Best-effort. The mirror IS the outbox: nothing is lost by a failed
+      // flush, and blocking quit on the network is how you get a force-quit.
     }
+    // Disarm the backoff timer and WAIT for any drain still running. `cancel()`
+    // is not enough: a drain past its first `await` still writes `synced_at_ms`,
+    // and whoever closes the database next needs to be able to say "and nothing
+    // of yours is still running".
+    await this.sync.stop().catch(() => undefined);
   }
 
   // ── the signal path ──────────────────────────────────────────────────────
@@ -359,7 +380,15 @@ class Runtime implements AppRuntime {
     const closed = this.applyEffects(result.effects);
     const after = this.state.open;
 
-    if (closed.length > 0) this.emit("interval-close");
+    if (closed.length > 0) {
+      this.emit("interval-close");
+      // THE WIRE. `docs/ARCHITECTURE.md` §5: flush on interval close. A row
+      // reaches the outbox and the drain starts in the same tick — not on the
+      // next tray refresh, not on the next launch. Fire-and-forget on purpose:
+      // tracking must never wait on a network, and a failed flush loses nothing
+      // because the mirror IS the outbox.
+      this.flushAfterClose();
+    }
     if (after !== null && (before === null || before.id !== after.id)) this.emit("interval-open");
     else if (closed.length === 0 && after !== null && before !== null && after !== before) {
       this.emitSignalDebounced();
@@ -413,6 +442,15 @@ class Runtime implements AppRuntime {
       }
     }
     return closed;
+  }
+
+  private flushAfterClose(): void {
+    void this.sync
+      .flush()
+      .then(() => this.emit("sync"))
+      .catch((err: unknown) => {
+        console.error("[runtime] flush after interval close failed", err);
+      });
   }
 
   /** A database that has stopped accepting writes is a degraded state, not a crash. */
@@ -564,6 +602,9 @@ class Runtime implements AppRuntime {
 
   onWatchdogTick(status: NativeStatus, atMs: number): void {
     this.lastWatchdogTickMs = atMs;
+    // Backup layer 4, on the tick that already exists: a read of one integer
+    // does not deserve a sixth timer. `docs/IMPL_STORE_SYNC.md` §8.
+    this.sync.pollSilence(atMs);
     this.applyStatus(status, atMs);
   }
 
@@ -712,10 +753,14 @@ class Runtime implements AppRuntime {
     if (p.accessibility !== "granted" && (this.state.jiggler || p.promptConsumed.accessibility)) {
       out.push("accessibility_missing");
     }
-    const sync = this.o.sync?.snapshot();
-    if (sync && sync.silentForMs !== null && sync.silentForMs > 72 * 3_600_000) {
+    const sync = this.sync.health();
+    if (sync.silentForMs !== null && sync.silentForMs > 72 * 3_600_000) {
       out.push("sync_silent_72h");
     }
+    // Backup layer 3 — the only layer that catches SILENT loss. `null` is
+    // "never checked" and says nothing; only a completed comparison that came
+    // back different is worth a badge.
+    if (sync.fingerprintMatched === false) out.push("fingerprint_mismatch");
     return out;
   }
 
@@ -724,19 +769,9 @@ class Runtime implements AppRuntime {
   }
 
   async flushNow(): Promise<FlushResult> {
-    const pending = pendingRows(this.o.db).length;
-    if (!this.o.sync) {
-      // Honest, not green. `src/sync/` is not wired into this build yet.
-      return {
-        ok: false,
-        attempted: 0,
-        confirmed: 0,
-        pendingAfter: pending,
-        error: "sync is not wired into this build yet",
-        atMs: this.now(),
-      };
-    }
-    const res = await this.o.sync.flush();
+    // Unconfigured answers here too, and answers honestly: `ok: false` with a
+    // reason, never a green `ok: true` that means nothing.
+    const res = await this.sync.flush();
     this.emit("sync");
     return res;
   }
@@ -773,15 +808,9 @@ class Runtime implements AppRuntime {
   async doctor(): Promise<DoctorReport> {
     const nowMs = this.now();
     const tap = this.tapHealth();
-    const sync = this.o.sync?.snapshot() ?? {
-      pendingRows: pendingRows(this.o.db).length,
-      lastFlushOkMs: null,
-      lastFlushError: "sync is not wired into this build yet",
-      lastPullMs: null,
-      watermark: 0,
-      lastCloudWriteMs: null,
-      silentForMs: null,
-    };
+    // Real numbers from the real sync layer: pending rows, last flush, last
+    // pull, watermark, fingerprint match, backup age, silence duration.
+    const sync = this.sync.snapshot();
     const degraded = this.degraded();
     return {
       generatedAtMs: nowMs,
@@ -814,16 +843,9 @@ class Runtime implements AppRuntime {
         meetingApp: null,
         needsPermission: null,
       },
-      sync,
-      fingerprint: {
-        checkedAtMs: null,
-        matched: null,
-        localCount: null,
-        cloudCount: null,
-        localSha: null,
-        cloudSha: null,
-      },
-      backup: { lastPath: null, lastAtMs: null, ageDays: null, destination: null, kept: 0 },
+      sync: sync.sync,
+      fingerprint: sync.fingerprint,
+      backup: sync.backup,
       selfTest: null,
       db: {
         path: this.o.dbPath ?? ":memory:",
@@ -843,6 +865,10 @@ class Runtime implements AppRuntime {
     void event;
     this.listeners.add(cb);
     return () => this.listeners.delete(cb);
+  }
+
+  notifySync(kind: "sync" | "rows-pulled"): void {
+    this.emit(kind);
   }
 
   private emit(kind: RuntimeChange): void {

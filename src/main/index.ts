@@ -14,7 +14,16 @@
  *      `app.quit()`: `quit()` fires `before-quit`, which would close the
  *      RUNNING instance's interval from this doomed process
  */
-import { BrowserWindow, Menu, app, dialog, powerMonitor, protocol, shell } from "electron";
+import {
+  BrowserWindow,
+  Menu,
+  app,
+  dialog,
+  powerMonitor,
+  protocol,
+  safeStorage,
+  shell,
+} from "electron";
 
 import { APP_NAME } from "../shared/constants";
 import {
@@ -86,6 +95,8 @@ app.whenReady().then(async () => {
       settings,
       appVersion: app.getVersion(),
       isPackaged: app.isPackaged,
+      vault: safeStorage,
+      osVersion: process.getSystemVersion(),
     });
     const report = await services.runtime.doctor();
     process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
@@ -107,10 +118,18 @@ app.whenReady().then(async () => {
     settings,
     appVersion: app.getVersion(),
     isPackaged: app.isPackaged,
+    vault: safeStorage,
+    osVersion: process.getSystemVersion(),
   });
   const runtime = services.runtime;
   await runtime.start();
   services.watchdog.start();
+
+  // Sync at launch: flush, pull, heartbeat, then the weekly maintenance pass.
+  // `void`, deliberately — the tray must appear and tracking must be running
+  // before any of this, and none of it can fail in a way that matters. An
+  // unconfigured install runs the local weekly export here and nothing else.
+  void services.sync.runCycle("launch");
 
   registerIpcHandlers(runtime, {
     settings,
@@ -118,6 +137,7 @@ app.whenReady().then(async () => {
     isPackaged: app.isPackaged,
     tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
     openPrivacyPane: (which) => void shell.openExternal(privacyPaneUrl(which)),
+    syncConfig: services.syncConfig,
     relaunch: () => {
       app.relaunch({ args: process.argv.slice(1) });
       app.exit(0);
@@ -164,7 +184,7 @@ app.whenReady().then(async () => {
     hasWindows: () => BrowserWindow.getAllWindows().length > 0,
     showDashboard: () => void showDashboard(settings.get("windowBackground")),
   });
-  wirePowerMonitor({ powerMonitor, runtime, tray });
+  wirePowerMonitor({ powerMonitor, runtime, tray, sync: services.sync });
   wireQuit({
     app,
     runtime,

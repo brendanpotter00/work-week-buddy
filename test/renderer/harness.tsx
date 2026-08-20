@@ -327,6 +327,7 @@ export function defaultHandlers(metrics: MetricsBundle, status = liveStatus()): 
       minIntervalS: 90,
       countJigglerTime: 0,
       graceS: 0,
+      syncWorkerUrl: "",
     }),
   };
 }

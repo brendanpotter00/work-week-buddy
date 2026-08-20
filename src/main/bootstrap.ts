@@ -15,10 +15,13 @@ import type { App, PowerMonitor } from "electron";
 
 import { createSignalSource, type SignalSource } from "../native";
 import { DEFAULT_POLICY, defaultDbPath, openDb, type Policy } from "../store";
+import type { SyncConfigState } from "../shared/ipc-types";
 import { log } from "./log";
 import { createRuntime, type AppRuntime } from "./runtime";
 import { readPlatformUuid } from "./machine-id";
 import type { SettingsStore } from "./settings";
+import { createSyncService, resolveSyncConfig, type SyncService } from "./sync";
+import { createTokenStore, type SecretVault, type TokenStore } from "./token";
 import type { TrayController } from "./tray";
 import { createWatchdog, type Watchdog } from "./watchdog";
 
@@ -50,6 +53,8 @@ export interface PowerDeps {
   powerMonitor: Pick<PowerMonitor, "on">;
   runtime: AppRuntime;
   tray: Pick<TrayController, "refresh"> | null;
+  /** The wake half of the sync lifecycle: flush, pull, heartbeat, weekly pass. */
+  sync?: Pick<SyncService, "runCycle"> | null;
   now?: () => number;
   onShutdown?: () => void;
 }
@@ -88,7 +93,14 @@ export function wirePowerMonitor(deps: PowerDeps): void {
       // in the outbox on the first flush after waking.
       await deps.runtime.onResume(at, from);
       deps.tray?.refresh("resume");
+      // The wake cycle is STARTED first and awaited last. An async function
+      // runs its body synchronously up to the first `await`, so the cycle's
+      // drain is already the in-flight one by the time `flushNow()` asks for
+      // it — the two join a single flush and a single pull rather than
+      // hitting the Worker twice for the same wake.
+      const cycle = deps.sync?.runCycle("wake") ?? Promise.resolve();
       await deps.runtime.flushNow().catch(() => undefined);
+      await cycle;
     })();
   });
 
@@ -147,6 +159,58 @@ export interface CoreServices {
   source: SignalSource;
   machineId: string;
   policy: Policy;
+  /** Wired into the runtime as its `SyncSeam`. Unconfigured is a normal state. */
+  sync: SyncService;
+  /** Backs the two `wwb:sync:config:*` channels. */
+  syncConfig: SyncConfigGateway;
+}
+
+export interface SyncConfigGateway {
+  read(): SyncConfigState;
+  write(patch: { workerUrl?: string; token?: string }): Promise<SyncConfigState>;
+}
+
+/**
+ * Reads and writes the two halves of the sync configuration, and keeps the
+ * live service in step with them.
+ *
+ * The URL half is an ordinary setting. The token half never touches
+ * `settings.json`, never leaves this process in readable form, and is reported
+ * outwards only as the boolean `tokenPresent`.
+ */
+export function createSyncConfigGateway(deps: {
+  settings: Pick<SettingsStore, "get" | "set">;
+  tokens: TokenStore;
+  sync: Pick<SyncService, "reconfigure">;
+}): SyncConfigGateway {
+  const read = (): SyncConfigState => {
+    const workerUrl = deps.settings.get("syncWorkerUrl");
+    const token = deps.tokens.read();
+    const resolved = resolveSyncConfig(workerUrl, token);
+    return {
+      workerUrl,
+      tokenPresent: token !== null,
+      configured: resolved.config !== null,
+      error: resolved.error,
+      vaultAvailable: deps.tokens.available(),
+    };
+  };
+
+  return {
+    read,
+    async write(patch) {
+      if (patch.workerUrl !== undefined) {
+        await deps.settings.set("syncWorkerUrl", patch.workerUrl.trim());
+      }
+      // Throws when there is no keychain to encrypt with, which surfaces in the
+      // renderer as a rejected invoke. Storing it anywhere weaker is the one
+      // outcome that is not available.
+      if (patch.token !== undefined) deps.tokens.write(patch.token);
+      const resolved = resolveSyncConfig(deps.settings.get("syncWorkerUrl"), deps.tokens.read());
+      await deps.sync.reconfigure(resolved.config, resolved.error);
+      return read();
+    },
+  };
 }
 
 /**
@@ -160,6 +224,13 @@ export async function createCoreServices(opts: {
   appVersion: string;
   isPackaged: boolean;
   tz?: string;
+  /**
+   * Electron's `safeStorage`. Null on a system without one — and then no token
+   * is stored at all, which reads as "not configured" rather than as a token
+   * written somewhere weaker.
+   */
+  vault?: SecretVault | null;
+  osVersion?: string;
 }): Promise<CoreServices> {
   const dbPath = defaultDbPath(opts.userDataDir);
   const policy = policyFromSettings(opts.settings);
@@ -180,6 +251,27 @@ export async function createCoreServices(opts: {
   }
 
   const source = await createSignalSource({ isPackaged: opts.isPackaged });
+  const tz = opts.tz ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+  // ── The sync layer, wired in ────────────────────────────────────────────
+  // Built BEFORE the runtime because the runtime takes it as its seam, and
+  // built unconditionally: an unconfigured service is a real object that
+  // answers honestly, not a null that every call site has to remember.
+  const tokens = createTokenStore(() => opts.userDataDir, opts.vault ?? null);
+  const resolved = resolveSyncConfig(opts.settings.get("syncWorkerUrl"), tokens.read());
+  let emitChange: (kind: "sync" | "rows-pulled") => void = () => undefined;
+  const sync = createSyncService({
+    db,
+    config: resolved.config,
+    configError: resolved.error,
+    machineLabel: opts.settings.get("machineLabel"),
+    appVersion: opts.appVersion,
+    ...(opts.osVersion === undefined ? {} : { osVersion: opts.osVersion }),
+    tz,
+    // A pull that brought rows in has to reach the tray and the dashboard, and
+    // the runtime owns the only fan-out there is.
+    onChange: (kind) => emitChange(kind),
+  });
 
   const runtime = createRuntime({
     db,
@@ -187,15 +279,20 @@ export async function createCoreServices(opts: {
     machineId,
     machineLabel: opts.settings.get("machineLabel"),
     appVersion: opts.appVersion,
-    tz: opts.tz ?? Intl.DateTimeFormat().resolvedOptions().timeZone,
+    tz,
     policy,
     dbPath,
     config: { idleTimeoutMs: opts.settings.get("idleTimeoutMin") * 60_000 },
+    sync,
   });
+  emitChange = (kind) => {
+    runtime.notifySync(kind);
+  };
 
   const watchdog = createWatchdog({ source, target: runtime });
+  const syncConfig = createSyncConfigGateway({ settings: opts.settings, tokens, sync });
 
-  return { runtime, watchdog, source, machineId, policy };
+  return { runtime, watchdog, source, machineId, policy, sync, syncConfig };
 }
 
 export function policyFromSettings(settings: SettingsStore): Policy {

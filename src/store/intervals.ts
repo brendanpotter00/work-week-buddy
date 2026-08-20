@@ -156,6 +156,21 @@ export function countIntervals(db: DatabaseSync): number {
 }
 
 /**
+ * How many rows are still in the outbox.
+ *
+ * `pendingRows(db).length` is NOT this number — it pages at 200, so a machine
+ * three weeks offline would report "200 pending" forever and the doctor would
+ * be quietly wrong about the one figure it exists to be right about. Served by
+ * the `ix_pending` partial index.
+ */
+export function pendingCount(db: DatabaseSync): number {
+  const row = db
+    .prepare(`SELECT COUNT(*) AS c FROM work_interval WHERE synced_at_ms IS NULL`)
+    .get();
+  return n(row as Row, "c");
+}
+
+/**
  * Called ONLY after an HTTP 200, and keyed on the ids the server reports
  * PRESENT — never on what the INSERT claimed to affect. A response lost after
  * the server committed replays into the same presence answer next time.
