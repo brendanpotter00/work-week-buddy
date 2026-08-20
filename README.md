@@ -100,6 +100,20 @@ npm run doctor              # one line per invariant; non-zero exit if any is re
 npm run launch-agent status # is launch-at-login actually loaded?
 ```
 
+## Looking at it
+
+```bash
+npm run smoke                          # launches the app, opens both windows, measures them
+WWB_SMOKE_DIR=/tmp/wwb npm run smoke   # …and leaves screenshots + a JSON report there
+```
+
+The unit tests mount components in a jsdom that has no window, no size and no
+URL, so they cannot see a window that is the wrong size or showing the wrong
+view. This does: it opens the dashboard and the onboarding windows for real and
+fails if either renders the wrong view, if either one's content is wider than
+its viewport, or if the fixed 560 × 640 onboarding window cannot hold its own
+contents. It runs in CI's macOS job. `docs/IMPL_UI.md` §7.3 has the full list.
+
 ## Before anything is built
 
 Run the M0 spike on the machine you intend to track:
