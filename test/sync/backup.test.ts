@@ -23,12 +23,12 @@ import {
 } from "../../src/sync/backup";
 import { restoreNdjsonGz, readNdjsonGz } from "../../src/sync/restore";
 import { createWorkerClient } from "../../src/sync/client";
-import { createFlusher } from "../../src/sync/flush";
 import { openDb } from "../../src/store/db";
 import { countIntervals, insertClosed, pendingRows } from "../../src/store/intervals";
 import { setSyncState } from "../../src/store/sync-state";
 import { makeRow, openTestDb, t } from "../fakes/seed-db";
 import { BASE_URL, FakeCloud, TOKEN_PERSONAL } from "./fake-cloud";
+import { testFlusher } from "./flusher";
 
 const NOW = t("2026-08-19T12:00:00Z"); // a Wednesday
 const dirs: string[] = [];
@@ -224,7 +224,7 @@ describe("restoring the NDJSON", () => {
     expect(pendingRows(restored)).toHaveLength(3);
 
     const cloud = new FakeCloud();
-    await createFlusher({
+    await testFlusher({
       db: restored,
       client: createWorkerClient({
         baseUrl: BASE_URL,
@@ -295,7 +295,7 @@ describe("the 72-hour silence alarm", () => {
     setSyncState(db, "last_cloud_write_ms", String(NOW - 4 * 24 * 3_600_000));
     expect(checkSilence(db, NOW).alarm).toBe(true);
 
-    await createFlusher({
+    await testFlusher({
       db,
       client: createWorkerClient({
         baseUrl: BASE_URL,
@@ -336,7 +336,7 @@ describe("the weekly job", () => {
     const dir = tmp();
     const cloud = new FakeCloud();
     const db = seeded(3);
-    await createFlusher({ db, client: client(cloud) }).flush();
+    await testFlusher({ db, client: client(cloud) }).flush();
 
     const res = await weeklyMaintenance(db, client(cloud), { nowMs: NOW, dir, tz: "UTC" });
 
@@ -389,7 +389,7 @@ describe("the weekly job", () => {
     const dir = tmp();
     const cloud = new FakeCloud();
     const db = seeded(2);
-    await createFlusher({ db, client: client(cloud) }).flush();
+    await testFlusher({ db, client: client(cloud) }).flush();
     cloud.wipe();
 
     const seen: string[] = [];

@@ -36,6 +36,9 @@ export const BACKOFF_CAP_MS = 900_000;
 /** ±20%: the delay lands in [0.8, 1.2] × the step. */
 export const BACKOFF_JITTER = 0.2;
 
+/** The `error` a stopped flusher reports instead of touching the database. */
+export const STOPPED = "flusher stopped";
+
 /** The full ladder, for the test that pins it and for the doctor CLI. */
 export const BACKOFF_LADDER_MS: readonly number[] = [
   30_000, 60_000, 120_000, 240_000, 480_000, 900_000,
@@ -95,6 +98,18 @@ export interface Flusher {
   hasPending(): boolean;
   /** Disarm on quit. Idempotent. */
   cancel(): void;
+  /**
+   * Disarm, refuse all further work, and WAIT for the drain already running.
+   * Idempotent. The only safe thing to call before the database is closed.
+   *
+   * `cancel()` is not enough, and the difference matters. A drain that is past
+   * its first `await` still reads rows and writes `synced_at_ms`; and the
+   * backoff retry is launched as `void flush()` from a timer, so there is no
+   * promise for anyone to hold. Whoever closes the database — ⌘Q, a test's
+   * teardown — needs to be able to say "and nothing of yours is still
+   * running". That sentence is this method.
+   */
+  stop(): Promise<void>;
 }
 
 function defaultSchedule(fn: () => void, delayMs: number): TimerHandle {
@@ -125,6 +140,7 @@ export function createFlusher(deps: FlusherDeps): Flusher {
   let timer: TimerHandle | null = null;
   let armedDelay: number | null = null;
   let backoff = 0;
+  let stopped = false;
 
   const emit = (event: FlushEvent): void => onEvent?.(event);
 
@@ -222,11 +238,35 @@ export function createFlusher(deps: FlusherDeps): Flusher {
   }
 
   function flush(): Promise<FlushResult> {
+    if (stopped) {
+      // A refusal, not a throw. The retry path is `void flush()` from a timer,
+      // and a rejection nobody holds becomes an unhandled rejection at the
+      // worst possible moment — while the app is quitting. A result carrying
+      // the reason says the same thing without taking the process with it.
+      return Promise.resolve({
+        attempted: 0,
+        confirmed: 0,
+        drained: false,
+        error: STOPPED,
+      });
+    }
     if (inFlight !== null) return inFlight;
     inFlight = drain().finally(() => {
       inFlight = null;
     });
     return inFlight;
+  }
+
+  async function stop(): Promise<void> {
+    stopped = true;
+    resetBackoff();
+    // `flush()` refuses from here on, so nothing can replace what is running:
+    // this loop runs at most twice and cannot spin.
+    while (inFlight !== null) {
+      // Whether that drain succeeded is the business of whoever called
+      // `flush()`. All this promises is that it is over.
+      await inFlight.catch(() => undefined);
+    }
   }
 
   return {
@@ -236,6 +276,7 @@ export function createFlusher(deps: FlusherDeps): Flusher {
     backoffMs: () => backoff,
     hasPending,
     cancel: resetBackoff,
+    stop,
   };
 }
 
