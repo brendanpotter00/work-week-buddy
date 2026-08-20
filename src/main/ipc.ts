@@ -25,6 +25,7 @@ import type {
   PushChannel,
   PushContract,
   SyncConfigState,
+  SyncTestResult,
   UiSettings,
 } from "../shared/ipc-types";
 import { normalizeMachineLabel } from "./device-name";
@@ -138,6 +139,14 @@ export interface IpcDeps {
   readonly closeOnboarding: () => void;
   readonly showDashboard: () => Promise<unknown> | unknown;
   /**
+   * Opens the settings window. Optional only so the launched-app smoke run —
+   * which registers these handlers itself and opens exactly two windows — does
+   * not have to know about a third. Absent, the channel THROWS rather than
+   * resolving: a button that silently does nothing is the failure mode this app
+   * is built against, and it is better for the renderer to say so.
+   */
+  readonly showSettings?: () => Promise<unknown> | unknown;
+  /**
    * Reads and writes the sync configuration. The URL goes to `settings.json`;
    * the token goes to `safeStorage` and NEVER comes back out over IPC.
    * Absent in tests that do not exercise it, and then the two config channels
@@ -146,6 +155,7 @@ export interface IpcDeps {
   readonly syncConfig?: {
     read(): SyncConfigState;
     write(patch: { workerUrl?: string; token?: string }): Promise<SyncConfigState>;
+    test(patch: { workerUrl?: string; token?: string }): Promise<SyncTestResult>;
   };
   /**
    * Renames this Mac: `settings.json`, the local `machine` row, and a best-effort
@@ -174,6 +184,82 @@ function uiSettingsOf(s: Readonly<MainSettings>): UiSettings {
     graceS: s.graceS,
     syncWorkerUrl: s.syncWorkerUrl,
   };
+}
+
+/** PRD §7: "15 minutes, adjustable 10–15 without touching history". */
+export const IDLE_TIMEOUT_MIN_RANGE = { min: 10, max: 15 } as const;
+
+/** Bundle ids only, trimmed, de-duplicated, blanks dropped, order preserved. */
+function cleanBundleIds(raw: unknown): string[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const out: string[] = [];
+  for (const v of raw) {
+    if (typeof v !== "string") continue;
+    const id = v.trim();
+    // A blank row is what an empty "add" field leaves behind, and stored it
+    // would match nothing forever while looking like a configured entry.
+    if (id === "" || out.includes(id)) continue;
+    out.push(id);
+  }
+  return out;
+}
+
+/**
+ * The renderer's patch, reduced to values that cannot produce a wrong number.
+ *
+ * Unknown keys are dropped rather than merged: `settings.json` is spread over
+ * the defaults on load, so anything that lands here lands in the file and comes
+ * back on every launch afterwards.
+ */
+export function sanitizeUiSettings(patch: Partial<UiSettings>): Partial<UiSettings> {
+  const out: Partial<UiSettings> = {};
+
+  if (patch.machineLabel !== undefined) {
+    // Only ever tightened, never invented: `null` (blank after trimming) simply
+    // does not reach the store, so a blank name cannot render as a blank row in
+    // the machine breakdown.
+    const label = normalizeMachineLabel(patch.machineLabel);
+    if (label !== null) out.machineLabel = label;
+  }
+
+  if (typeof patch.idleTimeoutMin === "number" && Number.isFinite(patch.idleTimeoutMin)) {
+    out.idleTimeoutMin = Math.min(
+      IDLE_TIMEOUT_MIN_RANGE.max,
+      Math.max(IDLE_TIMEOUT_MIN_RANGE.min, Math.round(patch.idleTimeoutMin)),
+    );
+  }
+
+  if (typeof patch.windowBackground === "string" && /^#[0-9a-fA-F]{6}$/.test(patch.windowBackground)) {
+    out.windowBackground = patch.windowBackground;
+  }
+
+  const meeting = cleanBundleIds(patch.meetingApps);
+  if (meeting !== undefined) out.meetingApps = meeting;
+  const micIgnore = cleanBundleIds(patch.micIgnoreApps);
+  if (micIgnore !== undefined) out.micIgnoreApps = micIgnore;
+
+  if (Array.isArray(patch.heatmapThresholdsH) && patch.heatmapThresholdsH.length === 3) {
+    const [a, b, c] = patch.heatmapThresholdsH.map((n) =>
+      typeof n === "number" && Number.isFinite(n) ? Math.round(n * 10) / 10 : NaN,
+    ) as [number, number, number];
+    // STRICTLY ASCENDING and above zero, or the ramp is rejected whole. A
+    // half-applied ramp renders a heatmap whose colours are not ordered, which
+    // reads as data rather than as a rejected edit.
+    if (a > 0 && b > a && c > b) out.heatmapThresholdsH = [a, b, c];
+  }
+
+  if (typeof patch.minIntervalS === "number" && Number.isFinite(patch.minIntervalS)) {
+    out.minIntervalS = Math.max(0, Math.round(patch.minIntervalS));
+  }
+  if (patch.countJigglerTime === 0 || patch.countJigglerTime === 1) {
+    out.countJigglerTime = patch.countJigglerTime;
+  }
+  if (typeof patch.graceS === "number" && Number.isFinite(patch.graceS)) {
+    out.graceS = Math.max(0, Math.round(patch.graceS));
+  }
+  if (typeof patch.syncWorkerUrl === "string") out.syncWorkerUrl = patch.syncWorkerUrl.trim();
+
+  return out;
 }
 
 export function registerIpcHandlers(runtime: AppRuntime, deps: IpcDeps): void {
@@ -230,6 +316,21 @@ export function registerIpcHandlers(runtime: AppRuntime, deps: IpcDeps): void {
     if (deps.syncConfig === undefined) return noSyncConfig();
     return await deps.syncConfig.write(patch);
   });
+  handle("wwb:sync:test", async (patch) => {
+    if (deps.syncConfig === undefined) {
+      return {
+        ok: false,
+        reachable: false,
+        authorized: false,
+        status: null,
+        ms: null,
+        error: "this build cannot store a sync configuration",
+      };
+    }
+    // Nothing is written here, on purpose: the whole value of the button is
+    // that a wrong answer costs nothing and leaves the stored config alone.
+    return await deps.syncConfig.test(patch);
+  });
 
   /**
    * Rename this Mac.
@@ -261,13 +362,36 @@ export function registerIpcHandlers(runtime: AppRuntime, deps: IpcDeps): void {
   });
 
   handle("wwb:settings:get", () => uiSettingsOf(deps.settings.all()));
+  /**
+   * Every value is SANITISED here rather than in the pane.
+   *
+   * The renderer is a view, and a view is exactly the wrong place to enforce an
+   * invariant: this channel is also reachable from a devtools console in dev,
+   * and `settings.json` is read back on the next launch with no validation at
+   * all (`SettingsStore.load()` spreads it over the defaults). An idle timeout
+   * of `NaN` would arm a timer that never fires, and thresholds out of order
+   * would render a heatmap whose colours mean nothing — both silent.
+   */
   handle("wwb:settings:set", async (patch) => {
-    await deps.settings.patch(patch);
+    const clean = sanitizeUiSettings(patch);
+    await deps.settings.patch(clean);
+    // A setting that needs a relaunch is a setting the owner has to be warned
+    // about. This one does not: the runtime re-arms from the last real signal
+    // and no stored `ended_at_ms` moves.
+    if (clean.idleTimeoutMin !== undefined) {
+      runtime.setIdleTimeoutMs(clean.idleTimeoutMin * 60_000);
+    }
     return uiSettingsOf(deps.settings.all());
   });
 
   handle("wwb:window:openDashboard", async () => {
     await deps.showDashboard();
+  });
+  handle("wwb:window:openSettings", async () => {
+    if (deps.showSettings === undefined) {
+      throw new Error("this build has no settings window");
+    }
+    await deps.showSettings();
   });
 
   // 30 s keepalive so a window created mid-change converges even if it missed

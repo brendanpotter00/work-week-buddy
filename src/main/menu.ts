@@ -7,7 +7,7 @@
  */
 import { Menu, app } from "electron";
 
-export function buildAppMenu(showDashboard: () => void): void {
+export function buildAppMenu(showDashboard: () => void, showSettings: () => void): void {
   Menu.setApplicationMenu(
     Menu.buildFromTemplate([
       {
@@ -16,6 +16,10 @@ export function buildAppMenu(showDashboard: () => void): void {
           { role: "about" },
           { type: "separator" },
           { label: "Open Dashboard", click: () => showDashboard() },
+          // ⌘, is where every Mac user looks first, and it costs one line. The
+          // tray item is still the one that matters — this menu only exists
+          // while a window is key, and the app is usually all tray.
+          { label: "Settings…", accelerator: "CommandOrControl+,", click: () => showSettings() },
           { type: "separator" },
           { role: "hide" },
           { role: "hideOthers" },

@@ -15,13 +15,13 @@ import type { App, PowerMonitor } from "electron";
 
 import { createSignalSource, type SignalSource } from "../native";
 import { DEFAULT_POLICY, defaultDbPath, openDb, type Policy } from "../store";
-import type { SyncConfigState } from "../shared/ipc-types";
+import type { SyncConfigState, SyncTestResult } from "../shared/ipc-types";
 import { log } from "./log";
 import { createMachineNaming, type MachineNaming } from "./device-name";
 import { createRuntime, type AppRuntime } from "./runtime";
 import { readPlatformUuid } from "./machine-id";
 import type { SettingsStore } from "./settings";
-import { createSyncService, resolveSyncConfig, type SyncService } from "./sync";
+import { createSyncService, probeSyncConfig, resolveSyncConfig, type SyncService } from "./sync";
 import { createTokenStore, type SecretVault, type TokenStore } from "./token";
 import type { TrayController } from "./tray";
 import { createWatchdog, type Watchdog } from "./watchdog";
@@ -171,6 +171,16 @@ export interface CoreServices {
 export interface SyncConfigGateway {
   read(): SyncConfigState;
   write(patch: { workerUrl?: string; token?: string }): Promise<SyncConfigState>;
+  /**
+   * Try a candidate configuration and store NOTHING.
+   *
+   * The whole point is that it runs before `write()`: a URL saved with a typo
+   * reads as "not configured" forever, and a token saved into the wrong Mac
+   * reads as a 401 that nobody sees because the flusher never surfaces one.
+   * Either half may be omitted, and then the stored half is used — which is the
+   * only way to re-test a token, since it cannot be read back to retype.
+   */
+  test(patch: { workerUrl?: string; token?: string }): Promise<SyncTestResult>;
 }
 
 /**
@@ -201,6 +211,18 @@ export function createSyncConfigGateway(deps: {
 
   return {
     read,
+
+    async test(patch) {
+      // A pasted token arrives with whatever whitespace the clipboard carried —
+      // a trailing newline out of a terminal is the usual one — and testing the
+      // untrimmed string would fail against a token that is about to be stored
+      // trimmed and work. `probeSyncConfig` trims both halves the same way
+      // `write()` does, so the test and the save agree on what was entered.
+      const workerUrl = patch.workerUrl ?? deps.settings.get("syncWorkerUrl");
+      const token = patch.token ?? deps.tokens.read();
+      return await probeSyncConfig(workerUrl, token);
+    },
+
     async write(patch) {
       if (patch.workerUrl !== undefined) {
         await deps.settings.set("syncWorkerUrl", patch.workerUrl.trim());
@@ -306,6 +328,14 @@ export async function createCoreServices(opts: {
     dbPath,
     config: { idleTimeoutMs: opts.settings.get("idleTimeoutMin") * 60_000 },
     sync,
+    // The self-test's answer outlives the process that ran it, so the settings
+    // pane can say WHEN it last passed rather than only that it can be run.
+    selfTestStore: {
+      read: () => opts.settings.get("lastSelfTest"),
+      write: async (result) => {
+        await opts.settings.set("lastSelfTest", result);
+      },
+    },
   });
   emitChange = (kind) => {
     runtime.notifySync(kind);

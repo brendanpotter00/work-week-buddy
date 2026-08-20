@@ -112,6 +112,18 @@ export interface AppRuntime {
   doctor(): Promise<DoctorReport>;
   selfTest(): Promise<SelfTestResult>;
 
+  /**
+   * Change the idle timeout without a relaunch — PRD §7 makes it a setting, and
+   * a setting that needs a restart to take effect is one the owner has to be
+   * told about, which is a worse screen than this method is a method.
+   *
+   * It does NOT close anything and it cannot move a stored `ended_at_ms`: the
+   * reducer still closes at `lastRealSignalMs`, whatever the timeout is. All
+   * that changes is WHEN the countdown notices, which is why shortening it
+   * re-arms immediately rather than waiting out the old deadline.
+   */
+  setIdleTimeoutMs(ms: number): void;
+
   onSuspend(atMs: number): Promise<void>;
   onResume(atMs: number, suspendedAtMs: number | null): Promise<void>;
   onScreenLock(atMs: number): void;
@@ -189,6 +201,18 @@ export interface RuntimeOptions {
    * rather than invent a meeting.
    */
   readonly isMeetingAppRunning?: () => boolean;
+  /**
+   * Where the last self-test result is kept between launches.
+   *
+   * Injected rather than reached for, for the same reason the sync seam is:
+   * this file must not know that `settings.json` exists. Omitted, the self-test
+   * still runs and still answers — the doctor simply reports `selfTest: null`,
+   * which is what it did before anything stored one.
+   */
+  readonly selfTestStore?: {
+    read(): SelfTestResult | null;
+    write(result: SelfTestResult): void | Promise<void>;
+  };
 }
 
 const KEY_BITS = (1 << 10) | (1 << 11);
@@ -204,7 +228,13 @@ class Runtime implements AppRuntime {
 
   private state: TrackerState = initialState;
   private levels: LevelState = initialLevels;
-  private readonly cfg: Config;
+  /**
+   * Not `readonly`: `setIdleTimeoutMs()` replaces it wholesale. The `Config`
+   * OBJECT stays immutable — every field on it is `readonly` and `reduce()`
+   * receives one value per call — so no in-flight reduction can see a knob
+   * change underneath it.
+   */
+  private cfg: Config;
   private readonly deadline: Deadline;
 
   private cameraInUse = false;
@@ -784,12 +814,30 @@ class Runtime implements AppRuntime {
 
   async selfTest(): Promise<SelfTestResult> {
     const report = await this.o.source.selfTest();
-    return {
+    const result: SelfTestResult = {
       ranAtMs: this.now(),
       passed: report.ok,
       appVersion: this.o.appVersion,
       checks: report.checks.map((c) => ({ id: c.name, passed: c.ok, detail: c.detail })),
     };
+    // Recorded PASS OR FAIL. A store that only kept the good runs would let a
+    // green date from last month outlive the failure that replaced it, which is
+    // precisely the "plausible-looking wrong data with no error" this project
+    // is built against.
+    await this.o.selfTestStore?.write(result);
+    return result;
+  }
+
+  setIdleTimeoutMs(ms: number): void {
+    if (!Number.isFinite(ms) || ms <= 0 || ms === this.cfg.idleTimeoutMs) return;
+    this.cfg = { ...this.cfg, idleTimeoutMs: ms };
+    const open = this.state.open;
+    if (open === null) return;
+    // The armed timer was computed under the old value. Re-arm from the last
+    // real signal so a SHORTENED timeout takes effect now instead of at the old
+    // deadline; `arm()` is lazy, so a lengthened one keeps the earlier timer and
+    // the reducer re-arms when it fires and finds the interval is not yet due.
+    this.deadline.arm(open.lastRealSignalMs + ms);
   }
 
   tapHealth(): TapHealth {
@@ -852,7 +900,10 @@ class Runtime implements AppRuntime {
       sync: sync.sync,
       fingerprint: sync.fingerprint,
       backup: sync.backup,
-      selfTest: null,
+      // The LAST run, not a fresh one: `doctor()` is read on demand and the
+      // self-test posts synthetic events, which would make simply looking at
+      // the report change what the report is about.
+      selfTest: this.o.selfTestStore?.read() ?? null,
       db: {
         path: this.o.dbPath ?? ":memory:",
         sizeBytes: 0,

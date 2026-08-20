@@ -28,6 +28,15 @@ export const APP_NAME = "Work Week Buddy";
 export const ROUTE = {
   dashboard: "/",
   onboarding: "/onboarding",
+  /**
+   * Settings is a THIRD WINDOW rather than a panel on the dashboard, for the
+   * same reason onboarding is: the tray is where this app lives, and a tray
+   * item that has to open the 1100-px dashboard first to reach a text field is
+   * a tray item nobody uses. It is also the only shape in which "reachable from
+   * both the dashboard and the tray" needs no extra state — both callers just
+   * load this hash.
+   */
+  settings: "/settings",
 } as const;
 
 /**
@@ -48,6 +57,13 @@ export const ROUTE = {
 export const WINDOW_SIZE = {
   dashboard: { width: 1100, height: 860, minWidth: 880, minHeight: 620 },
   onboarding: { width: 560, height: 640 },
+  /**
+   * Settings is RESIZABLE, unlike onboarding. It holds two editable lists whose
+   * length is the user's business, so a fixed box would be a promise this
+   * window cannot keep — and `minHeight` is what stops it being dragged down to
+   * a size where the sync form is unreachable.
+   */
+  settings: { width: 680, height: 820, minWidth: 560, minHeight: 520 },
 } as const;
 
 /** Initial values for the settings rows. All are user-changeable later. */

@@ -38,6 +38,7 @@ import type { DatabaseSync } from "node:sqlite";
 import {
   ICLOUD_RELATIVE,
   backupDir as defaultBackupDir,
+  HttpError,
   checkSilence,
   createFlusher,
   createWorkerClient,
@@ -53,7 +54,7 @@ import {
 } from "../sync";
 import { pendingCount } from "../store";
 import { getSyncState, upsertMachine } from "../store/sync-state";
-import type { FlushResult } from "../shared/ipc-types";
+import type { FlushResult, SyncTestResult } from "../shared/ipc-types";
 import { log } from "./log";
 import {
   NOT_CONFIGURED,
@@ -97,6 +98,110 @@ export function resolveSyncConfig(workerUrl: string, token: string | null): Conf
     return { config: null, error: `worker URL must be http(s), got ${parsed.protocol}` };
   }
   return { config: { baseUrl, token: secret }, error: null };
+}
+
+/**
+ * Try a configuration without storing it — the "Test connection" button.
+ *
+ * TWO REQUESTS, NOT ONE, and the order is the diagnosis:
+ *
+ *  1. `GET /health` is unauthenticated (`worker/src/routes.ts` says so out
+ *     loud). It answers "is this URL a deployed Worker this Mac can reach",
+ *     which on the work Mac is a question about the corporate proxy and not
+ *     about anything the owner typed.
+ *  2. `GET /machines` is authenticated and reads nothing bigger than a handful
+ *     of label rows. It is the only way to learn that the URL is perfect and
+ *     the TOKEN is wrong — a distinction the owner cannot make from a single
+ *     "it didn't work", and the most likely mistake of the two, because the
+ *     Worker mints one token per Mac and swapping them looks identical.
+ *
+ * `/fingerprint` would also have proved the token, and it hashes every row id
+ * in the database to do it. A button somebody presses while typing does not get
+ * to be that expensive.
+ *
+ * Never throws. Every failure is a value with a sentence in it, because the
+ * caller is a button and a rejected invoke renders as a stack trace.
+ */
+export async function probeSyncConfig(
+  workerUrl: string,
+  token: string | null,
+  opts: { fetchImpl?: typeof fetch; now?: () => number; timeoutMs?: number } = {},
+): Promise<SyncTestResult> {
+  const nowMs = opts.now ?? Date.now;
+  const started = nowMs();
+  const resolved = resolveSyncConfig(workerUrl, token);
+  if (resolved.config === null) {
+    return {
+      ok: false,
+      reachable: false,
+      authorized: false,
+      status: null,
+      ms: null,
+      error:
+        resolved.error ??
+        (workerUrl.trim() === ""
+          ? "enter the Worker URL first"
+          : "enter this Mac's token first"),
+    };
+  }
+
+  const client = createWorkerClient({
+    baseUrl: resolved.config.baseUrl,
+    token: resolved.config.token,
+    ...(opts.fetchImpl ? { fetchImpl: opts.fetchImpl } : {}),
+    // Shorter than the flusher's 20 s: this one has a human waiting on it, and
+    // "still spinning" is a worse answer than "could not reach it".
+    timeoutMs: opts.timeoutMs ?? 8000,
+  });
+
+  try {
+    await client.health();
+  } catch (err) {
+    return {
+      ok: false,
+      reachable: false,
+      authorized: false,
+      status: err instanceof HttpError ? err.status : null,
+      ms: nowMs() - started,
+      error: reachErrorOf(err, resolved.config.baseUrl),
+    };
+  }
+
+  try {
+    await client.getMachines();
+  } catch (err) {
+    const status = err instanceof HttpError ? err.status : null;
+    return {
+      ok: false,
+      reachable: true,
+      authorized: false,
+      status,
+      ms: nowMs() - started,
+      error:
+        status === 401 || status === 403
+          ? "the Worker is reachable but rejected this token — each Mac gets its own, and swapping them fails exactly like this"
+          : `the Worker is reachable but the authenticated read failed: ${messageOf(err)}`,
+    };
+  }
+
+  return {
+    ok: true,
+    reachable: true,
+    authorized: true,
+    status: 200,
+    ms: nowMs() - started,
+    error: null,
+  };
+}
+
+function reachErrorOf(err: unknown, baseUrl: string): string {
+  if (err instanceof HttpError) {
+    return `${baseUrl}/health answered ${String(err.status)} — that host is reachable but it is not this Worker`;
+  }
+  // A DNS failure, a refused connection, a proxy and an 8-second abort all land
+  // here, and on the work Mac the proxy is the likely one. Say so: it is the
+  // reason `/health` is unauthenticated in the first place.
+  return `could not reach ${baseUrl} (${messageOf(err)}) — check the URL, and on a work Mac check whether the proxy allows workers.dev`;
 }
 
 export interface SyncServiceDeps {

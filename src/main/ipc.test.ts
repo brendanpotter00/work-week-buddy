@@ -297,6 +297,14 @@ describe("the sync configuration channels", () => {
             vaultAvailable: true,
           };
         },
+        test: async () => ({
+          ok: true,
+          reachable: true,
+          authorized: true,
+          status: 200,
+          ms: 12,
+          error: null,
+        }),
       },
     });
 

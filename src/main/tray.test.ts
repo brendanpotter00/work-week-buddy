@@ -35,6 +35,7 @@ function makeTray(over: Partial<TrayDeps> = {}): TrayController {
     settings: fakeSettings(),
     showDashboard: () => {},
     showOnboarding: () => {},
+    showSettings: () => {},
     openPrivacyPane: (which) => void fakeShell.openExternal(privacyPaneUrl(which)),
     showErrorBox: (title, content) => fakeDialog.showErrorBox(title, content),
     askJigglerPause: null,

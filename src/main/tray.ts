@@ -92,6 +92,15 @@ export interface TrayDeps {
   };
   readonly showDashboard: () => void;
   readonly showOnboarding: () => void;
+  /**
+   * REQUIRED, unlike most of what this app treats as optional.
+   *
+   * Sync is configured in that window and nowhere else, and the tray is where
+   * this app lives — an owner who has just deployed a Worker reaches for the
+   * menu bar, not for a dashboard he may never open. A default that opened the
+   * dashboard instead would be a menu item that lies about where it goes.
+   */
+  readonly showSettings: () => void;
   readonly openPrivacyPane: (which: PermissionKey) => void;
   readonly showErrorBox: (title: string, content: string) => void;
   readonly askJigglerPause: (() => Promise<MessageBoxAnswer>) | null;
@@ -343,6 +352,11 @@ export class TrayController {
       },
     });
     items.push({ label: "Doctor…", click: () => this.deps.showDashboard() });
+    // Sync is turned on HERE, from the menu bar, without opening the dashboard
+    // first. Until this item existed there was no way to enter a Worker URL at
+    // all in a packaged build — `devTools` is off there, so the console
+    // workaround was gone too.
+    items.push({ label: "Settings…", click: () => this.deps.showSettings() });
     items.push({ type: "separator" });
     items.push({ label: "Quit Work Week Buddy", role: "quit" });
 
