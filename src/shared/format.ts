@@ -80,6 +80,44 @@ export function creditedOpenMs(
   return Math.max(0, end - s.openedAtMs);
 }
 
+/**
+ * Wall-clock length of the open session, in ms — the LIVE STOPWATCH's number.
+ * `null` when no interval is open.
+ *
+ * This is deliberately NOT `creditedOpenMs()` and is never a substitute for it:
+ *
+ *  - `creditedOpenMs()` answers "how much of this interval will be written to
+ *    the database", which is why it ends at `lastSignalMs`. Every HOURS figure
+ *    — the tray title, "This week", "Today" — is built on it, and it is bound by
+ *    the rule that outranks everything (AGENTS.md).
+ *  - `liveSessionMs()` answers "how long has this session been open", which is
+ *    a wall clock and therefore moves once a second. It feeds DIGITS ON A
+ *    STOPWATCH and nothing else. It must never reach an hours number, a stored
+ *    row, or `ended_at_ms`.
+ *
+ * The one rule they share is the camera/mic cap. While `heldOpenBy` is non-null
+ * the interval is being held open by a level rather than by a person, and
+ * `heldUntilMs` is where that hold expires (PRD §3.4). A stopwatch that ran past
+ * it would count a forgotten Zoom call all night, which is precisely the number
+ * the cap exists to prevent.
+ */
+export function liveSessionMs(
+  s: Pick<LiveStatus, "openedAtMs" | "heldOpenBy" | "heldUntilMs">,
+  nowMs: number,
+): number | null {
+  if (s.openedAtMs === null) return null;
+  const end = s.heldOpenBy === null ? nowMs : Math.min(nowMs, s.heldUntilMs ?? nowMs);
+  return Math.max(0, end - s.openedAtMs);
+}
+
+/** True once a camera/mic hold has run out of rope and the clock has stopped. */
+export function isHoldCapped(
+  s: Pick<LiveStatus, "openedAtMs" | "heldOpenBy" | "heldUntilMs">,
+  nowMs: number,
+): boolean {
+  return s.openedAtMs !== null && s.heldOpenBy !== null && s.heldUntilMs !== null && nowMs >= s.heldUntilMs;
+}
+
 const round1 = (n: number): number => Math.round(n * 10) / 10;
 
 /**
@@ -97,13 +135,51 @@ export function hoursThisWeek(
   policy: Pick<MetricsPolicy, "countJigglerTime" | "minIntervalS">,
   nowMs: number,
 ): number | null {
-  const closed = status.closedHoursThisWeek;
-  const openMs = creditedOpenMs(status, nowMs);
-  const openCounts =
+  return closedPlusOpen(status.closedHoursThisWeek, status, policy, nowMs);
+}
+
+/**
+ * The same arithmetic for TODAY, so the stopwatch card and the tray menu can
+ * answer "and how much today?" without either of them inventing a number.
+ *
+ * `closedHoursToday` alone would disagree with "This week" — that one already
+ * includes the open interval — and two totals on the same screen that disagree
+ * about the last two hours is a support ticket.
+ */
+export function hoursToday(
+  status: LiveStatus,
+  policy: Pick<MetricsPolicy, "countJigglerTime" | "minIntervalS">,
+  nowMs: number,
+): number | null {
+  return closedPlusOpen(status.closedHoursToday, status, policy, nowMs);
+}
+
+/**
+ * Whether the open interval will survive `v_countable` — the same filters
+ * applied to the row that does not exist yet. Exported because the stopwatch
+ * has to SAY SO when the answer is no: digits racing ahead on time that is
+ * going to be thrown away are a lie, not a stopwatch.
+ */
+export function openIntervalCounts(
+  status: LiveStatus,
+  policy: Pick<MetricsPolicy, "countJigglerTime" | "minIntervalS">,
+  nowMs: number,
+): boolean {
+  return (
     status.state === "working" &&
-    openMs >= policy.minIntervalS * 1000 &&
-    (policy.countJigglerTime === 1 || !status.jigglerOnForOpenInterval);
-  const openH = openCounts ? openMs / 3_600_000 : 0;
+    creditedOpenMs(status, nowMs) >= policy.minIntervalS * 1000 &&
+    (policy.countJigglerTime === 1 || !status.jigglerOnForOpenInterval)
+  );
+}
+
+function closedPlusOpen(
+  closed: number | null,
+  status: LiveStatus,
+  policy: Pick<MetricsPolicy, "countJigglerTime" | "minIntervalS">,
+  nowMs: number,
+): number | null {
+  const openCounts = openIntervalCounts(status, policy, nowMs);
+  const openH = openCounts ? creditedOpenMs(status, nowMs) / 3_600_000 : 0;
   if (closed === null) return openCounts ? round1(openH) : null;
   return round1(closed + openH);
 }
@@ -122,6 +198,22 @@ export function formatDuration(ms: number): string {
   const h = Math.floor(total / 60);
   const m = total % 60;
   return h > 0 ? `${h}h ${m}m` : `${m}m`;
+}
+
+/**
+ * '0:00:07' · '0:12:34' · '2:41:09' — the live stopwatch, seconds included.
+ *
+ * `H:MM:SS` rather than `MM:SS` promoting to `H:MM:SS` at the hour: a headline
+ * number that gains a digit-group mid-session shifts everything beside it.
+ * Pair it with `tabular-nums`, or the glyph widths alone make it jitter.
+ *
+ * `formatDuration()` stays minute-resolution and stays where it is: an average
+ * interval length that flickered every second would be noise, not information.
+ */
+export function formatStopwatch(ms: number): string {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const p = (n: number): string => String(n).padStart(2, "0");
+  return `${Math.floor(total / 3600)}:${p(Math.floor((total % 3600) / 60))}:${p(total % 60)}`;
 }
 
 /** '12s' · '4m' · '2h'. The ONLY formatter allowed to be relative to now(). */
