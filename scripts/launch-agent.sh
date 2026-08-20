@@ -23,15 +23,16 @@ set -euo pipefail
 
 LABEL="com.bpotter.workweekbuddy"
 # Frozen. TCC grants bind to bundle id + designated requirement + on-disk path,
-# so this must be the same string here, in install.sh, and in the app.
+# so this must be the same string here, in install.sh, and in the app. The
+# override below exists so the flow can be tested into a scratch directory; a
+# real install passes none of these.
 APP_PATH="/Applications/Work Week Buddy.app"
-EXEC="${APP_PATH}/Contents/MacOS/Work Week Buddy"
 PLIST_DIR="${HOME}/Library/LaunchAgents"
-PLIST="${PLIST_DIR}/${LABEL}.plist"
 LOG_DIR="${HOME}/Library/Logs/WorkWeekBuddy"
 
 DRY_RUN=0
 FORCE=0
+DO_LAUNCHCTL=1
 CMD=""
 
 usage() {
@@ -46,6 +47,13 @@ usage: scripts/launch-agent.sh <render|install|stop|uninstall|status> [--dry-run
 
   --force     install even when the app is not at ${APP_PATH}
   --dry-run   print what would happen; change nothing
+
+Overrides, for tests only:
+
+  --app-path PATH   the bundle the plist points at
+  --plist-dir DIR   where the plist is written
+  --log-dir DIR     where the agent's stdout/stderr go
+  --no-launchctl    do everything except talk to launchd
 USAGE
 }
 
@@ -54,12 +62,20 @@ while [ $# -gt 0 ]; do
     render|install|stop|uninstall|status) CMD="$1"; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     --force) FORCE=1; shift ;;
+    --no-launchctl) DO_LAUNCHCTL=0; shift ;;
+    --app-path) APP_PATH="${2:?--app-path needs a path}"; shift 2 ;;
+    --plist-dir) PLIST_DIR="${2:?--plist-dir needs a path}"; shift 2 ;;
+    --log-dir) LOG_DIR="${2:?--log-dir needs a path}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) printf 'unknown argument: %s\n\n' "$1" >&2; usage >&2; exit 2 ;;
   esac
 done
 
 if [ -z "$CMD" ]; then usage >&2; exit 2; fi
+
+# Derived, so they follow the overrides above rather than the defaults.
+EXEC="${APP_PATH}/Contents/MacOS/Work Week Buddy"
+PLIST="${PLIST_DIR}/${LABEL}.plist"
 
 ok()   { printf "  \033[32m✓\033[0m  %s\n" "$1"; }
 warn() { printf "  \033[33m!\033[0m  %s\n" "$1"; }
@@ -68,6 +84,13 @@ info() { printf "     %s\n" "$1"; }
 
 run() {
   if [ "$DRY_RUN" = "1" ]; then printf "  + %s\n" "$*"; return 0; fi
+  # --no-launchctl gates ONLY the launchd calls, so a test still writes and
+  # lints a real plist — which is the half that has ever been wrong — while
+  # nothing is bootstrapped into the session running the test.
+  if [ "$DO_LAUNCHCTL" != "1" ] && [ "$1" = "launchctl" ]; then
+    printf "  ~ skipped (--no-launchctl): %s\n" "$*"
+    return 0
+  fi
   "$@"
 }
 
@@ -145,7 +168,7 @@ case "$CMD" in
     # means nothing was loaded), so it must not trip `set -e`.
     run launchctl bootout "${DOMAIN}/${LABEL}" 2>/dev/null || true
     run launchctl bootstrap "$DOMAIN" "$PLIST"
-    [ "$DRY_RUN" = "1" ] || ok "bootstrapped ${DOMAIN}/${LABEL}"
+    if [ "$DRY_RUN" != "1" ] && [ "$DO_LAUNCHCTL" = "1" ]; then ok "bootstrapped ${DOMAIN}/${LABEL}"; fi
     ;;
 
   stop)
@@ -153,7 +176,7 @@ case "$CMD" in
     # otherwise relaunch the app from a half-copied /Applications bundle the
     # instant the old process dies.
     run launchctl bootout "${DOMAIN}/${LABEL}" 2>/dev/null || true
-    [ "$DRY_RUN" = "1" ] || ok "booted out ${DOMAIN}/${LABEL} (if it was loaded)"
+    if [ "$DRY_RUN" != "1" ] && [ "$DO_LAUNCHCTL" = "1" ]; then ok "booted out ${DOMAIN}/${LABEL} (if it was loaded)"; fi
     ;;
 
   uninstall)
