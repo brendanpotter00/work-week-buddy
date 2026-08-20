@@ -348,10 +348,17 @@ describe("live status", () => {
 
     const { container } = renderApp(<App />);
 
-    await waitFor(() => expect(container.querySelector('[data-slot="ping"]')).not.toBeNull());
+    // ONE pulsing dot, and it is the stopwatch's. The status strip used to
+    // carry a second one six pixels below it, driven by a three-state
+    // `status.state` rather than by the seven-state machine in
+    // `shared/stopwatch.ts`. See "one live state, not two" below.
+    await waitFor(() =>
+      expect(container.querySelector('[data-slot="stopwatch-ping"]')).not.toBeNull(),
+    );
     // lastSignalMs − openedAtMs = 2h 41m. NOT nowMs − openedAtMs, which would
     // be 2h 41m plus however long the countdown has been running. AGENTS.md,
     // the rule that outranks everything.
+    expect(container.querySelector('[data-slot="credited-open"]')?.textContent).toBe("2h 41m");
     expect(container.textContent).toContain("2h 41m");
     expect(container.textContent).toContain("12s");
     vi.restoreAllMocks();
@@ -365,7 +372,49 @@ describe("live status", () => {
 
     const { container } = renderApp(<App />);
     await waitFor(() => expect(container.textContent).toContain("Idle"));
-    expect(container.querySelector('[data-slot="ping"]')).toBeNull();
+    expect(container.querySelector('[data-slot="stopwatch-ping"]')).toBeNull();
+    // Nothing else on the page may grow one either.
+    expect(container.querySelectorAll(".animate-ping")).toHaveLength(0);
+  });
+
+  it("says the live state ONCE, and says it with the richer state machine", async () => {
+    // The stopwatch and the older status strip each rendered a pulsing dot and
+    // the word "Working", one above the other, and they could disagree: the
+    // strip read `status.state` and knew three states, while the stopwatch runs
+    // `stopwatchView()` and distinguishes running from held, capped, uncounted,
+    // degraded, paused and idle. Two answers to one question, and the shallower
+    // one had equal billing.
+    const bridge = makeBridge(defaultHandlers(metricsBundle(), liveStatus()));
+    installBridge(bridge);
+
+    const { container } = renderApp(<App />);
+    await waitFor(() =>
+      expect(container.querySelector('[data-slot="stopwatch-label"]')?.textContent).toBe("Working"),
+    );
+
+    const occurrences = (container.textContent ?? "").match(/Working/g) ?? [];
+    expect(occurrences).toHaveLength(1);
+    expect(container.querySelectorAll(".animate-ping")).toHaveLength(1);
+  });
+
+  it("keeps the richer state when the shallower one would have said 'Working'", async () => {
+    // `status.state` is "working" here — the strip would have said so. The
+    // stopwatch knows the jiggler is on and that this time will not be counted,
+    // which is the whole reason it is the survivor.
+    const bridge = makeBridge(
+      defaultHandlers(metricsBundle(), liveStatus({ jigglerOnForOpenInterval: true })),
+    );
+    installBridge(bridge);
+
+    const { container } = renderApp(<App />);
+    await waitFor(() =>
+      expect(container.querySelector('[data-slot="stopwatch-label"]')?.textContent).toBe(
+        "Not counted",
+      ),
+    );
+    expect(container.textContent).not.toContain("Working");
+    // …and no confident pulse over a number that is being discarded on purpose.
+    expect(container.querySelectorAll(".animate-ping")).toHaveLength(0);
   });
 
   it("shows a degraded permission as words, and marks the number it spoils", async () => {

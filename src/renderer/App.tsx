@@ -30,7 +30,15 @@ import * as React from "react";
 import { ActivityCalendar } from "react-activity-calendar";
 import "react-activity-calendar/tooltips.css";
 import { Bar, BarChart, CartesianGrid, XAxis } from "recharts";
-import { Coffee, Laptop, Monitor, Moon, MousePointer2, Sun } from "lucide-react";
+import {
+  Coffee,
+  Laptop,
+  Monitor,
+  Moon,
+  MousePointer2,
+  Settings as SettingsIcon,
+  Sun,
+} from "lucide-react";
 
 import { AlertBanner } from "@/renderer/components/alert-banner";
 import { DeviceName } from "@/renderer/components/device-name";
@@ -53,7 +61,14 @@ import { Separator } from "@/renderer/components/ui/separator";
 import { Switch } from "@/renderer/components/ui/switch";
 import { formatLocalDate, formatMonthYear } from "@/renderer/lib/format-date";
 import { useTheme } from "@/renderer/lib/theme-provider";
-import { useAppInfo, useLiveStatus, useMetrics, useNowMs, useToggles } from "@/renderer/lib/ipc";
+import {
+  ipc,
+  useAppInfo,
+  useLiveStatus,
+  useMetrics,
+  useNowMs,
+  useToggles,
+} from "@/renderer/lib/ipc";
 import { useResolvedTheme } from "@/renderer/lib/use-resolved-theme";
 import { useThemeMirror } from "@/renderer/lib/use-theme-mirror";
 import { DEFAULT_METRICS_POLICY, type DegradedReason } from "@/shared/ipc-types";
@@ -149,8 +164,6 @@ function ThemeToggle(): React.ReactElement {
   );
 }
 
-const STATE_LABEL = { working: "Working", idle: "Idle", paused: "Paused" } as const;
-
 export function App(): React.ReactElement {
   useThemeMirror();
 
@@ -167,7 +180,6 @@ export function App(): React.ReactElement {
   // Armed only while an interval is open. §5.7.
   const nowMs = useNowMs(status?.state === "working");
 
-  const working = status?.state === "working";
   const openMs = status ? creditedOpenMs(status, nowMs) : 0;
   const degraded = status?.degraded ?? [];
   const keyboardBroken = degraded.includes("keyboard_permission_missing");
@@ -199,6 +211,19 @@ export function App(): React.ReactElement {
             <p className="mt-1 text-sm text-muted-foreground">{formatHeaderDate(nowMs)}</p>
           </div>
           <div className="flex items-center gap-1 [-webkit-app-region:no-drag]">
+            {/* Settings is its own WINDOW, so this asks main to open it rather
+                than navigating away and taking the dashboard with it. The tray
+                has the same item — the two are the only routes in, and until
+                they existed sync could not be configured at all. */}
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              aria-label="Settings"
+              title="Settings"
+              onClick={() => void ipc.openSettings().catch(() => undefined)}
+            >
+              <SettingsIcon />
+            </Button>
             <ThemeToggle />
           </div>
         </header>
@@ -231,32 +256,35 @@ export function App(): React.ReactElement {
           nowMs={nowMs}
         />
 
-        {/* Live status strip */}
+        {/* Context strip — machine, signal, toggles.
+            IT NO LONGER SAYS WHAT STATE YOU ARE IN. It used to carry its own
+            pulsing dot and its own "Working", six pixels under the stopwatch's,
+            so the word appeared twice on one screen and the two could disagree:
+            this one read `status.state` and knew three states, while the
+            stopwatch runs the seven-state machine in `shared/stopwatch.ts` and
+            knows that a capped camera hold, a jiggled session and a broken tap
+            are not the same "Working". The richer one won; this row keeps what
+            it was the only source of.
+            The elapsed figure stays, and stays LABELLED: it is
+            `creditedOpenMs()` — what the close rule will actually write, ending
+            at the last real signal — while the stopwatch's digits are a wall
+            clock. They are allowed to differ by up to the idle timeout, and
+            naming this one is what stops that reading as a bug. */}
         <section className="mt-4 flex items-center gap-3 rounded-lg border border-border bg-card px-4 py-3">
-          <span className="relative flex size-2">
-            {/* A pulsing dot while idle is a lie. §5.6. */}
-            {working ? (
-              <span
-                data-slot="ping"
-                className="absolute inline-flex size-full animate-ping rounded-full bg-foreground/40"
-              />
-            ) : null}
-            <span
-              className={`relative inline-flex size-2 rounded-full ${
-                working ? "bg-foreground" : "bg-muted-foreground/40"
-              }`}
-            />
-          </span>
-          <span className="text-sm font-medium">
-            {status ? STATE_LABEL[status.state] : "Idle"}
-          </span>
-          <span className="font-mono text-sm text-muted-foreground tabular-nums">
-            {formatDuration(openMs)}
-          </span>
-          <Separator orientation="vertical" className="mx-1 !h-4" />
           <span className="flex items-center gap-1.5 text-sm text-muted-foreground">
             <Laptop className="size-3.5" />
             {status?.machineLabel || "this Mac"}
+          </span>
+          <Separator orientation="vertical" className="mx-1 !h-4" />
+          <span className="text-sm text-muted-foreground">
+            counted{" "}
+            <span
+              data-slot="credited-open"
+              className="font-mono tabular-nums"
+              title="This session, credited to your last real signal — what will be written when it closes."
+            >
+              {formatDuration(openMs)}
+            </span>
           </span>
           <Separator orientation="vertical" className="mx-1 !h-4" />
           <span className="text-sm text-muted-foreground">
