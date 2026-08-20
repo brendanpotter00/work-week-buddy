@@ -81,6 +81,17 @@ export default ts.config(
     },
   },
 
+  // ── The FOUC killer is a CLASSIC browser script served from public/, not a
+  //    module and not TypeScript (docs/IMPL_UI.md §5.5). It needs browser
+  //    globals and script scope, which nothing else in the repo does.
+  {
+    files: ["src/renderer/public/*.js"],
+    languageOptions: {
+      sourceType: "script",
+      globals: { ...globals.browser },
+    },
+  },
+
   {
     ignores: [
       "dist/**", "out/**", "release/**", "coverage/**", "node_modules/**",
@@ -92,6 +103,12 @@ export default ts.config(
       // what makes it confusing rather than merely noisy.
       ".claude/**",
       "src/renderer/components/ui/**",
+      // Verbatim vendor copies. design/README.md: "Copy verbatim. Do not
+      // rewrite." theme-provider carries a file-level disable for
+      // react-refresh/only-export-components, a plugin this config does not
+      // load — and ESLint errors on a disable comment naming an unknown rule.
+      // Linting a file we are forbidden to edit can only produce a standoff.
+      "src/renderer/lib/theme-provider.tsx",
     ],
   },
 );

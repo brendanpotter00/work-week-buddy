@@ -5,6 +5,15 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="light dark" />
     <title>Work Week Buddy</title>
+    <!--
+      Classic, synchronous, before anything paints — NOT type="module", which
+      would be deferred and run after the first frame. docs/IMPL_UI.md §5.5.
+
+      There is deliberately no CSP meta tag here: the policy is a response
+      header set once in src/main/protocol.ts, and two policies intersect
+      (§5.3). A test asserts this file does not grow one.
+    -->
+    <script src="./theme-boot.js"></script>
   </head>
   <body>
     <div id="root"></div>

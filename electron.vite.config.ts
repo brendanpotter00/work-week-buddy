@@ -1,5 +1,6 @@
 import { defineConfig, externalizeDepsPlugin } from "electron-vite";
 import react from "@vitejs/plugin-react";
+import tailwindcss from "@tailwindcss/vite";
 import { resolve } from "node:path";
 
 export default defineConfig({
@@ -28,7 +29,11 @@ export default defineConfig({
   },
   renderer: {
     root: "src/renderer",
-    plugins: [react()],
+    // Relative asset URLs. The renderer is served over app:// (protocol.ts),
+    // where an absolute "/assets/…" resolves only by luck of the host and
+    // breaks the moment the host changes. docs/IMPL_UI.md §5.2 fix 3.
+    base: "./",
+    plugins: [react(), tailwindcss()],
     resolve: { alias: { "@": resolve("src") } },
     build: { rollupOptions: { input: resolve("src/renderer/index.html") } },
   },

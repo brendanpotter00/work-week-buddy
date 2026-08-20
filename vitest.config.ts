@@ -16,7 +16,11 @@ export default defineConfig({
     // milliseconds, so this only ever rescues the pathological case.
     testTimeout: 30_000,
     hookTimeout: 30_000,
-    include: ["src/**/*.test.ts", "test/**/*.test.ts", "worker/**/*.test.ts"],
+    // .tsx is here for the dashboard's component tests. They opt into jsdom
+    // per file with a `@vitest-environment jsdom` docblock rather than
+    // switching the default: everything else in this repo is a node test and
+    // paying for a DOM in all 500+ of them would be a real cost.
+    include: ["src/**/*.test.{ts,tsx}", "test/**/*.test.{ts,tsx}", "worker/**/*.test.ts"],
     coverage: {
       provider: "v8",
       include: ["src/core/**", "src/store/**", "src/sync/**", "worker/src/**"],
