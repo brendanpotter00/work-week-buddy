@@ -1,5 +1,25 @@
 # The 24 tasks, expanded
 
+> ## ⚠︎ Where this file disagrees with `IMPL_CORE.md`, `IMPL_CORE.md` wins
+>
+> This document and `docs/IMPL_CORE.md` were written in parallel by authors who
+> could not see each other, and they drifted. The reducer was built from
+> `IMPL_CORE.md`, so **the committed code in `src/core/` is the authority** and
+> this file is the one that is wrong where they differ.
+>
+> Known divergences, all resolved in favour of the shipped code:
+>
+> | This file says | Reality |
+> |---|---|
+> | `levelHoldCapMs`, **4 h** | `cameraOnlyMaxMs`, **6 h** — see `DEFAULTS` in `src/shared/constants.ts` |
+> | `src/main/scheduler.ts`, a `DeadlineScheduler` class | `src/main/deadline.ts`, a `createDeadline()` factory |
+> | `lastRealInputMs`, `levelSinceMs` | `lastInputMs`, `cameraSinceMs` / `micSinceMs` |
+> | `reevaluate()` | the deadline recomputes on fire; there is no separate method |
+>
+> The task briefs below are still correct about *what each task delivers and how
+> it is proven*. Treat their code sketches as illustrative, and the committed
+> modules as normative — read the real exported signatures before calling them.
+
 `docs/TASKS.md` names the work. `docs/ROADMAP.md` names the gates. **This file says what to type.**
 
 Every task below is a self-contained brief: exact file paths, the interfaces to implement, one command that proves it, the tests by name, and which of `AGENTS.md`'s 13 silent failures can bite *this* task. An agent that reads its own brief plus the docs it references should never need to ask a question.
