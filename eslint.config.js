@@ -81,5 +81,17 @@ export default ts.config(
     },
   },
 
-  { ignores: ["dist/**", "out/**", "release/**", "node_modules/**", "design/**", "docs/**", "spike/**", "src/renderer/components/ui/**"] },
+  {
+    ignores: [
+      "dist/**", "out/**", "release/**", "coverage/**", "node_modules/**",
+      "design/**", "docs/**", "spike/**",
+      // Parallel agents get git worktrees under .claude/worktrees/, each a full
+      // checkout with its own build output. Without this, `npm run lint`
+      // silently lints four extra copies of the repo and reports ~1700 errors
+      // that have nothing to do with your change. CI never sees it, which is
+      // what makes it confusing rather than merely noisy.
+      ".claude/**",
+      "src/renderer/components/ui/**",
+    ],
+  },
 );

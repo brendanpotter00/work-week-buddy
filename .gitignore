@@ -13,3 +13,7 @@ local.db-*
 .wrangler/
 out/
 coverage/
+
+# Parallel agents get git worktrees here. Each is a full checkout; none belongs
+# in this repo's index. eslint ignores it too — see eslint.config.js.
+.claude/worktrees/
