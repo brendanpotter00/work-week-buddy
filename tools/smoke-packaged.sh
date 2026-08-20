@@ -32,16 +32,29 @@
 # --prove-it PROVES THIS RUNNER CAN SEE A FROZEN MAIN THREAD.
 #
 # A gate nobody has watched fail is a gate nobody should trust, and this one
-# cannot manufacture the real trigger: reproducing a TCC prompt means touching
-# the owner's iCloud Drive or ~/Documents, which is precisely what a test must
-# never do. So --prove-it reproduces the MECHANISM instead, deterministically
-# and inside the throwaway profile: it puts a FIFO where `weeklyBackup()` writes
-# its ndjson temp file, and `open(2)` on a FIFO with no reader blocks forever.
-# Same class, same thread, same result — a boot that never finishes and a
-# process that never writes result.json. With --prove-it the run is expected to
-# FAIL, and the runner exits 0 only if it did.
+# cannot manufacture either real trigger: reproducing them means a TCC prompt on
+# the owner's iCloud Drive or a Keychain prompt nobody can answer in CI. So
+# --prove-it reproduces the MECHANISM instead, deterministically and inside the
+# throwaway profile, with a FIFO: `open(2)` on a FIFO with no reader on the
+# other end blocks forever, which is exactly what a modal macOS prompt does to
+# the calling thread.
 #
-# Usage:  bash tools/smoke-packaged.sh [--no-build] [--prove-it]
+# WHERE the trap goes is the whole lesson of the second freeze. The first
+# version of this put it where `weeklyBackup()` writes — AFTER boot — so it
+# proved only that a post-boot freeze is visible. Both real bugs were ON THE
+# BOOT PATH, before any window existed, and this gate passed while the second
+# one was live. So the default trap is now the earliest main-thread file write
+# there is:
+#
+#   boot  (default)  the log file, written by the first log.boot() call inside
+#                    app.whenReady() — freezes before a single line is emitted,
+#                    which is precisely how both real failures looked
+#   sync             where weeklyBackup() writes, after the windows are up
+#
+# With --prove-it the run is EXPECTED TO FAIL, and the runner exits 0 only if
+# it did.
+#
+# Usage:  bash tools/smoke-packaged.sh [--no-build] [--prove-it[=boot|sync]]
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -49,10 +62,13 @@ REPO="$PWD"
 
 BUILD=1
 PROVE=0
+PROVE_WHERE=boot
 for arg in "$@"; do
   case "$arg" in
     --no-build) BUILD=0 ;;
     --prove-it) PROVE=1 ;;
+    --prove-it=boot) PROVE=1; PROVE_WHERE=boot ;;
+    --prove-it=sync) PROVE=1; PROVE_WHERE=sync ;;
     *) printf 'unknown argument: %s\n' "$arg" >&2; exit 2 ;;
   esac
 done
@@ -107,17 +123,24 @@ export WWB_ALLOW_FAKE_IN_PACKAGED=1
 export WWB_SMOKE_DIR="$OUT"
 
 if [ "$PROVE" = "1" ]; then
-  # `weeklyBackup()` writes <dir>/wwb-<ISO week>.ndjson.gz.tmp with
-  # writeFileSync. A FIFO there turns that into an open(2) that never returns —
-  # on the main thread, inside runCycle("launch"), exactly where the real freeze
-  # lived. Everything here is inside the throwaway profile.
-  WEEK="$(python3 -c '
+  if [ "$PROVE_WHERE" = "boot" ]; then
+    # <profile>/wwb.log is opened with appendFileSync by the first log.boot()
+    # inside app.whenReady(), before the database, before the tray, before any
+    # window. A FIFO there makes that open(2) never return, on the main thread,
+    # at the earliest point the app has one — the shape of both real freezes.
+    mkfifo "$LOG"
+    info "--prove-it: FIFO trap set at wwb.log (freezes inside app.whenReady)"
+  else
+    # Where weeklyBackup() writes: after the windows are up. Kept because a
+    # post-boot freeze is still a freeze, and the gate should see both.
+    WEEK="$(python3 -c '
 import datetime
 y, w, _ = datetime.date.today().isocalendar()
 print(f"{y:04d}-W{w:02d}")')"
-  mkdir -p "${PROFILE}/backups"
-  mkfifo "${PROFILE}/backups/wwb-${WEEK}.ndjson.gz.tmp"
-  info "--prove-it: FIFO trap set at backups/wwb-${WEEK}.ndjson.gz.tmp"
+    mkdir -p "${PROFILE}/backups"
+    mkfifo "${PROFILE}/backups/wwb-${WEEK}.ndjson.gz.tmp"
+    info "--prove-it: FIFO trap set at backups/wwb-${WEEK}.ndjson.gz.tmp"
+  fi
   info "--prove-it: this run is EXPECTED TO FAIL; exit 0 means the gate works"
 fi
 
@@ -132,7 +155,7 @@ DEADLINE=$((SECONDS + 180))
 while [ ! -f "$RESULT" ]; do
   if [ "$SECONDS" -ge "$DEADLINE" ]; then
     if [ "$PROVE" = "1" ]; then
-      ok "--prove-it: the runner caught a frozen main thread (no $RESULT)"
+      ok "--prove-it[$PROVE_WHERE]: the runner caught a frozen main thread (no $RESULT)"
       printf "\n\033[1mBoot log\033[0m — it ends at the step that hung:\n"
       [ -f "$LOG" ] && sed 's/^/    /' "$LOG"
       exit 0
@@ -176,7 +199,7 @@ PY
 fi
 
 if [ "$PROVE" = "1" ]; then
-  bad "--prove-it: the run FINISHED (exit $CODE) with the main thread trapped."
+  bad "--prove-it[$PROVE_WHERE]: the run FINISHED (exit $CODE) with the main thread trapped."
   info "This runner cannot see a frozen boot, which makes it worthless. Fix it."
   exit 1
 fi

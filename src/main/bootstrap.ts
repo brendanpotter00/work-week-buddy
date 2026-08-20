@@ -21,7 +21,13 @@ import { createMachineNaming, type MachineNaming } from "./device-name";
 import { createRuntime, type AppRuntime } from "./runtime";
 import { readPlatformUuid } from "./machine-id";
 import type { SettingsStore } from "./settings";
-import { createSyncService, probeSyncConfig, resolveSyncConfig, type SyncService } from "./sync";
+import {
+  createSyncService,
+  probeSyncConfig,
+  resolveSyncConfig,
+  type ConfigResult,
+  type SyncService,
+} from "./sync";
 import { createTokenStore, type SecretVault, type TokenStore } from "./token";
 import type { TrayController } from "./tray";
 import { createWatchdog, type Watchdog } from "./watchdog";
@@ -166,6 +172,28 @@ export interface CoreServices {
   syncConfig: SyncConfigGateway;
   /** Backs `wwb:machine:rename`, and owns this Mac's row in `machine`. */
   naming: MachineNaming;
+  /**
+   * READS THE KEYCHAIN, AND THEREFORE NEVER RUNS DURING BOOT.
+   *
+   * `safeStorage.decryptString()` is synchronous and can put a SecurityAgent
+   * dialog on screen — an app whose code identity has changed since the
+   * keychain item was written gets one on every launch, and an ad-hoc signed
+   * rebuild changes identity every time. macOS blocks the calling thread until
+   * that dialog is answered, so on the boot path it is a dead event loop: no
+   * window, no tray updates, no `second-instance`, no log line.
+   *
+   * `index.ts` calls this once the tray and the windows are already up. Then
+   * the prompt arrives with a running app behind it, which is a question the
+   * owner can answer instead of a hang he cannot diagnose.
+   */
+  unlockSync(): Promise<SyncUnlockResult>;
+}
+
+export interface SyncUnlockResult {
+  /** How long the keychain took. Large means a human answered a dialog. */
+  tookMs: number;
+  configured: boolean;
+  error: string | null;
 }
 
 export interface SyncConfigGateway {
@@ -272,7 +300,9 @@ export async function createCoreServices(opts: {
 }): Promise<CoreServices> {
   const dbPath = defaultDbPath(opts.userDataDir);
   const policy = policyFromSettings(opts.settings);
+  log.boot(`opening the database at ${dbPath}`);
   const db = openDb(dbPath, policy);
+  log.boot("database open");
 
   let machineId = opts.settings.get("machineId");
   const platformUuid = readPlatformUuid();
@@ -288,10 +318,12 @@ export async function createCoreServices(opts: {
     log.warn("IOPlatformUUID unavailable — using a persisted random machine id");
   }
 
+  log.boot("creating the signal source (loads koffi and the system frameworks)");
   const source = await createSignalSource({
     isPackaged: opts.isPackaged,
     ...(opts.isSmokeRun === undefined ? {} : { isSmokeRun: opts.isSmokeRun }),
   });
+  log.boot("signal source ready");
   const tz = opts.tz ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
 
   // ── The sync layer, wired in ────────────────────────────────────────────
@@ -299,7 +331,12 @@ export async function createCoreServices(opts: {
   // built unconditionally: an unconfigured service is a real object that
   // answers honestly, not a null that every call site has to remember.
   const tokens = createTokenStore(() => opts.userDataDir, opts.vault ?? null);
-  const resolved = resolveSyncConfig(opts.settings.get("syncWorkerUrl"), tokens.read());
+  // NOT `tokens.read()`. That call reaches the macOS Keychain, and the Keychain
+  // answers a mismatched code identity with a modal dialog while holding the
+  // calling thread. It hung the shipped app before a single window existed.
+  // The service starts unconfigured — which is a state it already models
+  // honestly — and `unlockSync()` below reconfigures it after the app is up.
+  const resolved: ConfigResult = { config: null, error: null };
   let emitChange: (kind: "sync" | "rows-pulled") => void = () => undefined;
   // A thunk, not a string: a rename mid-session has to reach the next heartbeat.
   const currentLabel = (): string => opts.settings.get("machineLabel");
@@ -332,7 +369,9 @@ export async function createCoreServices(opts: {
       await sync.heartbeatNow();
     },
   });
+  log.boot("settling this Mac's name");
   await naming.init();
+  log.boot("machine row written");
 
   const runtime = createRuntime({
     db,
@@ -361,7 +400,33 @@ export async function createCoreServices(opts: {
   const watchdog = createWatchdog({ source, target: runtime });
   const syncConfig = createSyncConfigGateway({ settings: opts.settings, tokens, sync });
 
-  return { runtime, watchdog, source, machineId, policy, sync, syncConfig, naming };
+  /** The keychain read, moved off the boot path. See `CoreServices.unlockSync`. */
+  const unlockSync = async (): Promise<SyncUnlockResult> => {
+    const startedMs = Date.now();
+    let token: string | null = null;
+    // NEVER ASK THE KEYCHAIN A QUESTION WHOSE ANSWER CANNOT MATTER.
+    //
+    // `resolveSyncConfig` returns "not configured" for an empty worker URL
+    // whatever the token is, so on an install that has not turned sync on —
+    // which is how the app ships and how most launches run — reading the token
+    // buys nothing and risks a modal Keychain prompt on the main thread. The
+    // cheapest way not to be blocked by a call is not to make it.
+    const workerUrl = opts.settings.get("syncWorkerUrl").trim();
+    try {
+      if (workerUrl !== "") token = tokens.read();
+    } catch (err) {
+      // `read()` already swallows the ordinary failures; this is the last resort
+      // so that a keychain that behaves in a way nobody predicted costs the
+      // sync layer and nothing else.
+      log.error("reading the sync token failed", err);
+    }
+    const tookMs = Date.now() - startedMs;
+    const next = resolveSyncConfig(workerUrl, token);
+    await sync.reconfigure(next.config, next.error);
+    return { tookMs, configured: next.config !== null, error: next.error };
+  };
+
+  return { runtime, watchdog, source, machineId, policy, sync, syncConfig, naming, unlockSync };
 }
 
 export function policyFromSettings(settings: SettingsStore): Policy {
