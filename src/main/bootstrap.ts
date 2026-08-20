@@ -254,6 +254,13 @@ export async function createCoreServices(opts: {
    * `shouldUseFake` in `src/native/index.ts`.
    */
   isSmokeRun?: boolean;
+  /**
+   * Where the weekly export goes. Production leaves it undefined and takes the
+   * iCloud-or-Documents answer; the smoke run points it inside its own
+   * throwaway profile, because the one thing a test may not do is write to the
+   * owner's iCloud Drive.
+   */
+  backupDir?: string;
   tz?: string;
   /**
    * Electron's `safeStorage`. Null on a system without one — and then no token
@@ -298,6 +305,7 @@ export async function createCoreServices(opts: {
   const currentLabel = (): string => opts.settings.get("machineLabel");
   const sync = createSyncService({
     db,
+    ...(opts.backupDir === undefined ? {} : { backupDir: opts.backupDir }),
     config: resolved.config,
     configError: resolved.error,
     machineId,

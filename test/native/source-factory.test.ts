@@ -1,5 +1,10 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { createSignalSource, shouldUseFake, FakeSignalSource } from "@/native";
+import {
+  PACKAGED_FAKE_ENV,
+  createSignalSource,
+  shouldUseFake,
+  FakeSignalSource,
+} from "@/native";
 
 afterEach(() => {
   vi.unstubAllEnvs();
@@ -25,6 +30,34 @@ describe("createSignalSource", () => {
     // shipped tracker into a no-op.
     expect(shouldUseFake({ isPackaged: true }, { WWB_FAKE_NATIVE: "1" })).toBe(false);
     expect(shouldUseFake({ isPackaged: true }, { NODE_ENV: "test" })).toBe(false);
+  });
+
+  it("still refuses a packaged build that is not a smoke run", () => {
+    // Both variables present is not enough. The process also has to have been
+    // started with --smoke, which mints a throwaway profile before whenReady().
+    expect(
+      shouldUseFake(
+        { isPackaged: true },
+        { WWB_FAKE_NATIVE: "1", [PACKAGED_FAKE_ENV]: "1" },
+      ),
+    ).toBe(false);
+  });
+
+  it("still refuses a packaged smoke run without the second variable", () => {
+    expect(
+      shouldUseFake({ isPackaged: true, isSmokeRun: true }, { WWB_FAKE_NATIVE: "1" }),
+    ).toBe(false);
+  });
+
+  it("lets a PACKAGED SMOKE RUN take the fake when all three signals line up", () => {
+    // The one door, and the reason it exists: a packaged build no test could
+    // start is how an app with no windows reached the owner. src/main/smoke.ts.
+    expect(
+      shouldUseFake(
+        { isPackaged: true, isSmokeRun: true },
+        { WWB_FAKE_NATIVE: "1", [PACKAGED_FAKE_ENV]: "1" },
+      ),
+    ).toBe(true);
   });
 
   it("gives an ordinary unpackaged run the real source", () => {

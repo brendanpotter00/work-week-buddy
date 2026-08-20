@@ -295,6 +295,9 @@ export async function runSmoke(): Promise<number> {
     appVersion: app.getVersion(),
     isPackaged: app.isPackaged,
     isSmokeRun: true,
+    // Inside the throwaway profile. `runCycle("launch")` below runs the real
+    // weekly export, and the owner's iCloud Drive is not a test fixture.
+    backupDir: join(userDataDir, "backups"),
     // No keychain. A smoke run must not be able to reach a real secret, and an
     // absent vault is an honest state the sync layer already models. It is also
     // what keeps a PACKAGED smoke run from stopping on a login-keychain prompt,
@@ -324,6 +327,15 @@ export async function runSmoke(): Promise<number> {
 
   setPermissions("degraded");
   await services.runtime.start();
+
+  // THE SAME CALL `index.ts` MAKES AT BOOT, and the reason this file now runs
+  // against the packaged app at all. Everything downstream of it — the weekly
+  // export, and every synchronous filesystem call inside it — used to run on
+  // the main thread with nothing watching. It is `void` here exactly as it is
+  // there: a launch does not wait for it, and neither does this run. What both
+  // require is that it cannot stop the windows from opening, which is what the
+  // stall meter and this run's timeout are for.
+  void services.sync.runCycle("launch");
 
   registerIpcHandlers(services.runtime, {
     settings,
