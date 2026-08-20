@@ -42,7 +42,7 @@
  *    snapshot, with nothing reloaded. It proves `wwb:push:permissions` reaches
  *    the view, and that the jiggler switch beside it becomes usable.
  */
-import { app, type BrowserWindow } from "electron";
+import { app, nativeTheme, type BrowserWindow } from "electron";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 
@@ -372,6 +372,22 @@ export async function runSmoke(): Promise<number> {
       runtimeJiggler: false,
       error: err instanceof Error ? err.message : String(err),
     };
+  }
+
+  // ── both palettes, for a human ──────────────────────────────────────────
+  // Everything above ran in whatever theme the machine happens to be in, so on
+  // its own it says nothing about the other one. `nativeTheme.themeSource` is
+  // what `prefers-color-scheme` reads, which is what `ThemeProvider` follows on
+  // its default "system" setting. Screenshots only — no assertion, because
+  // "does this look right" is not a number.
+  if (shotDir !== null) {
+    for (const theme of ["light", "dark"] as const) {
+      nativeTheme.themeSource = theme;
+      await sleep(400);
+      screenshots.push(await screenshot(onboarding, shotDir, `onboarding-${theme}`));
+      screenshots.push(await screenshot(dashboard, shotDir, `dashboard-${theme}`));
+    }
+    nativeTheme.themeSource = "system";
   }
 
   const report: SmokeReport = {
