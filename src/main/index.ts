@@ -39,6 +39,7 @@ import {
 import { readCliMode } from "./cli";
 import { disposeIpc, pushAll, pushToAllWindows, registerIpcHandlers } from "./ipc";
 import { log, logToDirectory } from "./log";
+import { watchMainThread, type StallWatch } from "./stall";
 import { buildAppMenu } from "./menu";
 import { privacyPaneUrl, shouldShowOnboarding, startPermissionPoll } from "./onboarding";
 import { APP_SCHEME, registerAppProtocol } from "./protocol";
@@ -108,6 +109,8 @@ if (mode.kind === "normal") {
 
 const settings = new SettingsStore(() => app.getPath("userData"));
 let tray: TrayController | null = null;
+/** Replaced in `whenReady`; the no-op keeps every `mark()` call unconditional. */
+let stall: StallWatch = { mark: () => undefined, stop: () => undefined, worstMs: () => 0 };
 
 app.whenReady().then(async () => {
   // FIRST, before anything that can hang. `userData` is settled by now (the
@@ -118,6 +121,10 @@ app.whenReady().then(async () => {
   // diagnosis. See src/main/log.ts.
   logToDirectory(app.getPath("userData"));
   log.boot(`ready · mode=${mode.kind} · packaged=${String(app.isPackaged)} · v${app.getVersion()}`);
+  // Armed before anything that could hold the thread. It cannot log DURING a
+  // freeze — nothing can — but it names the duration and the step the instant
+  // one ends, which is how a freeze that resolves stops being invisible.
+  stall = watchMainThread();
   if (mode.kind === "selftest") {
     // The hard gate in scripts/install.sh. If this fails, our own synthetic
     // input would be counted as human input and hours would inflate with fake
@@ -182,11 +189,15 @@ app.whenReady().then(async () => {
   services.watchdog.start();
   log.boot("runtime and watchdog started");
 
-  // Sync at launch: flush, pull, heartbeat, then the weekly maintenance pass.
-  // `void`, deliberately — the tray must appear and tracking must be running
-  // before any of this, and none of it can fail in a way that matters. An
-  // unconfigured install runs the local weekly export here and nothing else.
-  void services.sync.runCycle("launch");
+  // The launch sync cycle — flush, pull, heartbeat, weekly export — used to
+  // start here. It does not any more: it runs in `afterBoot()` at the bottom of
+  // this file, once the tray and any window are already up.
+  //
+  // Not caution, arithmetic. Every one of its steps is either slow by nature
+  // (network) or capable of stopping dead on something only a human can answer
+  // (the Keychain, a TCC prompt on iCloud Drive). None of it is needed for the
+  // app to measure hours, and the weekly export is a WEEKLY job that was
+  // holding up EVERY launch.
 
   registerIpcHandlers(runtime, {
     settings,
@@ -284,6 +295,10 @@ app.whenReady().then(async () => {
       },
     });
   }
+
+  log.boot("boot complete — the app is usable from here");
+  stall.mark("running");
+  afterBoot(services);
 }).catch((err: unknown) => {
   // A boot that fails halfway leaves a menu-bar app that measures nothing and
   // says nothing. Say something, then exit non-zero so a LaunchAgent restart
@@ -306,6 +321,69 @@ app.on("browser-window-created", () => {
     );
   }
 });
+
+/**
+ * EVERYTHING THAT MAY BLOCK, AFTER THERE IS SOMETHING TO BLOCK IN FRONT OF.
+ *
+ * Two releases in a row froze on boot, and both froze on the same shape of
+ * call: a synchronous macOS API that puts a dialog on screen and holds the
+ * calling thread until somebody answers it. First `readdirSync` on iCloud Drive
+ * behind a TCC prompt; then `safeStorage.decryptString()` behind a Keychain
+ * prompt, which an ad-hoc signed rebuild earns on every single launch because
+ * its code identity changes every time.
+ *
+ * A dialog is not the problem. A dialog in front of a running app is a question
+ * the owner can answer. The problem was WHEN: before the tray existed, before
+ * any window existed, with an `LSUIElement` app that cannot come to the front —
+ * so the prompt sat behind other windows and the app looked dead, silently.
+ *
+ * So the rule this function exists to enforce: NOTHING THAT CAN PROMPT RUNS
+ * BEFORE THE APP IS ON SCREEN. Both known offenders live here now, in order,
+ * and each one says how long it took — because "the keychain took 40 seconds"
+ * is a sentence that explains everything and "it hung" is not.
+ */
+function afterBoot(services: Awaited<ReturnType<typeof createCoreServices>>): void {
+  // A tick, not a timer: `whenReady`'s continuation is still on the stack and
+  // the first paint has not happened yet. One turn of the loop is all it takes
+  // for the tray and the window to be real.
+  setImmediate(() => {
+    void (async () => {
+      try {
+        stall.mark("reading the sync token from the keychain");
+        log.info("reading the sync token (the keychain may ask; the app stays usable)");
+        const unlocked = await services.unlockSync();
+        if (unlocked.tookMs >= 2_000) {
+          // Loud on purpose. This is the exact call that froze the last
+          // release, and a slow one here is the same thing happening earlier.
+          log.warn(
+            `the keychain took ${String(unlocked.tookMs)}ms — that is a dialog somebody ` +
+              `answered. It no longer runs during boot; see src/main/bootstrap.ts.`,
+          );
+        }
+        log.info(
+          `sync ${unlocked.configured ? "configured" : "not configured"}` +
+            (unlocked.error === null ? "" : ` (${unlocked.error})`),
+        );
+      } catch (err) {
+        log.error("resolving the sync configuration failed", err);
+      } finally {
+        stall.mark("running");
+      }
+
+      // Flush, pull, heartbeat, then the weekly export. Off the boot path for
+      // the same reason: the export writes into iCloud Drive, which is TCC
+      // protected, and a weekly job has no business gating every launch.
+      try {
+        stall.mark("the launch sync cycle");
+        await services.sync.runCycle("launch");
+      } catch (err) {
+        log.error("the launch sync cycle failed", err);
+      } finally {
+        stall.mark("running");
+      }
+    })();
+  });
+}
 
 process.on("uncaughtException", (err) => {
   log.error("uncaughtException", err);
