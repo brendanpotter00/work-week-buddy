@@ -55,6 +55,7 @@ import {
 import { pendingCount } from "../store";
 import { getSyncState, upsertMachine } from "../store/sync-state";
 import type { FlushResult, SyncTestResult } from "../shared/ipc-types";
+import { createDirectoryAccessGate, type DirectoryAccess } from "./file-access";
 import { log } from "./log";
 import {
   NOT_CONFIGURED,
@@ -227,6 +228,14 @@ export interface SyncServiceDeps {
   readonly tz?: string;
   /** Overridden by the tests. Production takes the iCloud-or-Documents answer. */
   readonly backupDir?: string;
+  /**
+   * The gate that keeps the synchronous backup pass off a directory macOS has
+   * not consented to yet — `src/main/file-access.ts`. Overridden by the tests,
+   * which have no TCC prompt to wait for.
+   */
+  readonly backupAccess?: () => Promise<DirectoryAccess>;
+  /** The async probe behind the default gate. Injected by the tests. */
+  readonly accessProbe?: (dir: string) => Promise<unknown>;
   readonly now?: () => number;
   /** Injected by the tests, which route requests straight into the Worker. */
   readonly fetchImpl?: typeof fetch;
@@ -259,6 +268,13 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
   const { db, onChange } = deps;
   const nowMs = deps.now ?? Date.now;
   const dir = deps.backupDir ?? defaultBackupDir();
+  // Asked once per process, on the threadpool. See `maintenance()` below and
+  // `src/main/file-access.ts` for why this exists at all.
+  const backupAccess =
+    deps.backupAccess ??
+    createDirectoryAccessGate(dir, {
+      ...(deps.accessProbe === undefined ? {} : { probe: deps.accessProbe }),
+    });
 
   function build(config: SyncConfig | null): {
     client: WorkerClient | null;
@@ -420,6 +436,24 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
    * at the next launch instead of being skipped in silence.
    */
   async function maintenance(): Promise<void> {
+    // EVERYTHING BELOW IS SYNCHRONOUS AND WRITES INTO `dir`, and `dir` is
+    // iCloud Drive or ~/Documents — both TCC-protected. macOS answers the
+    // first touch of a protected directory by BLOCKING the syscall until the
+    // consent dialog is answered, and a blocked syscall here is a blocked
+    // Electron main thread: no window can open, `second-instance` never fires,
+    // and nothing logs, because nothing runs. That is exactly how the packaged
+    // app shipped. `src/main/file-access.ts` has the full story; the rule is
+    // that the WAIT happens on the threadpool and the synchronous work happens
+    // only once macOS has an answer cached for this process.
+    const access = await backupAccess();
+    if (access === "undecided") {
+      log.error(
+        `backup skipped: macOS has not answered the file-access prompt for ${dir}. ` +
+          `The app is running normally; grant access (or move the backup directory) ` +
+          `and the next launch will export.`,
+      );
+      return;
+    }
     const at = nowMs();
     const c = client;
     const opts = { nowMs: at, dir, ...(deps.tz === undefined ? {} : { tz: deps.tz }) };
