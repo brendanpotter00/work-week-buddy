@@ -56,6 +56,17 @@ npm run build
 ./scripts/install.sh        # signs, copies to /Applications, runs the self-test, installs the LaunchAgent
 ```
 
+## Before anything is built
+
+Run the M0 spike on the machine you intend to track:
+
+```bash
+./spike/run-m0.sh --checks-only   # safe, no prompts
+./spike/run-m0.sh                 # the real test
+```
+
+If device management blocks Input Monitoring for self-signed apps, keyboard tracking is impossible on that Mac and the product changes shape. Nothing in this spec can determine that — only running it can. See [`spike/README.md`](spike/README.md).
+
 ## Documentation
 
 | Document | What's in it |
@@ -66,6 +77,7 @@ npm run build
 | [`docs/MACOS.md`](docs/MACOS.md) | The native layer, and the measured evidence behind each choice |
 | [`docs/DECISIONS.md`](docs/DECISIONS.md) | What was chosen, what was rejected, and why |
 | [`docs/ROADMAP.md`](docs/ROADMAP.md) | M0–M7 with acceptance gates |
+| [`docs/TASKS.md`](docs/TASKS.md) | The same work as agent-sized tasks, with dependencies |
 | [`docs/NON_GOALS.md`](docs/NON_GOALS.md) | What not to add |
 | [`AGENTS.md`](AGENTS.md) | Guardrails. Read before writing code. |
 
