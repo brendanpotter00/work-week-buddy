@@ -60,6 +60,8 @@ function healthyReport(over: Partial<SmokeReport> = {}): SmokeReport {
   return {
     ranAtMs: Date.parse("2026-08-20T12:00:00Z"),
     appVersion: "0.1.0",
+    packaged: false,
+    maxStallMs: 0,
     probes: [
       dashboardProbe(),
       onboardingProbe(),

@@ -15,6 +15,8 @@ import { existsSync } from "node:fs";
 import { join, normalize, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 
+import { log } from "./log";
+
 export const APP_SCHEME = "app";
 export const APP_HOST = "wwb";
 export const APP_ORIGIN = `${APP_SCHEME}://${APP_HOST}`;
@@ -79,18 +81,35 @@ export function rendererRoot(): string {
 }
 
 export function registerAppProtocol(root: string = rendererRoot()): void {
+  log.info(`app:// serving ${root}`);
   protocol.handle(APP_SCHEME, async (request) => {
-    const resolved = resolveAppPath(root, request.url);
-    if (resolved.kind === "error") {
-      return new Response(resolved.body, { status: resolved.status });
-    }
-    if (!existsSync(resolved.path)) return new Response("not found", { status: 404 });
+    // EVERY PATH THROUGH HERE ANSWERS. `protocol.handle` swallows a rejected
+    // handler: the renderer sees a bare network error, `ready-to-show` never
+    // fires, the window stays hidden, and main says nothing. A blank window
+    // with no explanation is the failure this whole file is downstream of, so
+    // the one thing this handler may never do is throw.
+    try {
+      const resolved = resolveAppPath(root, request.url);
+      if (resolved.kind === "error") {
+        // 403 is a traversal attempt and is worth a line; 404s are ordinary.
+        if (resolved.status === 403) log.warn(`app:// refused ${request.url}`);
+        return new Response(resolved.body, { status: resolved.status });
+      }
+      if (!existsSync(resolved.path)) {
+        log.warn(`app:// 404 ${request.url} → ${resolved.path}`);
+        return new Response("not found", { status: 404 });
+      }
 
-    // net.fetch on a file:// URL gives us the right Content-Type for free.
-    const res = await net.fetch(pathToFileURL(resolved.path).toString());
-    const headers = new Headers(res.headers);
-    headers.set("Content-Security-Policy", CSP);
-    headers.set("X-Content-Type-Options", "nosniff");
-    return new Response(res.body, { status: res.status, headers });
+      // net.fetch on a file:// URL gives us the right Content-Type for free,
+      // and it reads through Electron's fs — inside an asar included.
+      const res = await net.fetch(pathToFileURL(resolved.path).toString());
+      const headers = new Headers(res.headers);
+      headers.set("Content-Security-Policy", CSP);
+      headers.set("X-Content-Type-Options", "nosniff");
+      return new Response(res.body, { status: res.status, headers });
+    } catch (err) {
+      log.error(`app:// FAILED ${request.url}`, err);
+      return new Response("internal error", { status: 500 });
+    }
   });
 }

@@ -248,6 +248,12 @@ export async function createCoreServices(opts: {
   settings: SettingsStore;
   appVersion: string;
   isPackaged: boolean;
+  /**
+   * `--smoke`. The only thing that lets a PACKAGED build take the fake signal
+   * source, and then only alongside two environment variables — see
+   * `shouldUseFake` in `src/native/index.ts`.
+   */
+  isSmokeRun?: boolean;
   tz?: string;
   /**
    * Electron's `safeStorage`. Null on a system without one — and then no token
@@ -275,7 +281,10 @@ export async function createCoreServices(opts: {
     log.warn("IOPlatformUUID unavailable — using a persisted random machine id");
   }
 
-  const source = await createSignalSource({ isPackaged: opts.isPackaged });
+  const source = await createSignalSource({
+    isPackaged: opts.isPackaged,
+    ...(opts.isSmokeRun === undefined ? {} : { isSmokeRun: opts.isSmokeRun }),
+  });
   const tz = opts.tz ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
 
   // ── The sync layer, wired in ────────────────────────────────────────────

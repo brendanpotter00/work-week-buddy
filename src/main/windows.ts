@@ -9,6 +9,7 @@
 import { BrowserWindow, app, shell } from "electron";
 import { join } from "node:path";
 import { ROUTE, WINDOW_SIZE } from "../shared/constants";
+import { log } from "./log";
 import { APP_ORIGIN } from "./protocol";
 
 /**
@@ -66,8 +67,82 @@ export function rendererBase(): string {
   return process.env["ELECTRON_RENDERER_URL"] ?? APP_ORIGIN;
 }
 
-function load(win: BrowserWindow, hash: string): Promise<void> {
-  return win.loadURL(viewUrl(rendererBase(), hash));
+/**
+ * How long a window gets to put SOMETHING on the page before we call it empty.
+ *
+ * `did-finish-load` fires for a document that loaded and then failed to run — a
+ * module that 404'd, a CSP refusal, a preload that never attached. All three
+ * look identical from main: a window that is up and blank. Generous, because
+ * the alternative is crying wolf at a slow first paint on a cold cache.
+ */
+const EMPTY_WINDOW_MS = 8_000;
+
+/**
+ * Every way a window can fail to become a window, said out loud.
+ *
+ * A `BrowserWindow` whose load fails is not destroyed and does not throw. It
+ * sits there with `show: false`, because `ready-to-show` only fires for a page
+ * that painted — so the app has a window nobody can see and no reason given
+ * anywhere. Wired BEFORE the load starts: the errors worth having are the ones
+ * raised while the page is loading.
+ */
+function reportLoadFailures(win: BrowserWindow, label: string): void {
+  const wc = win.webContents;
+  wc.on("did-fail-load", (_e, code, desc, url, isMainFrame) => {
+    log.error(
+      `${label} window failed to load: ${desc} (${String(code)}) ${url}` +
+        (isMainFrame ? "" : " [subframe]"),
+    );
+  });
+  wc.on("preload-error", (_e, path, err) => {
+    // `window.wwb` is undefined after this and every IPC call throws, with no
+    // renderer error worth reading. docs/IMPL_UI.md §1.10.
+    log.error(`${label} window preload failed: ${path}`, err);
+  });
+  wc.on("render-process-gone", (_e, details) => {
+    log.error(`${label} window renderer gone: ${details.reason} (${String(details.exitCode)})`);
+  });
+  wc.on("console-message", (e) => {
+    if (e.level === "error") log.error(`${label} renderer: ${e.message}`);
+  });
+  wc.once("did-finish-load", () => {
+    const timer = setTimeout(() => {
+      if (win.isDestroyed() || wc.isDestroyed()) return;
+      void wc
+        .executeJavaScript(
+          `(() => { const r = document.querySelector('[data-view]');
+                    return r === null ? null : r.getAttribute('data-view'); })()`,
+          true,
+        )
+        .then((view: unknown) => {
+          if (view !== null) return;
+          log.error(
+            `${label} window loaded ${wc.getURL()} and rendered NOTHING — no [data-view] ` +
+              `root after ${String(EMPTY_WINDOW_MS)}ms. The document arrived; the bundle did not run.`,
+          );
+        })
+        .catch((err: unknown) => {
+          log.error(`${label} window could not be inspected after load`, err);
+        });
+    }, EMPTY_WINDOW_MS);
+    timer.unref?.();
+    wc.once("destroyed", () => clearTimeout(timer));
+  });
+}
+
+async function load(win: BrowserWindow, hash: string, label: string): Promise<void> {
+  const url = viewUrl(rendererBase(), hash);
+  try {
+    await win.loadURL(url);
+  } catch (err) {
+    // `showDashboard()` is reached with `void` from the tray, the menu, the
+    // activate handler and `second-instance`. A rejection that only travelled
+    // up that chain reached nobody — which is half of why a window that never
+    // opened produced no output at all. Log HERE, then still reject, so a
+    // caller that does care can act.
+    log.error(`${label} window could not load ${url}`, err);
+    throw err;
+  }
 }
 
 function lockDownNavigation(win: BrowserWindow): void {
@@ -104,13 +179,14 @@ export async function showDashboard(backgroundColor = "#FFFFFF"): Promise<Browse
   });
 
   lockDownNavigation(dashboard);
+  reportLoadFailures(dashboard, "dashboard");
   dashboard.once("ready-to-show", () => dashboard?.show());
   // Destroy, do not hide: the renderer's memory comes back.
   dashboard.on("closed", () => {
     dashboard = null;
   });
 
-  await load(dashboard, ROUTE.dashboard);
+  await load(dashboard, ROUTE.dashboard, "dashboard");
   return dashboard;
 }
 
@@ -134,11 +210,12 @@ export async function showOnboarding(backgroundColor = "#FFFFFF"): Promise<Brows
     webPreferences: baseWebPreferences(),
   });
   lockDownNavigation(onboarding);
+  reportLoadFailures(onboarding, "onboarding");
   onboarding.once("ready-to-show", () => onboarding?.show());
   onboarding.on("closed", () => {
     onboarding = null;
   });
-  await load(onboarding, ROUTE.onboarding);
+  await load(onboarding, ROUTE.onboarding, "onboarding");
   return onboarding;
 }
 
