@@ -181,19 +181,34 @@ function watchConsole(win: Electron.BrowserWindow, label: string, into: string[]
 
 const rendererErrors: string[] = [];
 
-/** Mounted AND populated: a probe taken mid-mount measures a page that does not exist yet. */
+/**
+ * Mounted AND populated: a probe taken mid-mount measures a page that does not
+ * exist yet.
+ *
+ * Waits for A view, never for THE view. If the wrong one mounted, this returns
+ * and lets the probe happen anyway — `checkSmokeReport()` then says "the
+ * onboarding window rendered view dashboard" and names both sides of the seam,
+ * which is a diagnosis. Insisting on the right view here would instead time out
+ * and report "the onboarding window never mounted", which is not even true.
+ */
 async function waitForView(win: BrowserWindow, view: SmokeWindow): Promise<void> {
   if (win.webContents.isLoading()) {
     await new Promise<void>((resolve) => win.webContents.once("did-finish-load", () => resolve()));
   }
-  await waitFor(`the ${view} window to mount`, async () => {
-    const seen = (await win.webContents.executeJavaScript(
+  let seen: string | null = null;
+  await waitFor(`the ${view} window to mount any view`, async () => {
+    seen = (await win.webContents.executeJavaScript(
       `(() => { const r = document.querySelector('[data-view]');
                 return r === null ? null : r.getAttribute('data-view'); })()`,
       true,
     )) as string | null;
-    return seen === view;
+    return seen !== null;
   });
+  if (seen !== view) {
+    // Wrong view. Let it settle and go measure it: the report is the message.
+    await sleep(500);
+    return;
+  }
   // The first frame is the skeleton; every number arrives over IPC one tick
   // later. Measuring the skeleton would measure a page that never ships.
   const marker = view === "dashboard" ? "This week" : "Input Monitoring";
@@ -308,6 +323,8 @@ export async function runSmoke(): Promise<number> {
   // The watchdog's own path into the runtime: a new NativeStatus re-reads the
   // permissions, which emits "permissions", which pushes to every open window.
   services.runtime.onWatchdogTick(source.probe(), Date.now());
+  // Non-fatal on purpose. "The push never reached the view" is a rule the
+  // checker already owns, and it says it far better than a stack trace does.
   await waitFor("the permission push to reach the onboarding window", async () =>
     Boolean(
       await onboarding.webContents.executeJavaScript(
@@ -315,7 +332,7 @@ export async function runSmoke(): Promise<number> {
         true,
       ),
     ),
-  );
+  ).catch(() => undefined);
   await sleep(250);
 
   probes.push(await probe(dashboard, "dashboard", "granted"));
