@@ -13,6 +13,7 @@ import { FakeSignalSource } from "../../src/native";
 import { DEFAULT_POLICY, openDb, type Policy } from "../../src/store";
 import { createRuntime, type AppRuntime, type RuntimeChange } from "../../src/main/runtime";
 import type { SyncSeam } from "../../src/main/sync-seam";
+import type { SelfTestResult } from "../../src/shared/ipc-types";
 import type { MainSettings } from "../../src/main/settings";
 import { SETTINGS_DEFAULTS } from "../../src/main/settings";
 
@@ -49,6 +50,11 @@ export async function makeHarness(
   const db = openDb(":memory:", policy);
   const source = new FakeSignalSource();
   let n = 0;
+  // In memory, but REAL: production keeps this in `settings.json` so the
+  // settings pane can say when the jiggler self-test last passed. Wiring it
+  // here means `doctor().selfTest` behaves the same way in a test as it does in
+  // the app — null until something runs it, and the stored answer after.
+  let selfTest: SelfTestResult | null = null;
   const runtime = createRuntime({
     db,
     source,
@@ -61,6 +67,12 @@ export async function makeHarness(
     // Deterministic ids: a failing case is reproducible and row order is stable.
     newId: () => `iv-${n++}`,
     jigglerIntervalMs: over.jigglerIntervalMs ?? 30_000,
+    selfTestStore: {
+      read: () => selfTest,
+      write: (r) => {
+        selfTest = r;
+      },
+    },
     ...(over.sync === undefined
       ? {}
       : { sync: typeof over.sync === "function" ? over.sync(db) : over.sync }),

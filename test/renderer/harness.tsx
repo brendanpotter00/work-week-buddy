@@ -15,6 +15,7 @@ import { ThemeProvider } from "@/renderer/lib/theme-provider";
 import type { WwbBridge } from "@/renderer/lib/ipc";
 import type {
   AppInfo,
+  DoctorReport,
   HeatmapDay,
   InvokeChannel,
   InvokeContract,
@@ -23,7 +24,10 @@ import type {
   PermissionSnapshot,
   PushChannel,
   PushContract,
+  SelfTestResult,
+  SyncConfigState,
   Toggles,
+  UiSettings,
   WeekBar,
 } from "@/shared/ipc-types";
 
@@ -344,6 +348,129 @@ export function emptyMetricsBundle(): MetricsBundle {
   });
 }
 
+export function uiSettings(over: Partial<UiSettings> = {}): UiSettings {
+  return {
+    machineLabel: "Work laptop",
+    idleTimeoutMin: 15,
+    windowBackground: "#FFFFFF",
+    meetingApps: ["us.zoom.xos"],
+    micIgnoreApps: ["com.electron.wispr-flow"],
+    heatmapThresholdsH: [2, 5, 8],
+    minIntervalS: 90,
+    countJigglerTime: 0,
+    graceS: 0,
+    syncWorkerUrl: "",
+    ...over,
+  };
+}
+
+/**
+ * THE DEFAULT IS "NOT CONFIGURED", which is the state a real install is in
+ * until the owner deploys a Worker. A fixture whose default was "everything
+ * working" would let the screen that handles the ordinary case go untested —
+ * the same reasoning `permissionSnapshot()` gets above.
+ */
+export function syncConfigState(over: Partial<SyncConfigState> = {}): SyncConfigState {
+  return {
+    workerUrl: "",
+    tokenPresent: false,
+    configured: false,
+    error: null,
+    vaultAvailable: true,
+    ...over,
+  };
+}
+
+export function selfTestResult(over: Partial<SelfTestResult> = {}): SelfTestResult {
+  return {
+    ranAtMs: Date.parse("2026-08-19T09:00:00-05:00"),
+    passed: true,
+    appVersion: "0.1.0",
+    checks: [{ id: "userData-is-a-number", passed: true, detail: "read back 0x57574b31" }],
+    ...over,
+  };
+}
+
+/**
+ * A doctor report with everything green and sync UNCONFIGURED — the shape main
+ * returns on a fresh profile. Sections are overridable one at a time so a test
+ * can make exactly one thing wrong.
+ */
+export function doctorReport(over: Partial<DoctorReport> = {}): DoctorReport {
+  const now = Date.parse("2026-08-19T14:41:00-05:00");
+  return {
+    generatedAtMs: now,
+    allGreen: true,
+    app: {
+      version: "0.1.0",
+      electron: "43.4.1",
+      bundleId: "com.bpotter.workweekbuddy",
+      execPath: "/Applications/Work Week Buddy.app",
+      isPackaged: true,
+      launchedAtMs: now - 3_600_000,
+    },
+    machine: {
+      machineId: "machine-a",
+      label: "Work laptop",
+      osVersion: "26.5.1",
+      tz: "America/Chicago",
+    },
+    permissions: grantedSnapshot(),
+    tap: {
+      created: true,
+      enabled: true,
+      grantedMaskHex: "0x1c00",
+      keyboardBitsPresent: true,
+      flagsChangedBitPresent: true,
+      runLoopModes: ["default", "common"],
+      eventsSinceLaunch: 422,
+      lastEventMs: now - 12_000,
+      disabledByTimeoutCount: 0,
+      reEnabledCount: 0,
+      tapLostRows: 0,
+      lastWatchdogTickMs: now - 60_000,
+    },
+    camera: { deviceCount: 1, inUse: false, listenerRegistered: true, lastReadMs: now },
+    mic: { inUse: false, meetingAppRunning: false, meetingApp: null, needsPermission: null },
+    sync: {
+      configured: false,
+      pendingRows: 0,
+      lastFlushOkMs: null,
+      lastFlushError: null,
+      lastPullMs: null,
+      lastPullError: null,
+      watermark: 0,
+      lastCloudWriteMs: null,
+      silentForMs: null,
+    },
+    fingerprint: {
+      checkedAtMs: null,
+      matched: null,
+      localCount: null,
+      cloudCount: null,
+      localSha: null,
+      cloudSha: null,
+    },
+    backup: { lastPath: null, lastAtMs: null, ageDays: null, destination: null, kept: 0 },
+    selfTest: null,
+    db: {
+      path: "/tmp/wwb/wwb.sqlite3",
+      sizeBytes: 4096,
+      rows: 1284,
+      openIntervalPresent: false,
+      integrityOk: true,
+    },
+    autostart: {
+      installed: true,
+      loaded: true,
+      plistPath: "~/Library/LaunchAgents/com.bpotter.workweekbuddy.plist",
+      execMatchesRunningApp: true,
+    },
+    codesign: { designatedRequirementSha256: "abc", valid: true },
+    ...over,
+  };
+}
+
 /** Handlers that answer every channel the dashboard uses. */
 export function defaultHandlers(metrics: MetricsBundle, status = liveStatus()): Handlers {
   return {
@@ -352,18 +479,7 @@ export function defaultHandlers(metrics: MetricsBundle, status = liveStatus()): 
     "wwb:metrics:get": () => metrics,
     "wwb:toggles:get": () => toggles(),
     "wwb:toggles:set": (c) => toggles({ [c.key]: c.value }),
-    "wwb:settings:set": () => ({
-      machineLabel: "Work laptop",
-      idleTimeoutMin: 15,
-      windowBackground: "#FFFFFF",
-      meetingApps: [],
-      micIgnoreApps: [],
-      heatmapThresholdsH: [2, 5, 8],
-      minIntervalS: 90,
-      countJigglerTime: 0,
-      graceS: 0,
-      syncWorkerUrl: "",
-    }),
+    "wwb:settings:set": () => uiSettings(),
   };
 }
 

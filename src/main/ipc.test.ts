@@ -339,4 +339,204 @@ describe("the sync configuration channels", () => {
     expect(updated).toMatchObject({ syncWorkerUrl: "https://wwb-sync.example.workers.dev" });
     expect(deps.settings.get("syncWorkerUrl")).toBe("https://wwb-sync.example.workers.dev");
   });
+
+  it("keeps the token out of settings.json entirely — that file is plaintext on disk", async () => {
+    h = await makeHarness();
+    const vaulted: string[] = [];
+    const deps = await register({
+      syncConfig: {
+        read: () => ({
+          workerUrl: "https://wwb-sync.example.workers.dev",
+          tokenPresent: vaulted.length > 0,
+          configured: vaulted.length > 0,
+          error: null,
+          vaultAvailable: true,
+        }),
+        write: async (patch) => {
+          if (patch.token !== undefined) vaulted.push(patch.token);
+          return {
+            workerUrl: "https://wwb-sync.example.workers.dev",
+            tokenPresent: true,
+            configured: true,
+            error: null,
+            vaultAvailable: true,
+          };
+        },
+        test: async () => ({
+          ok: true,
+          reachable: true,
+          authorized: true,
+          status: 200,
+          ms: 1,
+          error: null,
+        }),
+      },
+    });
+
+    const token = "wwb_9f3c1d7a54e84b0da2c6f18e7b3a09d5";
+    await invoke("wwb:sync:setConfig", {
+      workerUrl: "https://wwb-sync.example.workers.dev",
+      token,
+    });
+
+    // It reached the vault…
+    expect(vaulted).toEqual([token]);
+    // …and NOT the settings file, which `SettingsStore.save()` writes as
+    // plaintext JSON beside the database. AGENTS.md, "Secrets".
+    expect(JSON.stringify(deps.settings.all())).not.toContain(token);
+    // Nor can it be read back out through any channel that answers.
+    expect(JSON.stringify(await invoke("wwb:sync:config"))).not.toContain(token);
+    expect(JSON.stringify(await invoke("wwb:settings:get"))).not.toContain(token);
+    expect(JSON.stringify(await invoke("wwb:doctor:get"))).not.toContain(token);
+  });
+
+  it("tests a configuration without storing any part of it", async () => {
+    h = await makeHarness();
+    const written: unknown[] = [];
+    const tested: unknown[] = [];
+    const deps = await register({
+      syncConfig: {
+        read: () => ({
+          workerUrl: "",
+          tokenPresent: false,
+          configured: false,
+          error: null,
+          vaultAvailable: true,
+        }),
+        write: async (patch) => {
+          written.push(patch);
+          return {
+            workerUrl: "",
+            tokenPresent: false,
+            configured: false,
+            error: null,
+            vaultAvailable: true,
+          };
+        },
+        test: async (patch) => {
+          tested.push(patch);
+          return {
+            ok: false,
+            reachable: true,
+            authorized: false,
+            status: 401,
+            ms: 30,
+            error: "the Worker is reachable but rejected this token",
+          };
+        },
+      },
+    });
+
+    const result = (await invoke("wwb:sync:test", {
+      workerUrl: "https://wwb-sync.example.workers.dev",
+      token: "wrong-one",
+    })) as { reachable: boolean; authorized: boolean };
+
+    // Reachable and unauthorized are separate answers: they need different
+    // fixes, and one boolean cannot tell them apart.
+    expect(result.reachable).toBe(true);
+    expect(result.authorized).toBe(false);
+    expect(tested).toHaveLength(1);
+    // Nothing was saved. That is the entire value of testing first.
+    expect(written).toHaveLength(0);
+    expect(deps.settings.get("syncWorkerUrl")).toBe("");
+  });
+
+  it("answers honestly when no gateway is wired, rather than claiming a green test", async () => {
+    h = await makeHarness();
+    await register();
+    const result = (await invoke("wwb:sync:test", {})) as { ok: boolean; error: string | null };
+    expect(result.ok).toBe(false);
+    expect(result.error).not.toBeNull();
+  });
+});
+
+describe("the settings channel validates before it persists", () => {
+  it("clamps the idle timeout to the range the PRD allows, and applies it live", async () => {
+    h = await makeHarness();
+    const deps = await register();
+
+    // PRD §7: "15 minutes, adjustable 10–15 without touching history".
+    await invoke("wwb:settings:set", { idleTimeoutMin: 90 });
+    expect(deps.settings.get("idleTimeoutMin")).toBe(15);
+    await invoke("wwb:settings:set", { idleTimeoutMin: 1 });
+    expect(deps.settings.get("idleTimeoutMin")).toBe(10);
+    await invoke("wwb:settings:set", { idleTimeoutMin: 12 });
+    expect(deps.settings.get("idleTimeoutMin")).toBe(12);
+  });
+
+  it("drops a NaN idle timeout instead of arming a timer that never fires", async () => {
+    h = await makeHarness();
+    const deps = await register();
+    await invoke("wwb:settings:set", { idleTimeoutMin: Number.NaN });
+    expect(deps.settings.get("idleTimeoutMin")).toBe(15);
+  });
+
+  it("rejects a heatmap ramp whole rather than storing half of one", async () => {
+    h = await makeHarness();
+    const deps = await register();
+    const before = deps.settings.get("heatmapThresholdsH");
+
+    // Out of order: the colours would no longer be ordered, which reads as data
+    // rather than as a rejected edit.
+    await invoke("wwb:settings:set", { heatmapThresholdsH: [9, 5, 8] });
+    expect(deps.settings.get("heatmapThresholdsH")).toEqual(before);
+
+    await invoke("wwb:settings:set", { heatmapThresholdsH: [3, 6, 9] });
+    expect(deps.settings.get("heatmapThresholdsH")).toEqual([3, 6, 9]);
+  });
+
+  it("drops blank and duplicate bundle ids, which would match nothing forever", async () => {
+    h = await makeHarness();
+    const deps = await register();
+    await invoke("wwb:settings:set", {
+      meetingApps: ["us.zoom.xos", "  ", "us.zoom.xos", " com.hnc.Discord "],
+    });
+    expect(deps.settings.get("meetingApps")).toEqual(["us.zoom.xos", "com.hnc.Discord"]);
+  });
+
+  it("refuses a blank machine label rather than storing an empty row label", async () => {
+    h = await makeHarness();
+    const deps = await register();
+    const before = deps.settings.get("machineLabel");
+    await invoke("wwb:settings:set", { machineLabel: "   " });
+    expect(deps.settings.get("machineLabel")).toBe(before);
+  });
+});
+
+describe("the settings window", () => {
+  it("is reachable over its own channel", async () => {
+    h = await makeHarness();
+    const opened: string[] = [];
+    await register({ showSettings: () => opened.push("settings") });
+    await invoke("wwb:window:openSettings");
+    expect(opened).toEqual(["settings"]);
+  });
+
+  it("throws rather than silently doing nothing when no window is wired", async () => {
+    // A button that does nothing is the failure this app is built against; a
+    // rejected invoke at least reaches the renderer as words.
+    h = await makeHarness();
+    await register();
+    await expect(invoke("wwb:window:openSettings")).rejects.toThrow(/settings window/);
+  });
+});
+
+describe("the self-test", () => {
+  it("runs, and the result outlives the run so the pane can say when it passed", async () => {
+    h = await makeHarness();
+    await register();
+
+    const before = (await invoke("wwb:doctor:get")) as { selfTest: unknown };
+    expect(before.selfTest).toBeNull();
+
+    const result = (await invoke("wwb:doctor:selftest")) as { passed: boolean; ranAtMs: number };
+    expect(result.passed).toBe(true);
+
+    // The doctor reports the STORED result rather than running a fresh one:
+    // the self-test posts synthetic events, so reading the report must not
+    // change what the report is about.
+    const after = (await invoke("wwb:doctor:get")) as { selfTest: { ranAtMs: number } | null };
+    expect(after.selfTest?.ranAtMs).toBe(result.ranAtMs);
+  });
 });

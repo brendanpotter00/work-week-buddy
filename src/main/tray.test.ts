@@ -332,6 +332,25 @@ describe("the menu", () => {
     expect(l).toContain("Quit Work Week Buddy");
   });
 
+  it("can reach Settings without opening the dashboard first", async () => {
+    // The tray is where this app lives, and until this item existed there was
+    // no way to enter a Worker URL at all in a packaged build — `devTools` is
+    // off there, so the console workaround was gone too.
+    h = await makeHarness();
+    const opened: string[] = [];
+    tray = makeTray({
+      showSettings: () => opened.push("settings"),
+      showDashboard: () => opened.push("dashboard"),
+    });
+
+    const item = tray.template().find((i) => i.label === "Settings…")!;
+    expect(item).toBeDefined();
+    (item.click as () => void)();
+    // The settings WINDOW, not the dashboard. A menu item that lies about
+    // where it goes is worse than one that is missing.
+    expect(opened).toEqual(["settings"]);
+  });
+
   it("surfaces a failed sync rather than swallowing it", async () => {
     h = await makeHarness();
     tray = makeTray();
