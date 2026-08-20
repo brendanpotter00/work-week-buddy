@@ -13,17 +13,24 @@ const PATHS = [
   "/health",
   "/intervals",
   "/heartbeat",
+  "/machines",
   "/fingerprint",
   "/",
   "/intervals/abc",
 ] as const;
 
 describe("the route table is the enforcement", () => {
-  it("registers exactly five routes and no mutating method", () => {
+  it("registers exactly six routes and no mutating method", () => {
+    // `GET /machines` is a READ. It joined this list when device naming needed
+    // a way for one Mac to learn the other's label, and it changes nothing
+    // about the rule this file guards: the only writer is still `POST`, and a
+    // machine label is still only ever set by the machine it names, through its
+    // own heartbeat and its own token.
     expect(Object.keys(ROUTES).sort()).toEqual([
       "GET /fingerprint",
       "GET /health",
       "GET /intervals",
+      "GET /machines",
       "POST /heartbeat",
       "POST /intervals",
     ]);

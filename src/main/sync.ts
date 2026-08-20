@@ -52,7 +52,7 @@ import {
   type WorkerClient,
 } from "../sync";
 import { pendingCount } from "../store";
-import { getSyncState } from "../store/sync-state";
+import { getSyncState, upsertMachine } from "../store/sync-state";
 import type { FlushResult } from "../shared/ipc-types";
 import { log } from "./log";
 import {
@@ -105,7 +105,17 @@ export interface SyncServiceDeps {
   readonly config: SyncConfig | null;
   /** Present when a URL or token was supplied but unusable. See `resolveSyncConfig`. */
   readonly configError?: string | null;
-  readonly machineLabel?: string;
+  /** This Mac's `IOPlatformUUID`. Stamps the local mirror of each heartbeat. */
+  readonly machineId: string;
+  /**
+   * READ PER HEARTBEAT, never captured.
+   *
+   * A rename has to reach the cloud, and the app is not relaunched between the
+   * rename and the next sync. Holding the label as a string here would send the
+   * name this Mac had at boot for the rest of the session — the rename would
+   * look applied locally and would never arrive on the other Mac.
+   */
+  readonly machineLabel?: () => string;
   readonly appVersion: string;
   readonly osVersion?: string;
   /** IANA zone, for the ISO week the backup filenames are keyed on. */
@@ -128,6 +138,14 @@ export interface SyncService extends SyncSeam {
    * had measured anything.
    */
   runCycle(reason: "launch" | "wake"): Promise<void>;
+  /**
+   * Push a heartbeat right now, outside the launch/wake cycle. A rename calls
+   * this so the other Mac learns the new name in seconds rather than at the
+   * next launch. Resolves `false` when it did not reach the cloud — offline, or
+   * simply not configured — and never rejects, because neither of those is a
+   * reason for a rename to fail.
+   */
+  heartbeatNow(): Promise<boolean>;
   /** Apply a configuration change without a relaunch. Stops the old flusher. */
   reconfigure(config: SyncConfig | null, error?: string | null): Promise<void>;
 }
@@ -204,6 +222,13 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
         const page = await pull(db, c);
         lastPullMs = nowMs();
         lastPullError = null;
+        // Not fatal — labels are cosmetic and the intervals above are not — but
+        // not silent either. A Worker that has not been redeployed with
+        // `GET /machines` answers 404 here, and the symptom on the other Mac is
+        // a machine that never stops rendering as a raw UUID.
+        if (page.machinesError !== null) {
+          log.warn(`machine labels not pulled: ${page.machinesError}`);
+        }
         if (page.ingested > 0) onChange?.("rows-pulled");
       } catch (err) {
         lastPullError = messageOf(err);
@@ -246,21 +271,38 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
    * outbox answers it with silence — which would otherwise trip an alarm that
    * means nothing at all. A heartbeat is the honest answer to that question.
    */
-  async function heartbeat(): Promise<void> {
+  async function heartbeat(): Promise<boolean> {
     const c = client;
-    if (c === null) return;
+    if (c === null) return false;
+    const label = deps.machineLabel?.() ?? "";
     try {
       await c.heartbeat({
-        ...(deps.machineLabel === undefined || deps.machineLabel === ""
-          ? {}
-          : { label: deps.machineLabel }),
+        ...(label === "" ? {} : { label }),
         ...(deps.osVersion === undefined ? {} : { osVersion: deps.osVersion }),
         appVersion: deps.appVersion,
       });
-      noteCloudWrite(db, nowMs());
+      const at = nowMs();
+      noteCloudWrite(db, at);
+      // The local mirror of what we just told the cloud, stamped `now`.
+      //
+      // This runs AFTER the pull in a cycle, and that ordering is the point: a
+      // pull can carry back a machine row the cloud wrote before this rename
+      // existed, and `upsertMachine` resolves that on `last_seen_ms`. Re-writing
+      // here with the label we just successfully sent means a clock skew large
+      // enough to let the stale cloud row win the pull is corrected inside the
+      // same cycle rather than lingering until the next one.
+      upsertMachine(db, {
+        machineId: deps.machineId,
+        ...(label === "" ? {} : { label }),
+        ...(deps.osVersion === undefined ? {} : { osVersion: deps.osVersion }),
+        appVersion: deps.appVersion,
+        lastSeenMs: at,
+      });
+      return true;
     } catch (err) {
       // Best-effort by definition: it moves no interval and loses no row.
       log.warn("heartbeat failed", err);
+      return false;
     }
   }
 
@@ -391,6 +433,7 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
     },
     flush,
     runCycle,
+    heartbeatNow: heartbeat,
     health,
     snapshot,
     pollSilence(atMs: number): void {
