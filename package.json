@@ -13,9 +13,10 @@
     "package": "npm run build && electron-builder --mac --dir",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "vitest run",
+    "test": "vitest run --coverage",
     "test:watch": "vitest",
-    "test:native": "vitest run --dir src/native --passWithNoTests"
+    "test:native": "vitest run src/native test/native --passWithNoTests",
+    "selftest": "electron-vite build && electron out/main/index.js --selftest"
   },
   "dependencies": {
     "koffi": "3.1.5"
@@ -26,6 +27,7 @@
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
     "@vitejs/plugin-react": "5.2.0",
+    "@vitest/coverage-v8": "4.1.11",
     "electron": "43.4.1",
     "electron-builder": "26.15.3",
     "electron-vite": "5.0.0",
