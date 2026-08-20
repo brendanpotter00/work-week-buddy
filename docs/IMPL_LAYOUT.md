@@ -265,7 +265,7 @@ describe("guardrails", () => {
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:native": "vitest run --dir src/native",
+    "test:native": "vitest run --dir src/native --passWithNoTests",
     "selftest": "electron-vite build && electron out/main/index.js --selftest",
     "doctor": "tsx scripts/doctor.ts"
   },

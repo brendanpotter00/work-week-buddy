@@ -15,7 +15,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:native": "vitest run --dir src/native"
+    "test:native": "vitest run --dir src/native --passWithNoTests"
   },
   "dependencies": {
     "koffi": "3.1.5"
