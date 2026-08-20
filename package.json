@@ -15,7 +15,8 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run --coverage",
     "test:watch": "vitest",
-    "test:native": "vitest run --dir src/native --passWithNoTests"
+    "test:native": "vitest run src/native test/native --passWithNoTests",
+    "selftest": "electron-vite build && electron out/main/index.js --selftest"
   },
   "dependencies": {
     "koffi": "3.1.5"
