@@ -1,0 +1,90 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Always runs, even before the app exists. The repo is public, and AGENTS.md
+  # promises the build fails if a credential is ever committed. This is that promise.
+  secrets:
+    name: secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scan tracked files for credential-shaped strings
+        run: |
+          set -uo pipefail
+          # Cloudflare API tokens, GitHub tokens, AWS keys, private keys, bearer literals.
+          PATTERN='(gh[pousr]_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY|CLOUDFLARE_API_TOKEN[[:space:]]*[:=][[:space:]]*["'"'"']?[A-Za-z0-9_-]{20,})'
+          if git ls-files -z | xargs -0 grep -nEI "$PATTERN" 2>/dev/null | grep -v '^\.github/workflows/ci\.yml:'; then
+            echo "::error::A credential-shaped string is present in a tracked file."
+            exit 1
+          fi
+          echo "Clean."
+
+  test:
+    name: lint · typecheck · test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Is there an app yet?
+        id: app
+        run: |
+          if [ -f package.json ]; then echo "exists=true" >> "$GITHUB_OUTPUT";
+          else echo "exists=false" >> "$GITHUB_OUTPUT"; echo "No package.json yet — spec-only repo. Nothing to build."; fi
+
+      - uses: actions/setup-node@v4
+        if: steps.app.outputs.exists == 'true'
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install
+        if: steps.app.outputs.exists == 'true'
+        run: npm ci
+
+      - name: Lint
+        if: steps.app.outputs.exists == 'true'
+        run: npm run lint --if-present
+
+      - name: Typecheck
+        if: steps.app.outputs.exists == 'true'
+        run: npm run typecheck --if-present
+
+      - name: Test
+        if: steps.app.outputs.exists == 'true'
+        run: npm run test --if-present
+
+  # The interval logic is a pure reducer and runs anywhere, which is the point of
+  # keeping src/core/ free of electron. Anything touching koffi or Electron needs a
+  # real Mac, so it lands here once those modules exist.
+  macos:
+    name: macOS build
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Is there an app yet?
+        id: app
+        run: |
+          if [ -f package.json ]; then echo "exists=true" >> "$GITHUB_OUTPUT";
+          else echo "exists=false" >> "$GITHUB_OUTPUT"; echo "Spec-only repo. Nothing to build."; fi
+      - uses: actions/setup-node@v4
+        if: steps.app.outputs.exists == 'true'
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - name: Install
+        if: steps.app.outputs.exists == 'true'
+        run: npm ci
+      - name: Native + build
+        if: steps.app.outputs.exists == 'true'
+        run: |
+          npm run test:native --if-present
+          npm run build --if-present
