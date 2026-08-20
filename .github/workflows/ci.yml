@@ -128,15 +128,26 @@ jobs:
           WWB_SMOKE_DIR: ${{ runner.temp }}/smoke-packaged
         run: bash tools/smoke-packaged.sh
 
-      # A gate nobody has watched fail is a gate nobody should trust. This traps
-      # the packaged app's main thread in an open(2) that never returns — the
-      # same mechanism as the real freeze, inside the run's own throwaway
-      # profile — and passes only if the step above would have caught it.
-      - name: Prove the packaged gate can see a frozen main thread
+      # A gate nobody has watched fail is a gate nobody should trust — and this
+      # one was wrong once. Its trap used to sit where weeklyBackup() writes,
+      # which is AFTER boot, so it proved only that a post-boot freeze is
+      # visible: it passed green while a boot-path freeze was shipping.
+      #
+      # Both traps now, and the boot one first, because that is where both real
+      # failures were. Each blocks the packaged app's main thread in an open(2)
+      # that never returns — inside the run's own throwaway profile — and passes
+      # only if the step above would have caught it.
+      - name: Prove the gate sees a freeze ON THE BOOT PATH
         if: steps.app.outputs.exists == 'true'
         env:
-          WWB_SMOKE_DIR: ${{ runner.temp }}/smoke-proveit
-        run: bash tools/smoke-packaged.sh --no-build --prove-it
+          WWB_SMOKE_DIR: ${{ runner.temp }}/smoke-proveit-boot
+        run: bash tools/smoke-packaged.sh --no-build --prove-it=boot
+
+      - name: Prove the gate sees a freeze after the windows are up
+        if: steps.app.outputs.exists == 'true'
+        env:
+          WWB_SMOKE_DIR: ${{ runner.temp }}/smoke-proveit-sync
+        run: bash tools/smoke-packaged.sh --no-build --prove-it=sync
 
       # The screenshots are the point when it fails: "why is it squished" is a
       # question a number answers badly and a picture answers immediately. The
@@ -150,5 +161,6 @@ jobs:
           path: |
             ${{ runner.temp }}/smoke
             ${{ runner.temp }}/smoke-packaged
-            ${{ runner.temp }}/smoke-proveit
+            ${{ runner.temp }}/smoke-proveit-boot
+            ${{ runner.temp }}/smoke-proveit-sync
           if-no-files-found: ignore

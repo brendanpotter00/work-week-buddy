@@ -73,7 +73,17 @@ export function createTokenStore(dir: () => string, vault: SecretVault | null): 
     path,
 
     read(): string | null {
-      if (vault === null || !available()) return null;
+      if (vault === null) return null;
+      // THE FILE FIRST, THE KEYCHAIN SECOND, and the order is the whole point.
+      //
+      // `available()` is `safeStorage.isEncryptionAvailable()`, which reaches
+      // the macOS Keychain — and the Keychain answers a process whose code
+      // identity it does not recognise with a modal dialog, while holding the
+      // calling thread. Asking it first meant every install paid that risk,
+      // including the overwhelming majority that have no token at all and for
+      // whom the answer could not have mattered.
+      //
+      // An absent file is the ordinary state and it is knowable from a stat.
       let blob: Buffer;
       try {
         blob = readFileSync(path());
@@ -81,6 +91,7 @@ export function createTokenStore(dir: () => string, vault: SecretVault | null): 
         // Absent is the normal first-run state, not a failure.
         return null;
       }
+      if (!available()) return null;
       try {
         const token = vault.decryptString(blob).trim();
         return token === "" ? null : token;

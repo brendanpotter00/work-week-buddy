@@ -404,8 +404,16 @@ export async function createCoreServices(opts: {
   const unlockSync = async (): Promise<SyncUnlockResult> => {
     const startedMs = Date.now();
     let token: string | null = null;
+    // NEVER ASK THE KEYCHAIN A QUESTION WHOSE ANSWER CANNOT MATTER.
+    //
+    // `resolveSyncConfig` returns "not configured" for an empty worker URL
+    // whatever the token is, so on an install that has not turned sync on —
+    // which is how the app ships and how most launches run — reading the token
+    // buys nothing and risks a modal Keychain prompt on the main thread. The
+    // cheapest way not to be blocked by a call is not to make it.
+    const workerUrl = opts.settings.get("syncWorkerUrl").trim();
     try {
-      token = tokens.read();
+      if (workerUrl !== "") token = tokens.read();
     } catch (err) {
       // `read()` already swallows the ordinary failures; this is the last resort
       // so that a keychain that behaves in a way nobody predicted costs the
@@ -413,7 +421,7 @@ export async function createCoreServices(opts: {
       log.error("reading the sync token failed", err);
     }
     const tookMs = Date.now() - startedMs;
-    const next = resolveSyncConfig(opts.settings.get("syncWorkerUrl"), token);
+    const next = resolveSyncConfig(workerUrl, token);
     await sync.reconfigure(next.config, next.error);
     return { tookMs, configured: next.config !== null, error: next.error };
   };
