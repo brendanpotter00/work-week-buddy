@@ -65,8 +65,14 @@ jobs:
   # The interval logic is a pure reducer and runs anywhere, which is the point of
   # keeping src/core/ free of electron. Anything touching koffi or Electron needs a
   # real Mac, so it lands here once those modules exist.
+  #
+  # This job also runs the LAUNCHED-APP SMOKE TEST, which is the only thing in
+  # CI that opens a window and looks at it. The dashboard once shipped crammed
+  # into the 560 x 640 onboarding window past a fully green suite, because every
+  # renderer test mounts a component in a jsdom that has no window, no size and
+  # no URL. See src/main/smoke.ts.
   macos:
-    name: macOS build
+    name: macOS build + launched-app smoke
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -88,3 +94,28 @@ jobs:
         run: |
           npm run test:native --if-present
           npm run build --if-present
+
+      # Launches the built app, opens BOTH windows for real, and measures them.
+      # It fails if a window renders the wrong view, if either window's content
+      # is wider than its viewport, if the fixed 560 x 640 onboarding box cannot
+      # hold its own contents, or if a permission grant does not reach an open
+      # window. WWB_FAKE_NATIVE=1 substitutes the fake SignalSource, which needs
+      # no TCC grant and which a packaged build refuses on purpose
+      # (src/native/index.ts) — so this runs unattended and the real thing is
+      # still checked by `npm run selftest` against the installed bundle.
+      - name: Launched-app smoke
+        if: steps.app.outputs.exists == 'true'
+        env:
+          WWB_FAKE_NATIVE: "1"
+          WWB_SMOKE_DIR: ${{ runner.temp }}/smoke
+        run: npm run smoke --if-present
+
+      # The screenshots are the point when it fails: "why is it squished" is a
+      # question a number answers badly and a picture answers immediately.
+      - name: Upload smoke screenshots
+        if: always() && steps.app.outputs.exists == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-screenshots
+          path: ${{ runner.temp }}/smoke
+          if-no-files-found: ignore

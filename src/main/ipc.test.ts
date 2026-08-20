@@ -248,6 +248,21 @@ describe("push fan-out", () => {
     expect(win.sent.map((m) => m.channel)).toEqual(["wwb:push:toggles", "wwb:push:status"]);
   });
 
+  it("a permission change also pushes toggles, because jigglerAvailable is derived from it", async () => {
+    h = await makeHarness();
+    await register();
+    const win = addFakeWindow();
+    pushToAllWindows(h.runtime, "permissions");
+    // The onboarding window shows the Accessibility badge and the jiggler
+    // switch side by side. Pushing only the snapshot flips the badge to
+    // "Granted" and leaves the switch disabled until the window is reopened.
+    expect(win.sent.map((m) => m.channel)).toEqual([
+      "wwb:push:permissions",
+      "wwb:push:toggles",
+      "wwb:push:status",
+    ]);
+  });
+
   it("the 30 s keepalive converges a window that missed a push", async () => {
     h = await makeHarness();
     await register();

@@ -13,6 +13,7 @@ export type CliMode =
   | { kind: "normal"; hidden: boolean }
   | { kind: "selftest" }
   | { kind: "doctor" }
+  | { kind: "smoke" }
   | { kind: "install-launch-agent" }
   | { kind: "uninstall-launch-agent" };
 
@@ -21,6 +22,10 @@ export function readCliMode(argv: readonly string[]): CliMode {
   // Order is the precedence. --selftest first because it is the install gate.
   if (has("--selftest")) return { kind: "selftest" };
   if (has("--doctor")) return { kind: "doctor" };
+  // The launched-app smoke run (`npm run smoke`). A utility mode like the two
+  // above: it opens windows and a database of its own and must never take the
+  // running instance's lock or its profile.
+  if (has("--smoke")) return { kind: "smoke" };
   if (has("--install-launch-agent")) return { kind: "install-launch-agent" };
   if (has("--uninstall-launch-agent")) return { kind: "uninstall-launch-agent" };
   // Anything unrecognised is a normal launch. Electron and macOS both append

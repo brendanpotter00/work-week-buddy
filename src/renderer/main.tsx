@@ -1,7 +1,7 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
 
-import { App } from "./App";
+import { Root } from "./Root";
 import { ThemeProvider } from "./lib/theme-provider";
 import "./index.css";
 
@@ -12,7 +12,7 @@ if (el) {
       {/* `storageKey` must stay "theme": public/theme-boot.js reads the same key
           to stamp the class before the first paint. */}
       <ThemeProvider defaultTheme="system" storageKey="theme">
-        <App />
+        <Root />
       </ThemeProvider>
     </React.StrictMode>,
   );

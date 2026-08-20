@@ -20,6 +20,7 @@ import type {
   InvokeContract,
   LiveStatus,
   MetricsBundle,
+  PermissionSnapshot,
   PushChannel,
   PushContract,
   Toggles,
@@ -162,6 +163,40 @@ export function toggles(over: Partial<Toggles> = {}): Toggles {
     jigglerUnavailableReason: null,
     ...over,
   };
+}
+
+/**
+ * The state a fresh install is REALLY in, and the default here on purpose:
+ * Input Monitoring granted in System Settings, keyboard bits absent from the
+ * live tap, Accessibility never granted. That is `relaunchRequired`, it is what
+ * the owner hit, and a fixture whose default is "everything fine" would let the
+ * screen that handles it go untested.
+ */
+export function permissionSnapshot(over: Partial<PermissionSnapshot> = {}): PermissionSnapshot {
+  return {
+    checkedAtMs: Date.parse("2026-08-19T14:41:00-05:00"),
+    inputMonitoring: "granted",
+    accessibility: "undetermined",
+    keyboardBitsGranted: false,
+    flagsChangedBitGranted: false,
+    grantedMaskHex: "0x0",
+    relaunchRequired: true,
+    promptConsumed: { inputMonitoring: false, accessibility: false },
+    microphone: "not-required",
+    ...over,
+  };
+}
+
+/** Everything granted and the live tap agreeing — the end state. */
+export function grantedSnapshot(over: Partial<PermissionSnapshot> = {}): PermissionSnapshot {
+  return permissionSnapshot({
+    accessibility: "granted",
+    keyboardBitsGranted: true,
+    flagsChangedBitGranted: true,
+    grantedMaskHex: "0x1c00",
+    relaunchRequired: false,
+    ...over,
+  });
 }
 
 export function liveStatus(over: Partial<LiveStatus> = {}): LiveStatus {

@@ -9,6 +9,8 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
+import { WINDOW_SIZE } from "@/shared/constants";
+
 const read = (rel: string): string =>
   readFileSync(fileURLToPath(new URL(`../../${rel}`, import.meta.url)), "utf8");
 
@@ -72,7 +74,13 @@ describe("the heatmap's width", () => {
     // 880 − 64 (page px-8) − 40 (card px-5) = 776 px, i.e. 31 px of headroom.
     // Both halves are required: minWidth for the common case, the wrapper for
     // the safety case.
-    expect(read("src/main/windows.ts")).toContain("minWidth: 880");
+    //
+    // The number moved from `windows.ts` into `src/shared/constants.ts` so the
+    // launched-app smoke run could measure against the same one. Both halves of
+    // that move are asserted here — the value, and the window actually spreading
+    // it, because a constant nothing reads is a comment.
+    expect(WINDOW_SIZE.dashboard.minWidth).toBe(880);
+    expect(read("src/main/windows.ts")).toContain("...WINDOW_SIZE.dashboard");
   });
 
   it("uses the 5-stop ramp, not a 2-stop one", () => {

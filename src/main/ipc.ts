@@ -103,6 +103,13 @@ export function pushToAllWindows(runtime: AppRuntime, kind: RuntimeChange): void
       return;
     case "permissions":
       pushAll("wwb:push:permissions", runtime.permissions());
+      // `Toggles.jigglerAvailable` is DERIVED from the Accessibility grant
+      // (`runtime.toggles()`), so a permission change is also a toggles change.
+      // Without this the onboarding window grants Accessibility, the badge
+      // flips to "Granted", and the jiggler switch beside it stays greyed out
+      // until the window is reopened — the exact "it says yes and does nothing"
+      // shape this app is built against.
+      pushAll("wwb:push:toggles", runtime.toggles());
       pushAll("wwb:push:status", runtime.liveStatus());
       return;
     case "interval-close":

@@ -186,7 +186,7 @@ export function App(): React.ReactElement {
   }, [reloadStatus, reloadMetrics, reloadAppInfo, reloadToggles]);
 
   return (
-    <div className="min-h-svh bg-background">
+    <div data-view="dashboard" className="min-h-svh bg-background">
       <div className="mx-auto w-full max-w-[1100px] px-8 py-10">
         {/* Header. `titleBarStyle: "hiddenInset"` leaves no draggable chrome,
             so the header is the drag region — and the buttons opt back out. */}

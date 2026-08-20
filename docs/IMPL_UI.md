@@ -3026,6 +3026,42 @@ export function DoctorPanel() {
 
 ### 7.3 Integration — a launched app
 
+**`npm run smoke` is the built one.** `src/main/smoke.ts` launches the app with
+`--smoke`, opens *both* windows through the real `showDashboard()` /
+`showOnboarding()` over the real `app://` protocol, and measures them from
+inside the page. It exists because the entire dashboard once shipped crammed
+into the 560 × 640 onboarding window past a fully green suite: every renderer
+test mounts a component in a jsdom with no window, no size, no URL and no
+layout engine, so not one of them could have seen it.
+
+It asserts, per window and in two scenarios (`degraded` = the fresh-install
+state, `granted` = the same windows after a live `wwb:push:permissions`):
+
+- the view the renderer mounted is the window the main process opened;
+- neither window's content is wider than its viewport;
+- the dashboard is at least `WINDOW_SIZE.dashboard.minWidth` wide and shows
+  "This week";
+- the onboarding window is exactly 560 × 640, is not resizable, and its panes
+  fit with ≥ 16 px to spare;
+- `relaunchRequired` is stated in the window, and stops being stated after the
+  push — with nothing reloaded;
+- the jiggler switch is disabled without Accessibility, live with it, and
+  clicking it reaches `runtime.toggles().jiggler` rather than only the DOM.
+
+The rules live in `src/main/smoke-report.ts`, which is pure and unit-tested, so
+they run in the Linux CI job too; the macOS job runs the launch. Screenshots and
+`smoke-report.json` land in `$WWB_SMOKE_DIR`, in both palettes, which covers the
+screenshot half of `H05` below.
+
+It runs the **built** bundle rather than the signed `.app`: `src/native/index.ts`
+refuses the fake `SignalSource` in a packaged build on purpose, so a packaged run
+would need real TCC grants and could not run unattended. The `app://` handler,
+the loaded URL, the renderer bundle and the window geometry are identical
+between the two — `npm run selftest` and `npm run doctor` are what inspect the
+installed copy.
+
+The rows below are the launched-app cases that are still **not** built.
+
 | id | Assertion | How |
 |---|---|---|
 | **`UI-T01`** | **Closing the dashboard window does not stop tracking and does not freeze the tray.** Open the window, close it, inject signals for 3 simulated minutes, assert the tray title still advances and a closed interval lands in the DB. | `_electron.launch`, fake clock in the runtime, read `tray.getTitle()` via a test-only IPC channel registered under `NODE_ENV=test` |
