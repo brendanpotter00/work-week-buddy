@@ -29,7 +29,7 @@
 import * as React from "react";
 import { Camera, Mic, MousePointer2, Pause } from "lucide-react";
 
-import { formatHours, formatStopwatch, hoursToday, openIntervalCounts } from "@/shared/format";
+import { formatHours, formatStopwatch, hoursToday } from "@/shared/format";
 import { stopwatchView, type StopwatchTone } from "@/shared/stopwatch";
 import type { LiveStatus, MetricsPolicy } from "@/shared/ipc-types";
 
@@ -70,10 +70,6 @@ export function LiveStopwatch({
 }): React.ReactElement {
   const view = stopwatchView(status, policy, nowMs);
   const today = status ? hoursToday(status, policy, nowMs) : null;
-  // The open session is not always part of Today: the jiggler discards it, and
-  // so does the stray-bump floor for the first ninety seconds. Saying which is
-  // cheaper than explaining later why two numbers disagree.
-  const todayIncludesOpen = status !== null && openIntervalCounts(status, policy, nowMs);
 
   return (
     <section
@@ -133,8 +129,15 @@ export function LiveStopwatch({
           {formatHours(today)}
           <span className="text-sm font-normal text-muted-foreground">h</span>
         </div>
+        {/* Deliberately NOT "is the open session in this number?".
+            `openIntervalCounts()` reads `lastSignalMs`, and main drops `signal`
+            pushes on purpose (`ipc.ts`), so that answer is stale for as long as
+            a session lasts and would sit there saying "closed sessions only"
+            about a session that is in fact being counted. The jiggler is the
+            one exclusion that cannot go stale — toggling it IS an interval
+            boundary and does push — so it is the only one this line reports. */}
         <div className="mt-2 text-xs text-muted-foreground">
-          {todayIncludesOpen ? "including this session" : "closed sessions only"}
+          {view.tone === "uncounted" ? "not counting this session" : "counted so far"}
         </div>
       </div>
     </section>

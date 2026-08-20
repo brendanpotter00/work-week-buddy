@@ -156,9 +156,17 @@ export function hoursToday(
 
 /**
  * Whether the open interval will survive `v_countable` — the same filters
- * applied to the row that does not exist yet. Exported because the stopwatch
- * has to SAY SO when the answer is no: digits racing ahead on time that is
- * going to be thrown away are a lie, not a stopwatch.
+ * applied to the row that does not exist yet. This is the single definition
+ * `hoursThisWeek()` and `hoursToday()` are both built on, so the tray and the
+ * dashboard cannot disagree about whether the last two hours are going to
+ * count.
+ *
+ * It reads `lastSignalMs`, so a consumer holding a snapshot that is not
+ * refreshed on every signal (the renderer, by design — `ipc.ts` drops `signal`
+ * pushes) gets a CONSERVATIVE answer: it can say "not yet" about a session
+ * that has since passed the floor. That is safe for an hours figure, which
+ * must never run ahead of what the close rule will write, and it is why no
+ * label is driven straight off this.
  */
 export function openIntervalCounts(
   status: LiveStatus,

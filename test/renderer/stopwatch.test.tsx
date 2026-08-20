@@ -114,7 +114,7 @@ describe("while working", () => {
     const today = container.querySelector('[data-slot="stopwatch-today"]');
     // 5.1 closed + the 2h41m open interval, credited to its last signal.
     expect(today?.textContent).toContain("7.8");
-    expect(today?.textContent).toContain("including this session");
+    expect(today?.textContent).toContain("counted so far");
   });
 });
 
@@ -225,9 +225,9 @@ describe("the states that need a caveat look different", () => {
   it("says the jiggler is why, and says the time will not count", async () => {
     const { container } = await mount(liveStatus({ jigglerOnForOpenInterval: true }));
     expect(note(container)).toContain("will not count toward your hours");
-    // …and Today does not quietly include it either.
+    // …and Today says so beside the number, rather than quietly excluding it.
     expect(container.querySelector('[data-slot="stopwatch-today"]')?.textContent).toContain(
-      "closed sessions only",
+      "not counting this session",
     );
   });
 
