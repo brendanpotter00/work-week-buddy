@@ -21,12 +21,13 @@ No timers to start. No projects to tag. No categories. It watches the same signa
 > | **Grant Input Monitoring and Accessibility** | A permission prompt needs a human. Note the app already catches the case where macOS reports "granted" while the event mask it actually handed over is empty. |
 > | **`npx wrangler login`** | A browser flow against an account that can be billed. Everything after it is `npm run bringup:cloud`. |
 >
-> And one thing that is not waiting on you: **there is no UI yet for entering the
-> sync token**, so sync cannot be switched on even once the Worker is deployed.
-> The IPC channel and the Keychain-backed store both exist and are tested; the
-> settings pane that calls them does not. Until it lands the app tracks locally
-> and the doctor reports sync as *not configured* — a distinct state from
-> *failing*, and the rows are safe in the local mirror meanwhile.
+> Once the Worker is deployed, the URL and the token go into **Settings** —
+> reachable from the menu-bar icon, from the gear on the dashboard, or with ⌘,.
+> There is a *Test connection* button that tries the pair before saving, so a
+> wrong URL or a swapped token is answered immediately rather than silently.
+> Until you set it up the app tracks locally and the doctor reports sync as
+> *not configured* — a distinct state from *failing*, and the rows are safe in
+> the local mirror meanwhile.
 >
 > Start at [`docs/ROADMAP.md`](docs/ROADMAP.md) and read [`AGENTS.md`](AGENTS.md)
 > before changing anything — it lists thirteen mistakes that produce
@@ -71,7 +72,7 @@ Two settings turn it on:
 
 Both are written through one IPC call (`wwb:sync:setConfig`), applied to the running app without a relaunch, and the token is never read back out — the renderer only ever learns whether one exists. Deleting `sync-token.bin` returns the app to the unconfigured state; nothing else changes.
 
-> **Nothing calls that IPC yet.** There is no settings pane for the token, and DevTools is off in the packaged build, so today the second row of that table has no entry point. It is the one thing standing between a deployed Worker and two Macs actually syncing. `docs/BRINGUP.md` step 21.
+Both are entered in **Settings** — the menu-bar icon → *Settings…*, the gear on the dashboard, or ⌘,. The pane shows which of the three states sync is in (*not set up*, *syncing*, *not syncing*), the pending-row count, the last upload and download, and the row-count check; and *Test connection* calls the Worker's unauthenticated `/health` followed by one authenticated read, so "wrong URL" and "wrong token" come back as different answers **before** anything is stored.
 
 Once configured, `flush()` runs on interval close, on wake and at launch; `pull()` runs after every successful flush; and once a week the app exports itself to disk, compares its fingerprint against the cloud's, and checks the 72-hour silence alarm.
 

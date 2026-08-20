@@ -1,5 +1,5 @@
 /**
- * One bundle, two windows — the seam that had no test.
+ * One bundle, three windows — the seam that had no test.
  *
  * `src/main/windows.ts` opens the dashboard at `#/` and the onboarding window
  * at `#/onboarding`, and until this file existed `main.tsx` mounted `<App />`
@@ -16,10 +16,21 @@ import * as React from "react";
 
 import { App } from "./App";
 import { Onboarding } from "./Onboarding";
+import { Settings } from "./Settings";
 import { useRoute } from "./lib/route";
 
 export function Root(): React.ReactElement {
-  return useRoute() === "onboarding" ? <Onboarding /> : <App />;
+  // A switch rather than a ternary chain: `Route` is a closed union, so a
+  // fourth window is a compile error here rather than a window that silently
+  // renders the dashboard. That is the exact failure this file was written for.
+  switch (useRoute()) {
+    case "onboarding":
+      return <Onboarding />;
+    case "settings":
+      return <Settings />;
+    default:
+      return <App />;
+  }
 }
 
 export default Root;

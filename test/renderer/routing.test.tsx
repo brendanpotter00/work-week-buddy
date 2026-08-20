@@ -29,12 +29,15 @@ import { routeOf } from "@/renderer/lib/route";
 import { ROUTE } from "@/shared/constants";
 import {
   defaultHandlers,
+  doctorReport,
   installBridge,
   installDomStubs,
   makeBridge,
   metricsBundle,
   permissionSnapshot,
   renderApp,
+  syncConfigState,
+  uiSettings,
 } from "./harness";
 
 /** What the renderer sees after Chromium has parsed one of our URLs. */
@@ -55,8 +58,24 @@ describe("the URL main loads is the view the renderer mounts", () => {
       // onboarding — the one that shipped wrong
       const onb = locationOf(viewUrl(base, ROUTE.onboarding));
       expect(routeOf(onb.hash, onb.pathname)).toBe("onboarding");
+
+      // settings — the third window, added the same way, checked the same way.
+      // The bug this file exists for was a URL one side emitted that the other
+      // did not match; adding a window without adding this line would be it.
+      const set = locationOf(viewUrl(base, ROUTE.settings));
+      expect(routeOf(set.hash, set.pathname)).toBe("settings");
     });
   }
+
+  it("every route in ROUTE round-trips, so a fourth window cannot be half-added", () => {
+    // Not a loop over three literals: a loop over the TABLE. `showSettings()`
+    // loads `ROUTE.settings` and `routeOf` matches against the same object, so
+    // this fails the moment a key is added to one side alone.
+    for (const [name, path] of Object.entries(ROUTE)) {
+      const loc = locationOf(viewUrl(APP_ORIGIN, path));
+      expect(routeOf(loc.hash, loc.pathname)).toBe(name);
+    }
+  });
 
   it("keeps the hash through URL parsing rather than losing it to the path", () => {
     // `app://` serves a file tree; there is no server to map /onboarding onto
@@ -140,6 +159,26 @@ describe("<Root /> mounts the view the hash names", () => {
     expect(container.querySelector('[data-view="onboarding"]')).not.toBeNull();
     // The reported symptom, as an assertion: the dashboard must be ABSENT.
     expect(container.querySelector('[data-view="dashboard"]')).toBeNull();
+  });
+
+  it("mounts the settings view at #/settings, and not the dashboard", async () => {
+    installDomStubs();
+    setHash("#/settings");
+    installBridge(
+      makeBridge({
+        ...defaultHandlers(metricsBundle()),
+        "wwb:settings:get": () => uiSettings(),
+        "wwb:sync:config": () => syncConfigState(),
+        "wwb:doctor:get": () => doctorReport(),
+      }),
+    );
+
+    const { container, findByText } = renderApp(<Root />);
+    await findByText("Cloud sync");
+
+    expect(container.querySelector('[data-view="settings"]')).not.toBeNull();
+    expect(container.querySelector('[data-view="dashboard"]')).toBeNull();
+    expect(container.querySelector('[data-view="onboarding"]')).toBeNull();
   });
 
   it("mounts the dashboard at #/", async () => {

@@ -17,7 +17,9 @@
  * `loadURL(`${APP_ORIGIN}/onboarding`)` would route rather than silently render
  * the wrong view, which is exactly the failure this file exists to end.
  *
- * No router dependency: there are two views and there will be two views.
+ * No router dependency: there are three views, each of which is a WINDOW the
+ * main process opens. Routing here is a lookup, not navigation — nothing in the
+ * renderer ever changes the hash.
  */
 import * as React from "react";
 
@@ -47,7 +49,14 @@ export function routeOf(hash: string, pathname = ""): Route {
   // `/index.html` is what both origins serve; it carries no routing information.
   const fromPath = normalize(pathname.replace(/\/index\.html$/i, ""));
   const path = fromHash !== "" ? fromHash : fromPath;
-  return path === ROUTE.onboarding ? "onboarding" : "dashboard";
+  // A table rather than a chain of ternaries: `ROUTE` is the only definition of
+  // what a path means, and matching against it means a fourth window can never
+  // be added on one side of this seam alone — which is the bug this whole file
+  // exists for.
+  for (const [name, value] of Object.entries(ROUTE) as Array<[Route, string]>) {
+    if (path === value && name !== "dashboard") return name;
+  }
+  return "dashboard";
 }
 
 function currentRoute(): Route {

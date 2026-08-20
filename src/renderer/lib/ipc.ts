@@ -36,6 +36,9 @@ import {
   type PermissionSnapshot,
   type PushChannel,
   type PushContract,
+  type SelfTestResult,
+  type SyncConfigState,
+  type SyncTestResult,
   type ToggleChange,
   type Toggles,
   type UiSettings,
@@ -79,13 +82,26 @@ export const ipc = {
   relaunch: (): Promise<void> => bridge().invoke("wwb:permissions:relaunch", undefined),
   dismissOnboarding: (): Promise<void> => bridge().invoke("wwb:onboarding:dismiss", undefined),
   doctor: (): Promise<DoctorReport> => bridge().invoke("wwb:doctor:get", undefined),
+  selfTest: (): Promise<SelfTestResult> => bridge().invoke("wwb:doctor:selftest", undefined),
   flush: (): Promise<FlushResult> => bridge().invoke("wwb:sync:flush", undefined),
+  syncConfig: (): Promise<SyncConfigState> => bridge().invoke("wwb:sync:config", undefined),
+  /**
+   * WRITE-ONLY for the token, and the type says so: the answer is a
+   * `SyncConfigState`, which carries `tokenPresent` and never a token. Nothing
+   * in the renderer may keep the typed value past this call.
+   */
+  setSyncConfig: (patch: { workerUrl?: string; token?: string }): Promise<SyncConfigState> =>
+    bridge().invoke("wwb:sync:setConfig", patch),
+  /** Same one-way rule, and it stores nothing. Omitted halves use the stored ones. */
+  testSyncConfig: (patch: { workerUrl?: string; token?: string }): Promise<SyncTestResult> =>
+    bridge().invoke("wwb:sync:test", patch),
   renameMachine: (label: string): Promise<AppInfo> =>
     bridge().invoke("wwb:machine:rename", { label }),
   settings: (): Promise<UiSettings> => bridge().invoke("wwb:settings:get", undefined),
   setSettings: (p: Partial<UiSettings>): Promise<UiSettings> =>
     bridge().invoke("wwb:settings:set", p),
   openDashboard: (): Promise<void> => bridge().invoke("wwb:window:openDashboard", undefined),
+  openSettings: (): Promise<void> => bridge().invoke("wwb:window:openSettings", undefined),
 } as const;
 
 export function messageOf(e: unknown): string {
@@ -174,6 +190,36 @@ export function useAppInfo(): Query<AppInfo> {
 
 export function usePermissions(): Query<PermissionSnapshot> {
   return useSnapshot<PermissionSnapshot>(() => ipc.permissions(), "wwb:push:permissions", []);
+}
+
+/** The stored settings, so the pane can render what IS rather than a guess. */
+export function useSettings(): Query<UiSettings> {
+  return useSnapshot<UiSettings>(() => ipc.settings(), null, []);
+}
+
+/**
+ * The sync configuration: a URL, whether a token exists, and why it is unusable
+ * if it is. Never the token — `SyncConfigState` has no field for one.
+ *
+ * No push channel: main does not announce a config change, because the only
+ * thing that can make one is this window, and `setSyncConfig` returns the new
+ * state directly.
+ */
+export function useSyncConfig(): Query<SyncConfigState> {
+  return useSnapshot<SyncConfigState>(() => ipc.syncConfig(), null, []);
+}
+
+/**
+ * The doctor, on demand.
+ *
+ * `wwb:push:doctor` exists in the contract and nothing has ever sent one, so
+ * this reloads explicitly rather than pretending to be live. Every number in it
+ * is a snapshot with `generatedAtMs` attached; a pane that shows the timestamp
+ * beside the numbers is honest about that, and one that implied it was live
+ * would not be.
+ */
+export function useDoctor(): Query<DoctorReport> {
+  return useSnapshot<DoctorReport>(() => ipc.doctor(), null, []);
 }
 
 export interface TogglesQuery extends Query<Toggles> {

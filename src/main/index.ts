@@ -44,7 +44,13 @@ import { privacyPaneUrl, shouldShowOnboarding, startPermissionPoll } from "./onb
 import { APP_SCHEME, registerAppProtocol } from "./protocol";
 import { SettingsStore } from "./settings";
 import { TrayController } from "./tray";
-import { closeAllWindows, getOnboardingWindow, showDashboard, showOnboarding } from "./windows";
+import {
+  closeAllWindows,
+  getOnboardingWindow,
+  showDashboard,
+  showOnboarding,
+  showSettings,
+} from "./windows";
 
 app.setName(APP_NAME);
 
@@ -137,7 +143,10 @@ app.whenReady().then(async () => {
   }
 
   registerAppProtocol();
-  buildAppMenu(() => void showDashboard(settings.get("windowBackground")));
+  buildAppMenu(
+    () => void showDashboard(settings.get("windowBackground")),
+    () => void showSettings(settings.get("windowBackground")),
+  );
 
   const services = await createCoreServices({
     userDataDir: app.getPath("userData"),
@@ -171,6 +180,7 @@ app.whenReady().then(async () => {
     },
     closeOnboarding: () => getOnboardingWindow()?.close(),
     showDashboard: () => showDashboard(settings.get("windowBackground")),
+    showSettings: () => showSettings(settings.get("windowBackground")),
   });
 
   // The tray IS the app: it exists before any window and outlives every window.
@@ -179,6 +189,7 @@ app.whenReady().then(async () => {
     isPackaged: app.isPackaged,
     showDashboard: () => void showDashboard(settings.get("windowBackground")),
     showOnboarding: () => void showOnboarding(settings.get("windowBackground")),
+    showSettings: () => void showSettings(settings.get("windowBackground")),
     openPrivacyPane: (which) => void shell.openExternal(privacyPaneUrl(which)),
     showErrorBox: (title, content) => dialog.showErrorBox(title, content),
     askJigglerPause: async () => {
@@ -253,7 +264,10 @@ app.on("browser-window-created", () => {
   // Keep the app menu alive across window churn: an LSUIElement app that loses
   // its menu also loses ⌘C/⌘V, which reads as "Electron is broken".
   if (Menu.getApplicationMenu() === null) {
-    buildAppMenu(() => void showDashboard(settings.get("windowBackground")));
+    buildAppMenu(
+      () => void showDashboard(settings.get("windowBackground")),
+      () => void showSettings(settings.get("windowBackground")),
+    );
   }
 });
 

@@ -31,7 +31,7 @@ import { fakeSettings } from "../../test/helpers/runtime";
 import { createMachineNaming, type MachineNaming } from "./device-name";
 import type { SettingsStore } from "./settings";
 import { NOT_CONFIGURED } from "./sync-seam";
-import { createSyncService, resolveSyncConfig, type SyncService } from "./sync";
+import { createSyncService, probeSyncConfig, resolveSyncConfig, type SyncService } from "./sync";
 
 const NOW = t("2026-08-19T12:00:00Z"); // a Wednesday
 const dirs: string[] = [];
@@ -572,5 +572,81 @@ describe("renaming and the cloud", () => {
     // so the two writers stay distinct rather than quietly covering for each
     // other.
     expect(readMachines(db)).toEqual([]);
+  });
+});
+
+/**
+ * "Test connection", against the real Worker routes.
+ *
+ * The two requests it makes are the two diagnoses it can give, and they need
+ * different fixes: a URL that is not a Worker, and a token the Worker rejects.
+ * The second one is the likely mistake — bring-up mints one token per Mac and
+ * swapping them fails exactly like this — and it is the one a URL-only check
+ * can never produce.
+ */
+describe("probeSyncConfig", () => {
+  const probe = (url: string, token: string | null, cloud: FakeCloud) =>
+    probeSyncConfig(url, token, { fetchImpl: cloud.fetch, now: () => NOW });
+
+  it("says configured-and-working only when BOTH requests succeed", async () => {
+    const cloud = new FakeCloud();
+    const r = await probe(BASE_URL, TOKEN_PERSONAL, cloud);
+    expect(r).toMatchObject({ ok: true, reachable: true, authorized: true, error: null });
+    // /health first, then an authenticated read. /fingerprint would also have
+    // proved the token and hashes every row id to do it; a button somebody
+    // presses while typing does not get to be that expensive.
+    expect(cloud.calls.map((c) => `${c.method} ${c.path}`)).toEqual([
+      "GET /health",
+      "GET /machines",
+    ]);
+  });
+
+  it("separates a rejected token from an unreachable Worker", async () => {
+    const cloud = new FakeCloud();
+    const r = await probe(BASE_URL, "not-the-right-token", cloud);
+    expect(r.reachable).toBe(true);
+    expect(r.authorized).toBe(false);
+    expect(r.status).toBe(401);
+    // The sentence has to name the mistake that is actually likely.
+    expect(r.error).toMatch(/each Mac gets its own/i);
+  });
+
+  it("blames the network — and names the proxy — when nothing answers", async () => {
+    const cloud = new FakeCloud();
+    cloud.offline = true;
+    const r = await probe(BASE_URL, TOKEN_PERSONAL, cloud);
+    expect(r).toMatchObject({ ok: false, reachable: false, authorized: false });
+    // `/health` is unauthenticated precisely so bring-up can prove the work
+    // Mac's proxy allows workers.dev. Say so where it will be read.
+    expect(r.error).toMatch(/workers\.dev/);
+  });
+
+  it("says which half is missing rather than calling anything", async () => {
+    const cloud = new FakeCloud();
+    expect(await probe("", TOKEN_PERSONAL, cloud)).toMatchObject({
+      ok: false,
+      error: "enter the Worker URL first",
+    });
+    expect(await probe(BASE_URL, null, cloud)).toMatchObject({
+      ok: false,
+      error: "enter this Mac's token first",
+    });
+    expect(await probe(BASE_URL, "   ", cloud)).toMatchObject({ ok: false });
+    // Not one request was made for a configuration that cannot be used.
+    expect(cloud.calls).toEqual([]);
+  });
+
+  it("carries the same URL verdict as resolveSyncConfig, and never throws", async () => {
+    const cloud = new FakeCloud();
+    const r = await probe("wwb-sync.example.workers.dev", TOKEN_PERSONAL, cloud);
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/not a URL/);
+    expect(cloud.calls).toEqual([]);
+  });
+
+  it("trims a token pasted with a trailing newline instead of failing on it", async () => {
+    const cloud = new FakeCloud();
+    const r = await probe(`  ${BASE_URL}  `, `\n${TOKEN_PERSONAL}\n`, cloud);
+    expect(r.ok).toBe(true);
   });
 });

@@ -81,6 +81,62 @@ describe("a real input event opens an interval and the store has it", () => {
   });
 });
 
+/**
+ * The idle timeout is a SETTING (PRD §7: "15 minutes, adjustable 10–15"), and a
+ * setting that needs a relaunch is one the owner has to be warned about. What
+ * must NOT change is the row: the reducer still closes at the last real signal,
+ * whatever the timeout is. AGENTS.md, the rule that outranks everything.
+ */
+describe("changing the idle timeout while an interval is open", () => {
+  it("takes effect immediately when shortened, and still closes at the last signal", async () => {
+    h = await makeHarness();
+    h.source.key(Date.now());
+    expect(h.runtime.liveStatus().deadlineMs).toBe(T0 + 15 * MIN);
+
+    advance(2 * MIN);
+    h.source.key(Date.now());
+    const lastSignal = T0 + 2 * MIN;
+
+    h.runtime.setIdleTimeoutMs(10 * MIN);
+    // Re-armed from the last real signal rather than left on the old deadline:
+    // otherwise a shortened timeout would not be noticed for another five
+    // minutes.
+    expect(h.runtime.liveStatus().deadlineMs).toBe(lastSignal + 10 * MIN);
+
+    advance(11 * MIN);
+    const stored = rows(h.db);
+    expect(stored).toHaveLength(1);
+    // THE END STAMP IS UNCHANGED. Shortening the timeout changes when the app
+    // notices, never what it writes.
+    expect(stored[0]!.ended_at_ms).toBe(lastSignal);
+    expect(stored[0]!.end_reason).toBe("idle_timeout");
+  });
+
+  it("lengthening it keeps the session open past the old deadline", async () => {
+    h = await makeHarness();
+    h.source.key(Date.now());
+    h.runtime.setIdleTimeoutMs(20 * MIN);
+
+    // Past the original 15 minutes with no input at all.
+    advance(16 * MIN);
+    expect(h.runtime.liveStatus().state).toBe("working");
+    expect(countIntervals(h.db)).toBe(0);
+
+    advance(5 * MIN);
+    expect(h.runtime.liveStatus().state).toBe("idle");
+    expect(rows(h.db)[0]!.ended_at_ms).toBe(T0);
+  });
+
+  it("ignores a value that could not be a timeout, rather than arming nothing", async () => {
+    h = await makeHarness();
+    h.source.key(Date.now());
+    for (const bad of [Number.NaN, 0, -1, Number.POSITIVE_INFINITY]) {
+      h.runtime.setIdleTimeoutMs(bad);
+      expect(h.runtime.liveStatus().deadlineMs).toBe(T0 + 15 * MIN);
+    }
+  });
+});
+
 describe("a stamped, synthetic event does NOT open an interval", () => {
   /**
    * AGENTS.md trap #4, the 24-hour-workday bug: if our own jiggle were ever

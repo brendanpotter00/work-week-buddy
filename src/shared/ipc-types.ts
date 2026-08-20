@@ -367,6 +367,38 @@ export interface SyncConfigState {
   vaultAvailable: boolean;
 }
 
+/**
+ * The answer to "does this URL and this token actually work", BEFORE either is
+ * saved.
+ *
+ * Two booleans and not one, because the two failures need different fixes and
+ * the owner cannot tell them apart from a single "it didn't work":
+ *
+ *  - `reachable` is `GET /health`, which is unauthenticated on purpose
+ *    (`worker/src/routes.ts`). False means the URL is wrong, the Worker is not
+ *    deployed, or — the case this whole probe exists for — the work Mac's proxy
+ *    is blocking `workers.dev`.
+ *  - `authorized` is an authenticated read on the same host. False with
+ *    `reachable: true` means the Worker is fine and the TOKEN is wrong, which
+ *    is the one diagnosis a URL-only check can never produce.
+ *
+ * It carries no token and no response body: a probe that echoed either would
+ * put the secret in the renderer, which is the single thing this boundary
+ * exists to prevent.
+ */
+export interface SyncTestResult {
+  /** Reachable AND authorized. Anything else is a failure with a reason. */
+  ok: boolean;
+  reachable: boolean;
+  authorized: boolean;
+  /** The HTTP status that decided it, when there was one. */
+  status: number | null;
+  /** Round trip in ms, so "it works but it is slow" is visible. */
+  ms: number | null;
+  /** Plain words. Never a token, never a raw response body. */
+  error: string | null;
+}
+
 // ── the contract ────────────────────────────────────────────────────────────
 
 export interface InvokeContract {
@@ -390,10 +422,25 @@ export interface InvokeContract {
     req: { workerUrl?: string; token?: string };
     res: SyncConfigState;
   };
+  /**
+   * Try a candidate configuration WITHOUT storing it.
+   *
+   * The request has the same shape as `setConfig` and the same one-way rule: a
+   * token may go in and never comes back. Omit either half and the stored one
+   * is used, so "re-test what is saved" needs no retyping — and re-testing is
+   * the common case, since the token cannot be read back to retype.
+   */
+  "wwb:sync:test": { req: { workerUrl?: string; token?: string }; res: SyncTestResult };
   "wwb:machine:rename": { req: { label: string }; res: AppInfo };
   "wwb:settings:get": { req: void; res: UiSettings };
   "wwb:settings:set": { req: Partial<UiSettings>; res: UiSettings };
   "wwb:window:openDashboard": { req: void; res: void };
+  /**
+   * Settings is its own window (`ROUTE.settings`), so the dashboard reaches it
+   * the same way the tray does — by asking main to open it — rather than by
+   * navigating itself and losing the dashboard.
+   */
+  "wwb:window:openSettings": { req: void; res: void };
 }
 
 export interface PushContract {
@@ -425,10 +472,12 @@ export const INVOKE_CHANNELS = [
   "wwb:sync:flush",
   "wwb:sync:config",
   "wwb:sync:setConfig",
+  "wwb:sync:test",
   "wwb:machine:rename",
   "wwb:settings:get",
   "wwb:settings:set",
   "wwb:window:openDashboard",
+  "wwb:window:openSettings",
 ] as const satisfies readonly InvokeChannel[];
 
 export const PUSH_CHANNELS = [

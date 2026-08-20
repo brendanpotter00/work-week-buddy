@@ -15,7 +15,7 @@ Read [`AGENTS.md`](../AGENTS.md) first if you are going to change anything.
 | C. Install | each Mac | 10 min each |
 | D. Cloud | either Mac, once | 10 min |
 | E. Second Mac | the **work** Mac | 15 min |
-| F. Turning sync on | each Mac | **blocked — see step 21** |
+| F. Turning sync on | each Mac | 2 min each |
 
 Two things in here are one-way. Losing `wwb.p12` costs you every permission
 grant on both Macs. Rotating a token that is already set takes that Mac offline
@@ -370,37 +370,44 @@ Both go in through one IPC call, `wwb:sync:setConfig`, and take effect without a
 relaunch. The token is write-only: the renderer can ask whether one exists and
 can never read it back.
 
-### 21. ⚠️ This step is currently blocked
+### 21. Paste both halves into Settings
 
-**There is no way to enter the token yet.** `wwb:sync:setConfig` exists, is on
-the preload allowlist, and is tested; `safeStorage` storage exists and is
-tested. What is missing is a settings pane that calls it — and DevTools is
-disabled in the packaged build (`devTools: isDev()`), so there is no console
-route either.
+Open the settings window. There are three routes and they all land in the same
+place:
 
-Until that lands:
+- the **menu-bar icon → Settings…** — the one to use, because the app is
+  usually all tray and no window
+- the **gear** at the top right of the dashboard
+- **⌘,** while any window is focused
 
-- Everything in Parts A–E is worth doing now. Tracking, the dashboard, the
-  weekly local export and `--doctor` all work with no cloud at all.
-- `npm run doctor` will keep reporting `Last cloud write: not configured`, which
-  is honest: the rows are accumulating safely in the local mirror and will
-  upload whenever sync is switched on.
-- Do **not** hand-edit `sync-token.bin`. It is a `safeStorage` blob keyed to
-  this Mac's Keychain; an unreadable one is treated as absent, so the only
-  effect would be to look configured and silently not be.
+In **Cloud sync**:
 
-The URL half alone can be set by hand, and doing so is harmless — the app treats
-"URL but no token" as unconfigured. **Quit the app first**: settings are held in
-memory and the whole object is rewritten on the next change, so an edit made
-while it is running is overwritten without warning.
+1. Paste the **Worker URL** from step 20. A URL that is not a URL is rejected
+   next to the field, before anything is written.
+2. Paste **this Mac's token** — the one for *this* laptop. Step 20 printed one
+   per Mac; swapping them files every hour under the other machine, and that
+   mistake is invisible afterwards.
+3. Press **Test connection** *before* Save. It calls the Worker's
+   unauthenticated `/health` and then one authenticated read, so you get one of
+   three answers rather than silence:
+   - *reached the Worker and the token was accepted* — go ahead and Save.
+   - *reachable but rejected this token* — the URL is right and the token is
+     wrong. Usually the two tokens are the wrong way round.
+   - *could not reach …* — the URL is wrong, the Worker is not deployed, or, on
+     the work Mac, the proxy is blocking `workers.dev`. That is exactly why
+     `/health` needs no token.
+4. **Save.** It applies without a relaunch, and the badge at the top right of
+   the card goes from *Not set up* to *Syncing*.
 
-```bash
-osascript -e 'quit app "Work Week Buddy"'
-open "$HOME/Library/Application Support/Work Week Buddy/settings.json"
-# "syncWorkerUrl": "https://wwb-sync.<account>.workers.dev"
-```
+The token is write-only across the boundary: after Save the field is blank and
+the pane can only ever learn that *a* token exists. There is nothing to read it
+back with.
 
-### 22. What you should see once it is unblocked
+Do **not** hand-edit `sync-token.bin`. It is a `safeStorage` blob keyed to this
+Mac's Keychain; an unreadable one is treated as absent, so the only effect would
+be to look configured and silently not be.
+
+### 22. What you should see
 
 ```bash
 npm run doctor

@@ -1,5 +1,5 @@
 /**
- * The two windows — `docs/IMPL_UI.md` §1.5.
+ * The windows — `docs/IMPL_UI.md` §1.5.
  *
  * A window is a VIEW, not the app. The dashboard is destroyed on close (not
  * hidden), tracking continues without it, and the tray title keeps advancing
@@ -25,6 +25,7 @@ const isDev = (): boolean => !!process.env["ELECTRON_RENDERER_URL"];
 
 let dashboard: BrowserWindow | null = null;
 let onboarding: BrowserWindow | null = null;
+let settings: BrowserWindow | null = null;
 
 function baseWebPreferences(): Electron.WebPreferences {
   return {
@@ -139,6 +140,47 @@ export async function showOnboarding(backgroundColor = "#FFFFFF"): Promise<Brows
   });
   await load(onboarding, ROUTE.onboarding);
   return onboarding;
+}
+
+/**
+ * The settings window.
+ *
+ * ITS OWN WINDOW, and reachable from the tray without the dashboard, because
+ * that is where sync gets configured and the tray is where this app lives. It
+ * is also why it is not a panel inside the dashboard: opening a 1100-px window
+ * to reach two text fields is a step nobody takes, and the owner's whole
+ * complaint was that there was no way in at all.
+ *
+ * Resizable, unlike onboarding: it holds two editable lists whose length is the
+ * user's business. `minWidth`/`minHeight` (`WINDOW_SIZE.settings`) are what
+ * keep the sync form reachable at any size it can be dragged to.
+ */
+export async function showSettings(backgroundColor = "#FFFFFF"): Promise<BrowserWindow> {
+  if (settings && !settings.isDestroyed()) {
+    settings.show();
+    settings.focus();
+    return settings;
+  }
+  settings = new BrowserWindow({
+    ...WINDOW_SIZE.settings,
+    show: false,
+    title: "Settings",
+    titleBarStyle: "hiddenInset",
+    trafficLightPosition: { x: 14, y: 14 },
+    backgroundColor,
+    webPreferences: baseWebPreferences(),
+  });
+  lockDownNavigation(settings);
+  settings.once("ready-to-show", () => settings?.show());
+  settings.on("closed", () => {
+    settings = null;
+  });
+  await load(settings, ROUTE.settings);
+  return settings;
+}
+
+export function getSettingsWindow(): BrowserWindow | null {
+  return settings && !settings.isDestroyed() ? settings : null;
 }
 
 export function getOnboardingWindow(): BrowserWindow | null {

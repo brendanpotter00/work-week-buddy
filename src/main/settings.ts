@@ -8,6 +8,7 @@
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { DEFAULTS, MEETING_APPS, MIC_IGNORE } from "../shared/constants";
+import type { SelfTestResult } from "../shared/ipc-types";
 
 export interface MainSettings {
   machineId: string;
@@ -34,6 +35,23 @@ export interface MainSettings {
    * (see `token.ts`). A URL is not a credential. AGENTS.md, "Secrets".
    */
   syncWorkerUrl: string;
+  /**
+   * The last time the jiggler self-test ran, and what it said.
+   *
+   * NOT a preference — it is evidence, and it is the one thing in this file
+   * nobody chooses. `docs/MACOS.md` calls the self-test the single most
+   * important safety mechanism in the product: it is what proves our own
+   * synthetic input cannot be mistaken for a human, and getting that wrong
+   * inflates every hours figure silently. `scripts/install.sh` gates the
+   * install on it — and then nothing ever ran it again, because there was
+   * nowhere in the app to run it from and nowhere to see when it last passed.
+   *
+   * It lives here rather than in the database because it is a property of this
+   * INSTALL — a binary, a code signature and a set of TCC grants — not of the
+   * hours the database holds. Restoring a backup must not restore another
+   * Mac's proof that this one is safe.
+   */
+  lastSelfTest: SelfTestResult | null;
 }
 
 export const SETTINGS_DEFAULTS: MainSettings = {
@@ -50,6 +68,7 @@ export const SETTINGS_DEFAULTS: MainSettings = {
   countJigglerTime: DEFAULTS.countJigglerTime ? 1 : 0,
   graceS: 0,
   syncWorkerUrl: "",
+  lastSelfTest: null,
 };
 
 export class SettingsStore {
