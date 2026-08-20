@@ -1,8 +1,13 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 vi.mock("electron", () => import("../../test/fakes/electron"));
 
-import { APP_ORIGIN, CSP, resolveAppPath } from "./protocol";
+import { net, protocol, resetElectronMock } from "../../test/fakes/electron";
+import { APP_ORIGIN, CSP, registerAppProtocol, resolveAppPath } from "./protocol";
+import { resetLogSinkForTests } from "./log";
 
 const ROOT = "/app/out/renderer";
 
@@ -55,5 +60,66 @@ describe("the app:// path resolver", () => {
     expect(CSP).toContain("default-src 'none'");
     expect(CSP).toContain("object-src 'none'");
     expect(CSP).not.toContain("script-src 'self' 'unsafe-inline'");
+  });
+});
+
+/**
+ * A HANDLER THAT THROWS IS A WINDOW THAT NEVER OPENS AND NEVER SAYS WHY.
+ *
+ * `protocol.handle` swallows a rejected handler: the renderer gets a bare
+ * network error, `ready-to-show` never fires because nothing painted, the
+ * window stays hidden, and main logs nothing at all. That is a windowless app
+ * with an empty stderr, which this project has now shipped once.
+ *
+ * Against a REAL directory, because `existsSync` is the guard being tested and
+ * an ESM namespace cannot be spied on.
+ */
+describe("the app:// handler when something goes wrong", () => {
+  const dirs: string[] = [];
+  let root = "";
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), "wwb-proto-"));
+    dirs.push(root);
+    writeFileSync(join(root, "index.html"), "<!doctype html><title>hi</title>");
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+  });
+
+  afterEach(() => {
+    resetElectronMock();
+    resetLogSinkForTests();
+    vi.restoreAllMocks();
+    for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  });
+
+  async function handle(url: string): Promise<Response> {
+    registerAppProtocol(root);
+    const fn = protocol.handlers.get("app") as (r: { url: string }) => Promise<Response>;
+    return fn({ url });
+  }
+
+  it("answers 500 and LOGS, instead of rejecting, when the read blows up", async () => {
+    const errors: string[] = [];
+    vi.spyOn(console, "error").mockImplementation((m: unknown) => {
+      errors.push(String(m));
+    });
+    vi.spyOn(net, "fetch").mockRejectedValue(new Error("net::ERR_FILE_NOT_FOUND"));
+
+    const res = await handle(`${APP_ORIGIN}/index.html`);
+
+    // Not a rejection. A rejection here is invisible from both sides.
+    expect(res.status).toBe(500);
+    expect(errors.join("\n")).toMatch(/app:\/\/ FAILED/);
+  });
+
+  it("keeps the traversal guard and stamps the CSP on a real file", async () => {
+    expect((await handle(`${APP_ORIGIN}/..%2f..%2fetc/passwd`)).status).toBe(403);
+    expect((await handle(`${APP_ORIGIN}/nope.js`)).status).toBe(404);
+
+    const ok = await handle(`${APP_ORIGIN}/index.html`);
+    expect(ok.status).toBe(200);
+    expect(ok.headers.get("Content-Security-Policy")).toBe(CSP);
+    expect(ok.headers.get("X-Content-Type-Options")).toBe("nosniff");
   });
 });

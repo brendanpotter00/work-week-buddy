@@ -248,6 +248,19 @@ export async function createCoreServices(opts: {
   settings: SettingsStore;
   appVersion: string;
   isPackaged: boolean;
+  /**
+   * `--smoke`. The only thing that lets a PACKAGED build take the fake signal
+   * source, and then only alongside two environment variables — see
+   * `shouldUseFake` in `src/native/index.ts`.
+   */
+  isSmokeRun?: boolean;
+  /**
+   * Where the weekly export goes. Production leaves it undefined and takes the
+   * iCloud-or-Documents answer; the smoke run points it inside its own
+   * throwaway profile, because the one thing a test may not do is write to the
+   * owner's iCloud Drive.
+   */
+  backupDir?: string;
   tz?: string;
   /**
    * Electron's `safeStorage`. Null on a system without one — and then no token
@@ -275,7 +288,10 @@ export async function createCoreServices(opts: {
     log.warn("IOPlatformUUID unavailable — using a persisted random machine id");
   }
 
-  const source = await createSignalSource({ isPackaged: opts.isPackaged });
+  const source = await createSignalSource({
+    isPackaged: opts.isPackaged,
+    ...(opts.isSmokeRun === undefined ? {} : { isSmokeRun: opts.isSmokeRun }),
+  });
   const tz = opts.tz ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
 
   // ── The sync layer, wired in ────────────────────────────────────────────
@@ -289,6 +305,7 @@ export async function createCoreServices(opts: {
   const currentLabel = (): string => opts.settings.get("machineLabel");
   const sync = createSyncService({
     db,
+    ...(opts.backupDir === undefined ? {} : { backupDir: opts.backupDir }),
     config: resolved.config,
     configError: resolved.error,
     machineId,

@@ -33,6 +33,27 @@ import { WINDOW_SIZE } from "../shared/constants";
  */
 export const SMOKE_PROFILE_PREFIX = "wwb-smoke-";
 
+/**
+ * The verdict file a packaged run leaves in `WWB_SMOKE_DIR`.
+ *
+ * A packaged run is started through LaunchServices, which hands the caller a
+ * detached process and no exit code at all. `tools/smoke-packaged.sh` waits for
+ * this file; its ABSENCE inside the timeout is itself a failure, and it is the
+ * one that catches a main thread frozen on boot.
+ */
+export const RESULT_FILENAME = "result.json";
+
+/**
+ * The worst a 250 ms timer may be late before the main thread counts as stalled.
+ *
+ * Generous on purpose: `capturePage()` and six screenshots are real work, and a
+ * loaded CI runner is slower than a desk. It is not tuned to catch the freeze
+ * that shipped — that one blocked forever, and forever is caught by the run
+ * never finishing. This catches its smaller relatives, the synchronous call on
+ * the boot path that is merely slow today.
+ */
+export const MAX_STALL_MS = 3_000;
+
 export type SmokeWindow = "dashboard" | "onboarding";
 
 /**
@@ -96,6 +117,17 @@ export interface JigglerClickProbe {
 export interface SmokeReport {
   ranAtMs: number;
   appVersion: string;
+  /** True when this ran inside the signed `.app`, false for `electron .`. */
+  packaged: boolean;
+  /**
+   * Worst main-thread stall observed during the run, in ms.
+   *
+   * The packaged app once booted with its main thread blocked in a synchronous
+   * `readdirSync` waiting on a macOS consent prompt — no windows, no logs, no
+   * `second-instance`, forever. This is the number that says the event loop
+   * kept running (`src/main/file-access.ts`).
+   */
+  maxStallMs: number;
   probes: WindowProbe[];
   jigglerClick: JigglerClickProbe | null;
   /** Written only when WWB_SMOKE_DIR is set. Paths, for a human to open. */
@@ -136,6 +168,15 @@ function find(
  */
 export function checkSmokeReport(report: SmokeReport): string[] {
   const fail: string[] = [];
+
+  // The main thread is the whole app: the tray, the IPC, every window and every
+  // timer are on it. A stall here is not slowness, it is the app being gone.
+  if (report.maxStallMs > MAX_STALL_MS) {
+    fail.push(
+      `the main thread stalled for ${report.maxStallMs}ms during the run (limit ${MAX_STALL_MS}ms). ` +
+        `Something on the main thread is doing blocking I/O — see src/main/file-access.ts.`,
+    );
+  }
 
   for (const { window, scenario } of EXPECTED) {
     if (!find(report, window, scenario)) {

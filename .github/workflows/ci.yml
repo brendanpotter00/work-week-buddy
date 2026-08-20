@@ -110,12 +110,45 @@ jobs:
           WWB_SMOKE_DIR: ${{ runner.temp }}/smoke
         run: npm run smoke --if-present
 
+      # ── THE SAME RUN, AGAINST THE THING WE ACTUALLY SHIP ──────────────────
+      # The step above runs `electron .` from a shell. That is not the app.
+      # A packaged build launched by LaunchServices is a different process with
+      # a different TCC identity, and the difference cost a release: the app
+      # booted, showed its tray icon, opened its database and then had NO
+      # WINDOWS AT ALL with nothing on stderr, because its main thread was
+      # blocked on a macOS consent prompt a terminal launch never sees.
+      # src/main/file-access.ts has the whole story.
+      #
+      # This packages the real .app, launches it through `open -n` — what Finder
+      # and the LaunchAgent use — and waits for a verdict file. No verdict
+      # inside the timeout is the failure that matters.
+      - name: Packaged smoke (real .app, launched by LaunchServices)
+        if: steps.app.outputs.exists == 'true'
+        env:
+          WWB_SMOKE_DIR: ${{ runner.temp }}/smoke-packaged
+        run: bash tools/smoke-packaged.sh
+
+      # A gate nobody has watched fail is a gate nobody should trust. This traps
+      # the packaged app's main thread in an open(2) that never returns — the
+      # same mechanism as the real freeze, inside the run's own throwaway
+      # profile — and passes only if the step above would have caught it.
+      - name: Prove the packaged gate can see a frozen main thread
+        if: steps.app.outputs.exists == 'true'
+        env:
+          WWB_SMOKE_DIR: ${{ runner.temp }}/smoke-proveit
+        run: bash tools/smoke-packaged.sh --no-build --prove-it
+
       # The screenshots are the point when it fails: "why is it squished" is a
-      # question a number answers badly and a picture answers immediately.
-      - name: Upload smoke screenshots
+      # question a number answers badly and a picture answers immediately. The
+      # packaged run's boot log ships too — when a boot freezes, the log ending
+      # one step early IS the diagnosis.
+      - name: Upload smoke screenshots and logs
         if: always() && steps.app.outputs.exists == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: smoke-screenshots
-          path: ${{ runner.temp }}/smoke
+          path: |
+            ${{ runner.temp }}/smoke
+            ${{ runner.temp }}/smoke-packaged
+            ${{ runner.temp }}/smoke-proveit
           if-no-files-found: ignore

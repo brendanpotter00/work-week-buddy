@@ -26,7 +26,7 @@ import {
 } from "electron";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 
 import { APP_NAME } from "../shared/constants";
 import { SMOKE_PROFILE_PREFIX } from "./smoke-report";
@@ -38,7 +38,7 @@ import {
 } from "./bootstrap";
 import { readCliMode } from "./cli";
 import { disposeIpc, pushAll, pushToAllWindows, registerIpcHandlers } from "./ipc";
-import { log } from "./log";
+import { log, logToDirectory } from "./log";
 import { buildAppMenu } from "./menu";
 import { privacyPaneUrl, shouldShowOnboarding, startPermissionPoll } from "./onboarding";
 import { APP_SCHEME, registerAppProtocol } from "./protocol";
@@ -78,7 +78,14 @@ if (mode.kind === "smoke") {
   // imported from ./smoke so the smoke module — which pulls in the fake signal
   // source — stays out of the shipped main bundle. `runSmoke()` re-checks the
   // path before it opens anything.
-  app.setPath("userData", mkdtempSync(join(tmpdir(), SMOKE_PROFILE_PREFIX)));
+  //
+  // A caller that already handed us a throwaway profile keeps it — that is how
+  // `tools/smoke-packaged.sh` knows where to read `wwb.log` back from after a
+  // LaunchServices launch, which returns no handle to the process at all. The
+  // prefix is still required, so "keeps it" can never mean the real profile.
+  if (!basename(app.getPath("userData")).startsWith(SMOKE_PROFILE_PREFIX)) {
+    app.setPath("userData", mkdtempSync(join(tmpdir(), SMOKE_PROFILE_PREFIX)));
+  }
 }
 
 // Menu-bar only: no Dock icon, no app-switcher entry. LSUIElement covers the
@@ -92,7 +99,10 @@ if (mode.kind === "normal") {
   // a corruption you would not notice for weeks.
   if (!app.requestSingleInstanceLock()) app.exit(0);
   app.on("second-instance", () => {
-    void showDashboard();
+    // The owner's way back in when the tray is the only thing on screen. It was
+    // `void showDashboard()`, which means a rejection here went nowhere at all.
+    log.info("second launch — showing the dashboard");
+    showDashboard().catch((err: unknown) => log.error("second-instance could not show the dashboard", err));
   });
 }
 
@@ -100,6 +110,14 @@ const settings = new SettingsStore(() => app.getPath("userData"));
 let tray: TrayController | null = null;
 
 app.whenReady().then(async () => {
+  // FIRST, before anything that can hang. `userData` is settled by now (the
+  // name is set at module scope and the smoke run has already claimed its
+  // throwaway profile), and from here every boot step leaves a line on disk.
+  // A boot that dies or freezes now ends its log at the step that did it —
+  // which is the entire difference between "zero windows, empty stderr" and a
+  // diagnosis. See src/main/log.ts.
+  logToDirectory(app.getPath("userData"));
+  log.boot(`ready · mode=${mode.kind} · packaged=${String(app.isPackaged)} · v${app.getVersion()}`);
   if (mode.kind === "selftest") {
     // The hard gate in scripts/install.sh. If this fails, our own synthetic
     // input would be counted as human input and hours would inflate with fake
@@ -120,6 +138,7 @@ app.whenReady().then(async () => {
   }
 
   await settings.load();
+  log.boot("settings loaded");
 
   if (mode.kind === "doctor") {
     const services = await createCoreServices({
@@ -143,6 +162,7 @@ app.whenReady().then(async () => {
   }
 
   registerAppProtocol();
+  log.boot("app:// protocol registered");
   buildAppMenu(
     () => void showDashboard(settings.get("windowBackground")),
     () => void showSettings(settings.get("windowBackground")),
@@ -156,9 +176,11 @@ app.whenReady().then(async () => {
     vault: safeStorage,
     osVersion: process.getSystemVersion(),
   });
+  log.boot("core services created");
   const runtime = services.runtime;
   await runtime.start();
   services.watchdog.start();
+  log.boot("runtime and watchdog started");
 
   // Sync at launch: flush, pull, heartbeat, then the weekly maintenance pass.
   // `void`, deliberately — the tray must appear and tracking must be running
@@ -210,6 +232,7 @@ app.whenReady().then(async () => {
     },
   });
   tray.refresh("boot");
+  log.boot("tray up");
 
   // ONE subscription fans out to the tray and to every open window.
   runtime.on("change", (kind) => {
@@ -237,8 +260,18 @@ app.whenReady().then(async () => {
   // First launch after a clean install says so immediately. A normal launch
   // opens no window at all.
   const perms = await runtime.refreshPermissions();
-  if (shouldShowOnboarding(perms, settings.get("onboardingDismissed"))) {
+  const wantsOnboarding = shouldShowOnboarding(perms, settings.get("onboardingDismissed"));
+  // Said out loud BOTH WAYS. "No window on launch" is the correct behaviour for
+  // a tray app whose permissions are settled, and it is also exactly what a
+  // broken build looks like. Only the log can tell those two apart.
+  log.boot(
+    wantsOnboarding
+      ? "permissions incomplete — opening onboarding"
+      : "permissions settled — tray only, no window on launch (this is normal)",
+  );
+  if (wantsOnboarding) {
     await showOnboarding(settings.get("windowBackground"));
+    log.boot("onboarding window open");
     // 1 Hz TCC read, alive only while that window exists, hard stop at 45 s.
     // In MAIN because the onboarding window spends its life behind System
     // Settings and hidden renderer timers collapse (AGENTS.md trap #10).
@@ -256,7 +289,10 @@ app.whenReady().then(async () => {
   // says nothing. Say something, then exit non-zero so a LaunchAgent restart
   // is a restart rather than a zombie.
   log.error("boot failed", err);
-  dialog.showErrorBox(APP_NAME, `Work Week Buddy could not start:\n${String(err)}`);
+  dialog.showErrorBox(
+    APP_NAME,
+    `Work Week Buddy could not start:\n${String(err)}\n\nFull log: ${join(app.getPath("userData"), "wwb.log")}`,
+  );
   app.exit(1);
 });
 

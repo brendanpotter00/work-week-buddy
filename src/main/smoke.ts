@@ -14,15 +14,22 @@
  * therefore unit-tested on every platform including the Linux job that cannot
  * open a window at all.
  *
- * WHAT IT IS NOT. It runs the BUILT bundle (`out/`), not the signed `.app`.
- * That is deliberate rather than a shortcut: `src/native/index.ts` refuses the
- * fake source in a packaged build, on purpose, so a packaged smoke run would
- * need real Input Monitoring and Accessibility grants and could not run
- * unattended anywhere. Everything the routing bug lived in — the `app://`
- * protocol handler, the loaded URL, the renderer bundle, the window geometry —
- * is byte-identical between the two. `npm run package` is still the thing to
- * run by hand before a release; `scripts/doctor.ts` is what inspects the
- * installed copy.
+ * IT RUNS AGAINST THE PACKAGED APP TOO — `tools/smoke-packaged.sh`.
+ *
+ * It used to run only the built bundle (`out/`), on the argument that
+ * everything the routing bug lived in was byte-identical between the two. That
+ * argument was wrong, and it cost a release: the packaged app booted, showed
+ * its tray icon, opened its database and then had NO WINDOWS AT ALL, silently,
+ * because the main thread was blocked on a macOS consent prompt that a
+ * terminal launch never sees (`src/main/file-access.ts`). Nothing that runs
+ * `electron .` from a shell could have caught it, and nothing did.
+ *
+ * So `src/native/index.ts` now has exactly one door: a PACKAGED build takes the
+ * fake source when it was started with `--smoke` AND `WWB_FAKE_NATIVE=1` AND
+ * `WWB_ALLOW_FAKE_IN_PACKAGED=1`. `tools/smoke-packaged.sh` launches the real
+ * `.app` through LaunchServices — which is how the owner launches it, and the
+ * only way the prompt appears at all — and reads the result back out of
+ * `WWB_SMOKE_DIR`.
  *
  * LAUNCH IT AS `electron .`, NOT `electron out/main/index.js`. With a script
  * path, `app.getAppPath()` resolves to `out/main/` and `preloadPath()` looks
@@ -52,6 +59,7 @@ import { pushToAllWindows, registerIpcHandlers } from "./ipc";
 import { registerAppProtocol } from "./protocol";
 import { SettingsStore } from "./settings";
 import {
+  RESULT_FILENAME,
   SMOKE_PROFILE_PREFIX,
   checkSmokeReport,
   type JigglerClickProbe,
@@ -60,6 +68,7 @@ import {
   type SmokeWindow,
   type WindowProbe,
 } from "./smoke-report";
+import { log } from "./log";
 import { closeAllWindows, showDashboard, showOnboarding } from "./windows";
 
 /** Everything is bounded. A run that hangs is a run that fails, not one that waits. */
@@ -67,6 +76,30 @@ const OVERALL_TIMEOUT_MS = 120_000;
 const STEP_TIMEOUT_MS = 20_000;
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * How late a 250 ms timer got, at worst, over the whole run.
+ *
+ * The bug this exists for froze the main thread outright, and an outright
+ * freeze is caught by the runner's timeout rather than by a number. This
+ * catches the near miss: a synchronous call on the boot path that takes two
+ * seconds on a cold cache today and forever on a slow volume tomorrow. Cheap
+ * enough to leave on — one timer and one subtraction.
+ */
+function startStallMeter(everyMs = 250): () => number {
+  let worst = 0;
+  let last = Date.now();
+  const timer = setInterval(() => {
+    const now = Date.now();
+    worst = Math.max(worst, now - last - everyMs);
+    last = now;
+  }, everyMs);
+  timer.unref?.();
+  return () => {
+    clearInterval(timer);
+    return Math.max(0, Math.round(worst));
+  };
+}
 
 async function waitFor(what: string, ok: () => Promise<boolean>): Promise<void> {
   const deadline = Date.now() + STEP_TIMEOUT_MS;
@@ -236,6 +269,7 @@ async function screenshot(win: BrowserWindow, dir: string, name: string): Promis
  * assertion, 2 for a run that could not complete.
  */
 export async function runSmoke(): Promise<number> {
+  const readStall = startStallMeter();
   const screenshots: string[] = [];
   const shotDir = process.env["WWB_SMOKE_DIR"] ?? null;
   if (shotDir !== null) mkdirSync(shotDir, { recursive: true });
@@ -260,15 +294,24 @@ export async function runSmoke(): Promise<number> {
     settings,
     appVersion: app.getVersion(),
     isPackaged: app.isPackaged,
+    isSmokeRun: true,
+    // Inside the throwaway profile. `runCycle("launch")` below runs the real
+    // weekly export, and the owner's iCloud Drive is not a test fixture.
+    backupDir: join(userDataDir, "backups"),
     // No keychain. A smoke run must not be able to reach a real secret, and an
-    // absent vault is an honest state the sync layer already models.
+    // absent vault is an honest state the sync layer already models. It is also
+    // what keeps a PACKAGED smoke run from stopping on a login-keychain prompt,
+    // which blocks exactly the way the TCC prompt in `file-access.ts` does.
     vault: null,
   });
 
   const source = services.source;
   if (!(source instanceof FakeSignalSource)) {
     throw new Error(
-      "the smoke run needs the fake signal source — set WWB_FAKE_NATIVE=1 and run an unpackaged build",
+      app.isPackaged
+        ? "the smoke run needs the fake signal source — a packaged build takes it only with " +
+          "WWB_FAKE_NATIVE=1 and WWB_ALLOW_FAKE_IN_PACKAGED=1 (src/native/index.ts)"
+        : "the smoke run needs the fake signal source — set WWB_FAKE_NATIVE=1",
     );
   }
 
@@ -284,6 +327,15 @@ export async function runSmoke(): Promise<number> {
 
   setPermissions("degraded");
   await services.runtime.start();
+
+  // THE SAME CALL `index.ts` MAKES AT BOOT, and the reason this file now runs
+  // against the packaged app at all. Everything downstream of it — the weekly
+  // export, and every synchronous filesystem call inside it — used to run on
+  // the main thread with nothing watching. It is `void` here exactly as it is
+  // there: a launch does not wait for it, and neither does this run. What both
+  // require is that it cannot stop the windows from opening, which is what the
+  // stall meter and this run's timeout are for.
+  void services.sync.runCycle("launch");
 
   registerIpcHandlers(services.runtime, {
     settings,
@@ -393,17 +445,23 @@ export async function runSmoke(): Promise<number> {
   const report: SmokeReport = {
     ranAtMs: Date.now(),
     appVersion: app.getVersion(),
+    packaged: app.isPackaged,
+    maxStallMs: readStall(),
     probes,
     jigglerClick,
     screenshots,
   };
 
-  if (shotDir !== null) {
-    writeFileSync(join(shotDir, "smoke-report.json"), `${JSON.stringify(report, null, 2)}\n`);
-  }
-
   const failures = checkSmokeReport(report);
   writeReport(report, failures);
+  // The failures go in the JSON too. A CI artifact that carries the numbers but
+  // not the verdict makes the reader re-derive it.
+  if (shotDir !== null) {
+    writeFileSync(
+      join(shotDir, "smoke-report.json"),
+      `${JSON.stringify({ ...report, failures }, null, 2)}\n`,
+    );
+  }
 
   // Turn the jiggler back off before stop(), so the run leaves no timer behind.
   await services.runtime.setToggle({ key: "jiggler", value: false, source: "dashboard" });
@@ -434,6 +492,9 @@ function writeReport(report: SmokeReport, failures: readonly string[]): void {
     const c = report.jigglerClick;
     out.write(`  jiggler click → switch=${c.switchChecked} runtime=${c.runtimeJiggler}\n`);
   }
+  out.write(
+    `  packaged=${String(report.packaged)} worst main-thread stall=${String(report.maxStallMs)}ms\n`,
+  );
   for (const path of report.screenshots) out.write(`  shot ${path}\n`);
   out.write("───────────────────────────────────────────────────────────────\n");
   if (failures.length === 0) {
@@ -444,19 +505,50 @@ function writeReport(report: SmokeReport, failures: readonly string[]): void {
 }
 
 /**
+ * The verdict, on disk.
+ *
+ * A packaged run is started by LaunchServices — `open -n`, exactly the way the
+ * owner starts the app — and LaunchServices gives the caller no stdout and no
+ * exit code. It gets a detached process and nothing else. So the run writes its
+ * own verdict to `WWB_SMOKE_DIR/result.json`, and `tools/smoke-packaged.sh`
+ * waits for the file. NO FILE IS ALSO AN ANSWER, and it is the one that matters
+ * here: an app that froze on boot never writes it, and the runner fails on the
+ * timeout with the boot log to explain why.
+ */
+function writeResult(exitCode: number, note: string): void {
+  const dir = process.env["WWB_SMOKE_DIR"] ?? null;
+  if (dir === null) return;
+  try {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, RESULT_FILENAME),
+      `${JSON.stringify({ exitCode, note, packaged: app.isPackaged, atMs: Date.now() }, null, 2)}\n`,
+    );
+  } catch (err) {
+    process.stdout.write(`smoke: could not write result.json: ${String(err)}\n`);
+  }
+}
+
+/**
  * The entry point `index.ts` calls. Never throws, always exits: an unhandled
  * rejection in here would hang the CI job rather than fail it.
  */
 export async function runSmokeCli(): Promise<number> {
   const bomb = setTimeout(() => {
     process.stdout.write(`smoke FAIL: the run did not finish within ${OVERALL_TIMEOUT_MS}ms\n`);
+    writeResult(2, `the run did not finish within ${OVERALL_TIMEOUT_MS}ms`);
     app.exit(2);
   }, OVERALL_TIMEOUT_MS);
   bomb.unref?.();
   try {
-    return await runSmoke();
+    const code = await runSmoke();
+    writeResult(code, code === 0 ? "ok" : "assertions failed — see smoke-report.json");
+    return code;
   } catch (err) {
-    process.stdout.write(`smoke FAIL: ${err instanceof Error ? err.stack : String(err)}\n`);
+    const detail = err instanceof Error ? (err.stack ?? err.message) : String(err);
+    process.stdout.write(`smoke FAIL: ${detail}\n`);
+    log.error("smoke run could not complete", err);
+    writeResult(2, detail);
     return 2;
   } finally {
     clearTimeout(bomb);
