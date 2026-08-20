@@ -90,9 +90,20 @@ describe("the log file", () => {
 
   it("degrades to console when the directory cannot be written, and says so once", () => {
     quiet();
+    // A REGULAR FILE where a parent directory should be. ENOTDIR, on every
+    // platform and whatever the process's uid is — which a permission-based
+    // fixture is not (root ignores the mode) and an OS-special path is REALLY
+    // not: the first version of this test used `/proc/...`, and
+    // `mkdirSync("/proc/x/y", { recursive: true })` does not fail on Linux, it
+    // HANGS. It hung this repo's CI for twenty minutes, which is a small
+    // rhyme with the bug the rest of this branch is about.
+    const dir = tmp();
+    const notADirectory = join(dir, "occupied");
+    writeFileSync(notADirectory, "I am a file");
+
     // An unwritable sink must never become the reason a log line is lost or an
     // app stops: the logger is the last thing standing when everything else is.
-    expect(logToDirectory("/proc/definitely/not/writable/wwb")).toBeNull();
+    expect(logToDirectory(join(notADirectory, "wwb"))).toBeNull();
     expect(() => log.error("still works")).not.toThrow();
     expect(logFilePath()).toBeNull();
   });

@@ -248,11 +248,12 @@ export async function showSettings(backgroundColor = "#FFFFFF"): Promise<Browser
     webPreferences: baseWebPreferences(),
   });
   lockDownNavigation(settings);
+  reportLoadFailures(settings, "settings");
   settings.once("ready-to-show", () => settings?.show());
   settings.on("closed", () => {
     settings = null;
   });
-  await load(settings, ROUTE.settings);
+  await load(settings, ROUTE.settings, "settings");
   return settings;
 }
 
