@@ -34,7 +34,8 @@ REPO="$PWD"
 DEFAULT_APP_DEST="/Applications/Work Week Buddy.app"
 
 IDENTITY="WWB Local Signing"
-KEYCHAIN="${HOME}/Library/Keychains/login.keychain-db"
+DEFAULT_KEYCHAIN="${HOME}/Library/Keychains/login.keychain-db"
+KEYCHAIN="$DEFAULT_KEYCHAIN"
 APP_DEST="$DEFAULT_APP_DEST"
 APP_SRC_OVERRIDE=""
 PLIST_DIR=""
@@ -106,6 +107,17 @@ run() {
 # Built with `set --` rather than an array because macOS ships bash 3.2, where
 # expanding an empty array under `set -u` is itself an error — and the flags
 # genuinely can contain spaces ("/Applications/Work Week Buddy.app").
+# `--keychain` is passed ONLY when it has been overridden. On the default login
+# keychain the flag is redundant — codesign already searches it — and this is
+# the one command in the flow that cannot be tested (it needs a trusted
+# certificate), so it stays byte-identical to what has always been run.
+codesign_sign() {
+  app="$1"
+  set -- --force --deep --timestamp=none
+  if [ "$KEYCHAIN" != "$DEFAULT_KEYCHAIN" ]; then set -- "$@" --keychain "$KEYCHAIN"; fi
+  run codesign "$@" --sign "$IDENTITY" "$app"
+}
+
 launch_agent() {
   set -- "$1"
   if [ "$APP_DEST" != "$DEFAULT_APP_DEST" ]; then set -- "$@" --app-path "$APP_DEST"; fi
@@ -219,8 +231,7 @@ else
   # --timestamp=none because a self-signed leaf gains nothing from Apple's
   # timestamp authority, and contacting it makes an offline or firewalled install
   # hang for minutes before failing.
-  run codesign --force --deep --timestamp=none --keychain "$KEYCHAIN" \
-    --sign "$IDENTITY" "$APP_SRC"
+  codesign_sign "$APP_SRC"
   run codesign --verify --strict --deep "$APP_SRC"
   [ "$DRY_RUN" = "1" ] || ok "signed and verified"
 fi
