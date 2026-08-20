@@ -31,14 +31,14 @@ import { Menu, Tray, nativeImage, type MenuItemConstructorOptions } from "electr
 import { join } from "node:path";
 
 import {
-  creditedOpenMs,
   formatAgo,
-  formatDuration,
   formatHours,
   formatTrayTitle,
   hoursThisWeek,
+  hoursToday,
   nextIsoWeekStart,
 } from "../shared/format";
+import { traySessionLabel } from "../shared/stopwatch";
 import type { DegradedReason, LiveStatus, PermissionKey } from "../shared/ipc-types";
 import { log } from "./log";
 import type { AppRuntime, RuntimeChange } from "./runtime";
@@ -263,16 +263,13 @@ export class TrayController {
     if (s.degraded.length > 0) items.push({ type: "separator" });
 
     // ── current interval ────────────────────────────────────────────────────
-    const openMs = creditedOpenMs(s, now);
-    items.push({
-      label:
-        s.state === "paused"
-          ? "Paused"
-          : s.state === "working"
-            ? `Working · ${formatDuration(openMs)}`
-            : "Idle",
-      enabled: false,
-    });
+    // The same state machine the dashboard's stopwatch runs, so the menu bar
+    // and the window cannot disagree about the session that is open right now.
+    // Seconds are safe HERE and nowhere else in the tray: the menu is rebuilt
+    // on every open, so this string is computed once per glance. The TITLE is
+    // still a once-a-minute hours figure — a per-second title reflows every
+    // icon to its left, sixty times a minute, forever.
+    items.push({ label: traySessionLabel(s, policy, now), enabled: false });
     items.push({
       label:
         s.lastSignalMs === null
@@ -288,7 +285,13 @@ export class TrayController {
     });
     items.push({ type: "separator" });
 
-    items.push({ label: `Today          ${formatHours(s.closedHoursToday)}h`, enabled: false });
+    // `hoursToday`, not `closedHoursToday`: "This week" below already includes
+    // the open interval, and two totals in one menu that disagree about the
+    // last two hours is a support ticket.
+    items.push({
+      label: `Today          ${formatHours(hoursToday(s, policy, now))}h`,
+      enabled: false,
+    });
     items.push({
       label: `This week      ${formatHours(hoursThisWeek(s, policy, now))}h`,
       enabled: false,

@@ -15,8 +15,11 @@ import {
   INVOKE_CHANNELS,
   PUSH_CHANNELS,
   type EndReason as WireEndReason,
+  type HoldKind,
   type InvokeChannel,
+  type LiveStatus,
   type PushChannel,
+  type SignalKind,
 } from "./ipc-types";
 
 describe("EndReason stays in step with the reducer", () => {
@@ -36,6 +39,22 @@ describe("EndReason stays in step with the reducer", () => {
       "crash_recovered",
     ];
     expect(new Set(all).size).toBe(all.length);
+  });
+});
+
+describe("heldOpenBy is narrower than SignalKind, on purpose", () => {
+  it("cannot be 'input' — a person is not a hold", () => {
+    // `runtime.heldBy()` answers camera, mic or null. An interval a person is
+    // feeding is OPEN, never HELD, so there is no fourth answer and no `input`
+    // branch for the UI to grow. Widening this back to `SignalKind` fails here
+    // rather than silently reintroducing dead copy in the stopwatch.
+    expectTypeOf<HoldKind>().toEqualTypeOf<"camera" | "mic">();
+    expectTypeOf<HoldKind>().toExtend<SignalKind>();
+    expectTypeOf<LiveStatus["heldOpenBy"]>().toEqualTypeOf<HoldKind | null>();
+  });
+
+  it("still lets lastSignalKind be input — that one really can be", () => {
+    expectTypeOf<LiveStatus["lastSignalKind"]>().toEqualTypeOf<SignalKind | null>();
   });
 });
 

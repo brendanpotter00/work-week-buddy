@@ -42,6 +42,21 @@ export type EndReason =
 export type TrackingState = "working" | "idle" | "paused";
 export type SignalKind = "input" | "camera" | "mic";
 
+/**
+ * What can hold an interval open WITHOUT a person: a camera or a meeting mic.
+ *
+ * `docs/IMPL_UI.md` §2.4 types `heldOpenBy` as `SignalKind | null`, which is
+ * wider than anything that can occur — `runtime.heldBy()` returns `camera`,
+ * `mic` or `null` and there is no fourth answer. "Held open by input" is not a
+ * state: input IS the person, and an interval the person is feeding is simply
+ * open, never held. The same reasoning `EndReason` gets above applies here —
+ * a wire type wider than reality teaches the renderer to branch on states that
+ * never happen, and the branch it grows is dead copy nobody can ever read.
+ *
+ * `src/shared/ipc-types.test.ts` pins this to what `heldBy()` can return.
+ */
+export type HoldKind = Exclude<SignalKind, "input">;
+
 export type DegradedReason =
   /** the granted mask lost the keyboard bits — typing is invisible, silently */
   | "keyboard_permission_missing"
@@ -68,7 +83,7 @@ export interface LiveStatus {
   /** absolute epoch ms. DISPLAY ONLY — no renderer may schedule from this. */
   deadlineMs: number | null;
   /** non-null while a camera/mic level is holding the interval open */
-  heldOpenBy: SignalKind | null;
+  heldOpenBy: HoldKind | null;
   /** absolute epoch ms the hold is capped at (PRD §3.4), null when uncapped */
   heldUntilMs: number | null;
   cameraOn: boolean;

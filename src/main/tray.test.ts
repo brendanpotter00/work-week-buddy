@@ -25,6 +25,7 @@ import { TrayController, type TrayDeps } from "./tray";
 import { countIntervals } from "../store";
 import { MIN, T0, fakeSettings, makeHarness, type Harness } from "../../test/helpers/runtime";
 import { privacyPaneUrl } from "./onboarding";
+import { traySessionLabel } from "../shared/stopwatch";
 
 let h: Harness;
 let tray: TrayController;
@@ -90,6 +91,27 @@ describe("the title", () => {
     h = await makeHarness();
     tray = makeTray();
     expect(instance().title).toBe("—h");
+  });
+
+  it("is never rewritten per second, however much the session clock moves", async () => {
+    // The dashboard's stopwatch ticks at 1 Hz. The title must NOT: it is a live
+    // string in the menu bar, and rewriting it reflows every icon to its left,
+    // sixty times a minute, all day. The dropdown carries the seconds instead —
+    // it is rebuilt on demand, so it costs nothing between glances.
+    h = await makeHarness();
+    tray = makeTray();
+    h.source.key(Date.now());
+    const before = instance().titles.length;
+
+    for (let i = 0; i < 59; i++) {
+      vi.advanceTimersByTime(1000);
+      await settle();
+    }
+    expect(instance().titles.length).toBe(before);
+
+    vi.advanceTimersByTime(1000);
+    await settle();
+    expect(instance().titles.length).toBe(before + 1);
   });
 
   it("advances once a minute from MAIN while an interval is open, and freezes after", async () => {
@@ -293,7 +315,13 @@ describe("the menu", () => {
     h.source.key(Date.now());
 
     const l = labels(tray);
-    expect(l).toContain("Working · 4m");
+    // Seconds, and the same string `stopwatchView()` puts on the dashboard —
+    // the menu is rebuilt on every open, so it can afford the resolution the
+    // TITLE cannot. See "the title" above for the other half of that rule.
+    expect(l).toContain("Working · 0:04:00");
+    expect(l).toContain(
+      traySessionLabel(h.runtime.liveStatus(), fakeSettings().all(), Date.now()),
+    );
     expect(l.some((x) => x.startsWith("last signal 0s ago"))).toBe(true);
     expect(l.some((x) => x.startsWith("Today"))).toBe(true);
     expect(l.some((x) => x.startsWith("This week"))).toBe(true);

@@ -14,12 +14,17 @@ import {
   formatDuration,
   formatHeaderDate,
   formatHours,
+  formatStopwatch,
   formatTrayTitle,
   formatWeekDelta,
   hoursThisWeek,
+  hoursToday,
+  isHoldCapped,
   isoWeekNumber,
+  liveSessionMs,
   localDateString,
   nextIsoWeekStart,
+  openIntervalCounts,
   startOfIsoWeek,
   startOfLocalDay,
 } from "./format";
@@ -88,6 +93,88 @@ describe("creditedOpenMs — the one duration rule", () => {
   });
 });
 
+describe("liveSessionMs — the stopwatch's wall clock", () => {
+  it("is now − openedAtMs, and is deliberately NOT creditedOpenMs", () => {
+    // The two answer different questions. This one is "how long has this
+    // session been open"; the other is "how much of it will be written".
+    const s = status({ lastSignalMs: T0 + MIN });
+    expect(liveSessionMs(s, T0 + 9 * MIN)).toBe(9 * MIN);
+    expect(creditedOpenMs(s, T0 + 9 * MIN)).toBe(1 * MIN);
+  });
+
+  it("is null when nothing is open — '—', never a frozen 0:00:00", () => {
+    expect(liveSessionMs(status({ openedAtMs: null }), T0)).toBeNull();
+  });
+
+  it("clamps to a camera/mic hold's cap, like creditedOpenMs does", () => {
+    const s = status({ heldOpenBy: "camera", heldUntilMs: T0 + 30 * MIN });
+    expect(liveSessionMs(s, T0 + 10 * MIN)).toBe(10 * MIN);
+    expect(liveSessionMs(s, T0 + 8 * 60 * MIN)).toBe(30 * MIN);
+  });
+
+  it("never goes negative, even against a clock that jumped backwards", () => {
+    expect(liveSessionMs(status(), T0 - 60 * MIN)).toBe(0);
+  });
+});
+
+describe("isHoldCapped", () => {
+  it("is true only once a capped hold has actually run out of rope", () => {
+    const held = status({ heldOpenBy: "camera", heldUntilMs: T0 + 30 * MIN });
+    expect(isHoldCapped(held, T0 + 29 * MIN)).toBe(false);
+    expect(isHoldCapped(held, T0 + 30 * MIN)).toBe(true);
+    // A person typing is not a hold, however long they have been at it.
+    expect(isHoldCapped(status(), T0 + 99 * MIN)).toBe(false);
+    // An uncapped hold never runs out.
+    expect(isHoldCapped(status({ heldOpenBy: "mic", heldUntilMs: null }), T0 + 99 * MIN)).toBe(
+      false,
+    );
+  });
+});
+
+describe("hoursToday", () => {
+  it("includes the open interval, exactly as hoursThisWeek does", () => {
+    // Two totals on one screen that disagree about the last two hours is a
+    // support ticket, so they are the same arithmetic over a different base.
+    const s = status({ closedHoursToday: 5, closedHoursThisWeek: 33 });
+    expect(hoursToday(s, POLICY, T0 + 12 * MIN)).toBe(5.2);
+    expect(hoursThisWeek(s, POLICY, T0 + 12 * MIN)).toBe(33.2);
+  });
+
+  it("adds zero for a session the jiggler has made uncountable", () => {
+    const s = status({ closedHoursToday: 5, jigglerOnForOpenInterval: true });
+    expect(hoursToday(s, POLICY, T0 + 12 * MIN)).toBe(5);
+  });
+
+  it("is null — not 0 — on a day with no rows and nothing countable open", () => {
+    const s = status({ closedHoursToday: null, state: "idle", openedAtMs: null });
+    expect(hoursToday(s, POLICY, T0)).toBeNull();
+  });
+});
+
+describe("openIntervalCounts — will this session survive v_countable?", () => {
+  it("says no under the stray-bump floor and yes above it", () => {
+    expect(openIntervalCounts(status({ lastSignalMs: T0 + 89_000 }), POLICY, T0 + 89_000)).toBe(
+      false,
+    );
+    expect(openIntervalCounts(status({ lastSignalMs: T0 + 90_000 }), POLICY, T0 + 90_000)).toBe(
+      true,
+    );
+  });
+
+  it("says no while the jiggler is on, unless the policy says otherwise", () => {
+    const s = status({ jigglerOnForOpenInterval: true });
+    expect(openIntervalCounts(s, POLICY, T0 + 10 * MIN)).toBe(false);
+    expect(openIntervalCounts(s, { ...POLICY, countJigglerTime: 1 }, T0 + 10 * MIN)).toBe(true);
+  });
+
+  it("says no when nothing is running", () => {
+    expect(openIntervalCounts(status({ state: "paused" }), POLICY, T0 + 10 * MIN)).toBe(false);
+    expect(
+      openIntervalCounts(status({ state: "idle", openedAtMs: null }), POLICY, T0 + 10 * MIN),
+    ).toBe(false);
+  });
+});
+
 describe("hoursThisWeek", () => {
   it("F04: adds ZERO for an open interval the jiggler has made uncountable", () => {
     const s = status({ closedHoursThisWeek: 4, jigglerOnForOpenInterval: true });
@@ -129,6 +216,19 @@ describe("display formatters", () => {
     expect(formatTrayTitle(36.5, false)).toBe("36.5h");
     expect(formatTrayTitle(null, true)).toBe("—h ⚠︎");
     expect(formatTrayTitle(0, false)).toBe("0.0h");
+  });
+
+  it("the stopwatch keeps its digit groups from the first second", () => {
+    // MM:SS promoting to H:MM:SS at the hour shifts everything beside it, on a
+    // headline number, once per session.
+    expect(formatStopwatch(0)).toBe("0:00:00");
+    expect(formatStopwatch(7_000)).toBe("0:00:07");
+    expect(formatStopwatch(754_000)).toBe("0:12:34");
+    expect(formatStopwatch(9_669_000)).toBe("2:41:09");
+    expect(formatStopwatch(-5)).toBe("0:00:00");
+    // Truncates rather than rounds: a clock must never show a second it has
+    // not finished.
+    expect(formatStopwatch(1_999)).toBe("0:00:01");
   });
 
   it("durations and ages", () => {
