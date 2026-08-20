@@ -125,6 +125,16 @@ Note: the first CMIO connection powers the camera image processor for about 4 se
 
 ---
 
+## 4b. Microphone in use
+
+CoreAudio, the exact mirror of the camera pattern: enumerate audio devices and read `kAudioDevicePropertyDeviceIsRunningSomewhere` per input device, OR'd across them. Expected to need **no permission**, same as the camera — **verify this in M1 rather than assuming it**, because the microphone TCC bucket is stricter than the camera's for actual capture.
+
+**It reports capture, not sound.** Ambient noise, speaker output, music and video playback do not register. It also does **not** report which process is capturing, exactly like the camera.
+
+Because of that last point the signal is a conjunction with a running-process check — see PRD §3.5. The process check is a plain running-application enumeration, which needs no permission.
+
+Seed the ignore list with dictation tools; they hold the mic more or less continuously and are not meetings.
+
 ## 5. Keep awake
 
 `IOPMAssertionCreateWithName` with `PreventUserIdleSystemSleep` + `PreventUserIdleDisplaySleep`, held in-process, released on toggle-off and kernel-released on process death.

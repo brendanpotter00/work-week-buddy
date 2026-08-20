@@ -31,6 +31,7 @@ Build a throwaway self-signed bundle. Put it in `/Applications` on the **work** 
 - (d) a deliberate 2-second block in the callback produces `kCGEventTapDisabledByTimeout`, is caught, and the tap is re-enabled
 - (e) a run-loop mode A/B test asserts events arrive with both modes registered
 - (f) grant Accessibility → rebuild → confirm the grant survived
+- (g) **microphone in-use reads correctly and, critically, needs no permission** — if it does prompt, say so loudly rather than shipping a silent prompt on first launch
 
 ---
 
@@ -45,6 +46,7 @@ Build a throwaway self-signed bundle. Put it in `/Applications` on the **work** 
 - (d) sleep closes at `lastRealSignalMs`, not at wake time
 - (e) toggling the jiggler closes the current interval and opens a new one, so no stored interval is ever partially jiggler-covered
 - (f) a property test over arbitrary signal streams asserts `endedAt <= lastRealSignalWithin(interval)` **always**
+- (g) mic-in-use **without** a meeting app running does **not** open an interval; mic-in-use **with** one does; a sub-60-second capture never opens one
 
 ---
 

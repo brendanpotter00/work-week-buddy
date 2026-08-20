@@ -28,8 +28,9 @@ A **signal** is evidence a human is present. There are exactly two:
 |---|---|---|
 | Real input | keyboard or mouse, delivered by a listen-only event tap | Includes modifier-only presses (shift/cmd/ctrl/fn), which arrive on a separate channel — see §3.6 |
 | Camera in use | any camera in use by any process | Camera on = meeting = work, per the brief. No exceptions. |
+| Microphone in use **during a meeting** | mic captured **and** a meeting app is running | Scoped deliberately — see §3.5. Covers audio-only and camera-off calls. |
 
-Explicitly **not** signals: our own jiggler, the keep-awake toggle, app UI interaction, network activity, running processes, window titles.
+Explicitly **not** signals: our own jiggler, the keep-awake toggle, app UI interaction, network activity, running processes on their own, window titles.
 
 ### 3.2 The interval state machine
 
@@ -59,7 +60,25 @@ The camera is a *level*, not an *edge* — there is no "camera event" to reset a
 
 A camera-only interval (in a meeting, not touching the machine) is capped, so a forgotten Zoom window or a virtual camera left running cannot log a 14-hour day.
 
-### 3.5 The jiggler
+### 3.5 Microphone — scoped to meetings only
+
+Without this, an audio-only call or a camera-off Zoom produces no signal at all and those hours vanish silently. With it done naively, every dictation session and every Siri invocation looks like work.
+
+**What the OS actually tells us:** whether the microphone is being *captured* — not what it hears. Ambient noise, music and video playback are all invisible to this. It also does not say *which* app is capturing.
+
+**So the signal is a conjunction:**
+
+> microphone in use **AND** a meeting application is currently running
+
+- **Meeting allowlist** (user-editable): Zoom, Slack, Microsoft Teams, Webex, Discord, and a browser with an active meeting tab where detectable.
+- **Ignore list** (user-editable, seeded): dictation and voice-input tools — Wispr Flow, OpenWhispr, and similar. These capture the mic constantly and are not meetings.
+- **Minimum duration:** a capture shorter than 60 seconds never opens an interval, so a Siri invocation or a two-second dictation blip is ignored.
+
+**Known limitation:** because the OS reports capture system-wide rather than per-app, a dictation app capturing *while* Zoom happens to be running will satisfy the conjunction. Accepted — in that situation the owner is almost certainly at the machine, and real input covers it anyway.
+
+**This is a false-negative-averse design and a false-positive-averse one at the same time**, which is why it is a conjunction rather than either signal alone.
+
+### 3.6 The jiggler
 
 Optional, **off by default**, behind a toggle in the menu bar.
 
@@ -69,7 +88,7 @@ Optional, **off by default**, behind a toggle in the menu bar.
 
 Every interval records `jiggler_s` — how many seconds of that interval ran with our jiggler on. This makes the policy question in §6 a display-time filter that can be changed retroactively, forever.
 
-### 3.6 Failure modes that must be loud, not silent
+### 3.7 Failure modes that must be loud, not silent
 
 These are the ones that produce plausible-looking wrong numbers rather than errors. Each must fail loudly.
 
