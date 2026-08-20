@@ -1,0 +1,25 @@
+appId: com.bpotter.workweekbuddy
+productName: Work Week Buddy
+directories:
+  output: release
+files:
+  - out/**
+  - package.json
+  - "!**/*.map"
+mac:
+  target:
+    - target: dir
+      arch: [arm64]
+  category: public.app-category.productivity
+  # Menu-bar only: no Dock icon, no app-switcher entry.
+  extendInfo:
+    LSUIElement: 1
+  # NEVER enable the App Sandbox. Under it the CoreMediaIO device list returns
+  # zero devices and camera detection dies silently. docs/MACOS.md section 4.
+  hardenedRuntime: false
+  gatekeeperAssert: false
+  identity: null
+  notarize: false
+asar: true
+asarUnpack:
+  - "**/node_modules/koffi/**"
