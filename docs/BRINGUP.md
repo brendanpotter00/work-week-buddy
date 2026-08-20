@@ -390,9 +390,12 @@ Until that lands:
   effect would be to look configured and silently not be.
 
 The URL half alone can be set by hand, and doing so is harmless — the app treats
-"URL but no token" as unconfigured:
+"URL but no token" as unconfigured. **Quit the app first**: settings are held in
+memory and the whole object is rewritten on the next change, so an edit made
+while it is running is overwritten without warning.
 
 ```bash
+osascript -e 'quit app "Work Week Buddy"'
 open "$HOME/Library/Application Support/Work Week Buddy/settings.json"
 # "syncWorkerUrl": "https://wwb-sync.<account>.workers.dev"
 ```
