@@ -70,9 +70,13 @@ refuses to build on it.
 ```bash
 npm ci
 npm run lint && npm run typecheck && npm test
+npm run smoke
 ```
 
-**You should see** three clean runs and 700-odd passing tests.
+**You should see** three clean runs and 830-odd passing tests, then `smoke: OK`
+after two windows flash open and closed. The smoke run is the only thing here
+that opens a real window and measures it; the unit tests mount into a jsdom that
+has no window, no size and no URL.
 
 **If `npm ci` fails on a lockfile mismatch**, `package-lock.json` is out of date
 with `package.json` — regenerate with `npm install` and commit it.
