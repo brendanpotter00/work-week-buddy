@@ -18,19 +18,34 @@
 #
 # Safe to run twice: every step is either idempotent (npm ci, ditto over a
 # removed destination) or explicitly torn down first (launchctl bootout).
+#
+# ── The overrides at the bottom of `usage` exist for ONE reason ──────────────
+# so that test/scripts/install-flow.test.ts can drive this entire file into
+# $TMPDIR — real ditto, real replace, real self-test gate, real plist — without
+# a certificate, without /Applications, and without launchd. Nothing about the
+# real install is optional; the defaults ARE the real install, and any run that
+# changes a destination says so in red before it does anything.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 REPO="$PWD"
 
-IDENTITY="WWB Local Signing"
 # Frozen — see above. Must match scripts/launch-agent.sh and the app.
-APP_DEST="/Applications/Work Week Buddy.app"
-APP_BIN="${APP_DEST}/Contents/MacOS/Work Week Buddy"
+DEFAULT_APP_DEST="/Applications/Work Week Buddy.app"
+
+IDENTITY="WWB Local Signing"
+DEFAULT_KEYCHAIN="${HOME}/Library/Keychains/login.keychain-db"
+KEYCHAIN="$DEFAULT_KEYCHAIN"
+APP_DEST="$DEFAULT_APP_DEST"
+APP_SRC_OVERRIDE=""
+PLIST_DIR=""
+LOG_DIR=""
 
 DRY_RUN=0
 SKIP_LAUNCH_AGENT=0
 SKIP_DOCTOR=0
+DO_SIGN=1
+DO_LAUNCHCTL=1
 
 usage() {
   cat <<USAGE
@@ -39,6 +54,18 @@ usage: scripts/install.sh [--dry-run] [--skip-launch-agent] [--skip-doctor]
   --dry-run             print every step in order; build and change nothing
   --skip-launch-agent   do not install launch-at-login (the app still installs)
   --skip-doctor         skip the post-install diagnostic
+
+Overrides. These exist so the flow can be tested into a scratch directory; a
+real install needs none of them and should be given none of them.
+
+  --dest PATH           install here instead of "$DEFAULT_APP_DEST"
+  --app-src PATH        use this .app instead of running npm ci && npm run package
+  --identity NAME       codesigning identity (default "$IDENTITY")
+  --keychain PATH       keychain to look the identity up in
+  --no-sign             do not codesign at all
+  --no-launchctl        write the plist but never call launchctl
+  --plist-dir DIR       LaunchAgents directory
+  --log-dir DIR         where the agent's stdout/stderr go
 USAGE
 }
 
@@ -47,10 +74,20 @@ while [ $# -gt 0 ]; do
     --dry-run) DRY_RUN=1; shift ;;
     --skip-launch-agent) SKIP_LAUNCH_AGENT=1; shift ;;
     --skip-doctor) SKIP_DOCTOR=1; shift ;;
+    --dest) APP_DEST="${2:?--dest needs a path}"; shift 2 ;;
+    --app-src) APP_SRC_OVERRIDE="${2:?--app-src needs a path}"; shift 2 ;;
+    --identity) IDENTITY="${2:?--identity needs a value}"; shift 2 ;;
+    --keychain) KEYCHAIN="${2:?--keychain needs a path}"; shift 2 ;;
+    --no-sign) DO_SIGN=0; shift ;;
+    --no-launchctl) DO_LAUNCHCTL=0; shift ;;
+    --plist-dir) PLIST_DIR="${2:?--plist-dir needs a path}"; shift 2 ;;
+    --log-dir) LOG_DIR="${2:?--log-dir needs a path}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) printf 'unknown argument: %s\n\n' "$1" >&2; usage >&2; exit 2 ;;
   esac
 done
+
+APP_BIN="${APP_DEST}/Contents/MacOS/Work Week Buddy"
 
 ok()   { printf "  \033[32m✓\033[0m  %s\n" "$1"; }
 bad()  { printf "  \033[31m✗\033[0m  %s\n" "$1"; }
@@ -66,24 +103,67 @@ run() {
   "$@"
 }
 
+# scripts/launch-agent.sh, carrying whatever destinations this run is using.
+# Built with `set --` rather than an array because macOS ships bash 3.2, where
+# expanding an empty array under `set -u` is itself an error — and the flags
+# genuinely can contain spaces ("/Applications/Work Week Buddy.app").
+# `--keychain` is passed ONLY when it has been overridden. On the default login
+# keychain the flag is redundant — codesign already searches it — and this is
+# the one command in the flow that cannot be tested (it needs a trusted
+# certificate), so it stays byte-identical to what has always been run.
+codesign_sign() {
+  app="$1"
+  set -- --force --deep --timestamp=none
+  if [ "$KEYCHAIN" != "$DEFAULT_KEYCHAIN" ]; then set -- "$@" --keychain "$KEYCHAIN"; fi
+  run codesign "$@" --sign "$IDENTITY" "$app"
+}
+
+launch_agent() {
+  set -- "$1"
+  if [ "$APP_DEST" != "$DEFAULT_APP_DEST" ]; then set -- "$@" --app-path "$APP_DEST"; fi
+  if [ -n "$PLIST_DIR" ]; then set -- "$@" --plist-dir "$PLIST_DIR"; fi
+  if [ -n "$LOG_DIR" ]; then set -- "$@" --log-dir "$LOG_DIR"; fi
+  if [ "$DO_LAUNCHCTL" != "1" ]; then set -- "$@" --no-launchctl; fi
+  run bash scripts/launch-agent.sh "$@"
+}
+
 printf "\033[1mWork Week Buddy — install\033[0m\n"
 info "repo: $REPO"
 [ "$DRY_RUN" = "1" ] && warn "dry run: nothing will be built, signed, copied, or loaded"
+
+# A run that is not going to /Applications is not an install, and must never be
+# mistaken for one afterwards. Say so before anything happens.
+if [ "$APP_DEST" != "$DEFAULT_APP_DEST" ]; then
+  bad "NOT A REAL INSTALL: destination overridden to $APP_DEST"
+  info "A TCC grant binds to the on-disk path, so an app anywhere but"
+  info "$DEFAULT_APP_DEST has no permissions and tracks nothing."
+fi
 
 # ── 0. preconditions ────────────────────────────────────────────────────────
 hdr "0. Preconditions"
 
 [ "$(uname -s)" = "Darwin" ] || die "macOS only."
 
-if [ "$DRY_RUN" = "1" ]; then
+if [ "$DO_SIGN" != "1" ]; then
+  warn "--no-sign: the bundle will keep Electron's ad-hoc signature"
+  info "Grants do not survive a rebuild without a stable designated requirement."
+elif [ "$DRY_RUN" = "1" ]; then
   info "would require the '$IDENTITY' codesigning identity"
-elif security find-identity -v -p codesigning 2>/dev/null | grep -q "$IDENTITY"; then
+elif security find-identity -v -p codesigning "$KEYCHAIN" 2>/dev/null | grep -q "$IDENTITY"; then
   ok "signing identity present: $IDENTITY"
 else
-  bad "no '$IDENTITY' codesigning identity in the login keychain."
-  info "Run ./scripts/make-signing-cert.sh first (once per Mac, importing the"
-  info "SAME wwb.p12 on both — a second, freshly minted certificate has a"
-  info "different designated requirement and your grants will not transfer)."
+  bad "no VALID '$IDENTITY' codesigning identity in $KEYCHAIN."
+  # "Absent" and "present but untrusted" are different problems with the same
+  # symptom, and the untrusted one is the likely one: `security import` leaves
+  # the leaf in the keychain and `codesign` still says "no identity found".
+  if security find-identity -p codesigning "$KEYCHAIN" 2>/dev/null | grep -q "$IDENTITY"; then
+    info "It IS in the keychain but is not trusted (CSSMERR_TP_NOT_TRUSTED)."
+    info "Open Keychain Access, find '$IDENTITY', and set it to Always Trust."
+  else
+    info "Run ./scripts/make-signing-cert.sh first (once per Mac, importing the"
+    info "SAME wwb.p12 on both — a second, freshly minted certificate has a"
+    info "different designated requirement and your grants will not transfer)."
+  fi
   exit 1
 fi
 
@@ -111,60 +191,99 @@ fi
 ok "node $HAVE"
 
 # ── 2. build ────────────────────────────────────────────────────────────────
-hdr "2. Build and package"
-run npm ci
-run npm run package
-
-# electron-builder writes release/mac-arm64/ on Apple silicon and release/mac/
-# on Intel. Resolve it rather than assuming.
-if [ "$DRY_RUN" = "1" ]; then
-  APP_SRC="release/mac-arm64/Work Week Buddy.app"
-  info "would use $APP_SRC"
+if [ -n "$APP_SRC_OVERRIDE" ]; then
+  hdr "2. Build and package (skipped — --app-src)"
+  [ -d "$APP_SRC_OVERRIDE" ] || die "no bundle at $APP_SRC_OVERRIDE"
+  APP_SRC="$APP_SRC_OVERRIDE"
+  ok "using $APP_SRC"
 else
-  APP_SRC=""
-  for candidate in release/mac-arm64 release/mac release/mac-universal; do
-    if [ -d "${candidate}/Work Week Buddy.app" ]; then
-      APP_SRC="${candidate}/Work Week Buddy.app"
-      break
-    fi
-  done
-  [ -n "$APP_SRC" ] || die "no built app under release/. Did 'npm run package' succeed?"
-  ok "built $APP_SRC"
+  hdr "2. Build and package"
+  run npm ci
+  run npm run package
+
+  # electron-builder writes release/mac-arm64/ on Apple silicon and release/mac/
+  # on Intel. Resolve it rather than assuming.
+  if [ "$DRY_RUN" = "1" ]; then
+    APP_SRC="release/mac-arm64/Work Week Buddy.app"
+    info "would use $APP_SRC"
+  else
+    APP_SRC=""
+    for candidate in release/mac-arm64 release/mac release/mac-universal; do
+      if [ -d "${candidate}/Work Week Buddy.app" ]; then
+        APP_SRC="${candidate}/Work Week Buddy.app"
+        break
+      fi
+    done
+    [ -n "$APP_SRC" ] || die "no built app under release/. Did 'npm run package' succeed?"
+    ok "built $APP_SRC"
+  fi
 fi
 
 # ── 3. sign ─────────────────────────────────────────────────────────────────
-hdr "3. Codesign"
-# --deep because an Electron bundle carries frameworks and helper apps that must
-# all carry the same signature.
-# --timestamp=none because a self-signed leaf gains nothing from Apple's
-# timestamp authority, and contacting it makes an offline or firewalled install
-# hang for minutes before failing.
-run codesign --force --deep --timestamp=none --sign "$IDENTITY" "$APP_SRC"
-run codesign --verify --strict --deep "$APP_SRC"
-[ "$DRY_RUN" = "1" ] || ok "signed and verified"
+if [ "$DO_SIGN" != "1" ]; then
+  hdr "3. Codesign (skipped — --no-sign)"
+else
+  hdr "3. Codesign"
+  # --deep because an Electron bundle carries frameworks and helper apps that must
+  # all carry the same signature. Measured on this exact bundle: --deep walks the
+  # five helper .apps, Electron Framework, Squirrel, Mantle, ReactiveObjC and
+  # chrome_crashpad_handler, and --verify --strict --deep then passes.
+  # --timestamp=none because a self-signed leaf gains nothing from Apple's
+  # timestamp authority, and contacting it makes an offline or firewalled install
+  # hang for minutes before failing.
+  codesign_sign "$APP_SRC"
+  run codesign --verify --strict --deep "$APP_SRC"
+  [ "$DRY_RUN" = "1" ] || ok "signed and verified"
+fi
 
 # ── 4. install to the frozen path ───────────────────────────────────────────
 hdr "4. Install to $APP_DEST"
 
 # KeepAlive relaunches the app the moment the old process dies, which during a
 # replace means launching a half-copied bundle. Boot the agent out first.
-run bash scripts/launch-agent.sh stop
+launch_agent stop
 
 # Quit any hand-launched copy: replacing the bundle underneath a running process
 # leaves it holding deleted inodes and writing to a database it no longer owns.
+#
+# Guarded by pgrep, and NOT because it is tidier: `osascript -e 'quit app "X"'`
+# LAUNCHES an app that is not running, purely so it can quit it. Unguarded, a
+# reinstall would start the outgoing build for a second and a fresh install
+# would start whatever else answers to the name.
+quit_running_copy() {
+  if [ "$APP_DEST" != "$DEFAULT_APP_DEST" ]; then
+    info "not the frozen path; leaving any running app alone"
+    return 0
+  fi
+  if ! pgrep -f "$APP_BIN" >/dev/null 2>&1; then
+    info "no running copy"
+    return 0
+  fi
+  # A clean quit runs before-quit, which closes the open interval with
+  # end_reason 'app_quit'. SIGTERM would leave it to crash recovery instead, so
+  # ask nicely first and only then insist. The first Apple event may raise the
+  # one-time "Terminal wants to control Work Week Buddy" prompt.
+  osascript -e 'quit app "Work Week Buddy"' >/dev/null 2>&1 || true
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    pgrep -f "$APP_BIN" >/dev/null 2>&1 || break
+    sleep 0.5
+  done
+  pkill -f "$APP_BIN" >/dev/null 2>&1 || true
+  ok "stopped the running copy"
+}
 if [ "$DRY_RUN" = "1" ]; then
   printf "  + osascript -e 'quit app \"Work Week Buddy\"'\n"
 else
-  osascript -e 'quit app "Work Week Buddy"' >/dev/null 2>&1 || true
-  pkill -f "$APP_BIN" >/dev/null 2>&1 || true
+  quit_running_copy
 fi
 
 # rm then ditto, never `cp -R` over an existing bundle: cp merges directories,
 # so a stale file from the previous build survives into the new app. ditto is
 # the Apple-sanctioned bundle copy and preserves the signature's xattrs.
 run rm -rf "$APP_DEST"
+run mkdir -p "$(dirname "$APP_DEST")"
 run ditto "$APP_SRC" "$APP_DEST"
-run codesign --verify --strict --deep "$APP_DEST"
+if [ "$DO_SIGN" = "1" ]; then run codesign --verify --strict --deep "$APP_DEST"; fi
 [ "$DRY_RUN" = "1" ] || ok "installed at $APP_DEST"
 
 # The designated requirement IS the identity that TCC remembers. Print it so the
@@ -219,7 +338,7 @@ if [ "$SKIP_LAUNCH_AGENT" = "1" ]; then
   warn "the agent was booted out in step 4 and has not been re-loaded"
 else
   hdr "7. Launch at login"
-  run bash scripts/launch-agent.sh install
+  launch_agent install
 fi
 
 hdr "Done"

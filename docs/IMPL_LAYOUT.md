@@ -91,6 +91,8 @@ work-week-buddy/
 ├── scripts/
 │   ├── make-signing-cert.sh
 │   ├── install.sh
+│   ├── launch-agent.sh
+│   ├── bringup-cloud.sh            everything after `npx wrangler login`
 │   └── doctor.ts
 │
 ├── spike/run-m0.sh                 already committed
@@ -266,7 +268,7 @@ describe("guardrails", () => {
     "test": "vitest run",
     "test:watch": "vitest",
     "test:native": "vitest run --dir src/native --passWithNoTests",
-    "selftest": "electron-vite build && electron out/main/index.js --selftest",
+    "selftest": "electron-vite build && electron . --selftest",
     "doctor": "tsx scripts/doctor.ts"
   },
   "dependencies": {
@@ -300,6 +302,16 @@ describe("guardrails", () => {
   }
 }
 ```
+
+**Every Electron invocation is `electron .`, never `electron out/main/index.js`.**
+With a script path, `app.getAppPath()` resolves to `out/main/` and
+`preloadPath()` looks for `out/main/out/preload/index.js` — the preload never
+loads, `window.wwb` is `undefined`, and every window renders empty (§8 and
+`docs/IMPL_UI.md` §1.10). `electron .` reads `main` from `package.json` and puts
+`getAppPath()` at the project root, which is where the packaged app has it. This
+bit `smoke`, and `selftest` had the same form: harmless only because a self-test
+opens no window, which is luck rather than correctness — `scripts/install.sh`
+hard-gates on `--selftest`.
 
 **Two pins that are requirements, not preferences:**
 
@@ -418,12 +430,15 @@ export default defineConfig({
 
 ## 7. `electron-builder.yml`
 
+The file in the repo is the source of truth and carries the long-form reasoning
+inline. What follows is the shape of it and the three keys that are easy to get
+wrong.
+
 ```yaml
 appId: com.bpotter.workweekbuddy
 productName: Work Week Buddy
 directories:
   output: release
-  buildResources: build
 files:
   - out/**
   - package.json
@@ -436,11 +451,8 @@ mac:
   # LSUIElement: menu-bar only, no Dock icon, no app switcher entry.
   extendInfo:
     LSUIElement: 1
-  # NEVER enable the App Sandbox. Under it the CoreMediaIO device list returns
-  # zero devices and camera detection dies silently. See docs/MACOS.md §4.
+  identity: null           # skip signing here; scripts/install.sh signs. See below.
   hardenedRuntime: false
-  gatekeeperAssert: false
-  identity: "WWB Local Signing"
   notarize: false
 asar: true
 asarUnpack:
@@ -448,7 +460,50 @@ asarUnpack:
   - "**/node_modules/koffi/**"
 ```
 
-**The identity matters more than it looks.** Ad-hoc signing (`identity: null`) produces a new code identity on every build, so every rebuild resets the TCC grants and you re-grant Input Monitoring and Accessibility by hand each time. A self-signed certificate with a stable designated requirement fixes that permanently. See §9.
+**`identity: null` does not mean ad-hoc.** In electron-builder 26 the three
+values are distinct, and the distinction is the whole reason the grants stick:
+
+| Value | What electron-builder does |
+|---|---|
+| unset | search the keychain; sign if a certificate is found, skip if not |
+| `null` | skip signing entirely — `MacTargetHelper.handleNullIdentity()`, logged as *"skipped macOS code signing"* |
+| `"-"` | ad-hoc sign, explicitly |
+
+We use `null`, so `npm run package` emits a bundle carrying only the ad-hoc,
+linker-signed signature that Electron's own prebuilt binary shipped with —
+`codesign -dv` reports `Identifier=Electron`, `Signature=adhoc`,
+`Sealed Resources=none`. That signature has no stable designated requirement, so
+a bundle run straight out of `release/` loses its Input Monitoring and
+Accessibility grants on **every rebuild**. `scripts/install.sh` is what gives the
+bundle its real identity, re-signing with the `WWB Local Signing` leaf. Signing
+here instead would make `npm run package` fail on a fresh clone that has no
+certificate yet, which is exactly the path a first install has to walk.
+
+**`hardenedRuntime` and `notarize` are inert while `identity` is null** — the
+signing path returns before either is read — but both are the settings that must
+hold if signing ever moves back into electron-builder, so deleting them would be
+a regression rather than a tidy-up.
+
+- `hardenedRuntime: false` — under the hardened runtime, library validation
+  rejects Electron's pre-signed frameworks when the app is re-signed with a leaf
+  carrying a different (here: no) Team ID. This is **not** the App Sandbox. That
+  is an entitlement, is never declared anywhere in this repo, and must stay that
+  way: under it the CoreMediaIO device list returns zero devices and camera
+  detection dies silently (`docs/MACOS.md` §4).
+- `notarize: false` — there is no Apple Developer account and no distribution.
+  The app is built on the machine that runs it, so Gatekeeper never engages.
+
+**`gatekeeperAssert` is not a key.** An earlier draft of this section listed it.
+electron-builder validates `electron-builder.yml` against a schema with
+`additionalProperties: false`, so the typo aborted `npm run package` outright.
+The real key is `gatekeeperAssess`, it defaults to `false`, and `false` is what
+was wanted — so nothing replaces it and the correct fix is deletion.
+
+**`files` does not have to name `node_modules`.** Production dependencies are
+copied regardless; `asarUnpack` then pulls `koffi` and its
+`@koromix/koffi-darwin-arm64` platform package back out of the archive into
+`Contents/Resources/app.asar.unpacked/`, which is where `dlopen` can reach
+`koffi.node`. Verified on the built bundle, not assumed.
 
 ---
 
@@ -499,88 +554,102 @@ export const CSP =
 
 ## 9. `scripts/`
 
+The scripts themselves are the specification — they carry their reasoning inline
+and `test/scripts/shell.test.ts` and `test/scripts/install-flow.test.ts` hold
+them to it. Earlier revisions of this section inlined copies of them; the copies
+drifted, and a drifted copy of an install script is worse than no copy. What is
+recorded here is only what a reader has to know before opening them.
+
+`docs/BRINGUP.md` is the ordered, copy-pasteable version for a human doing this
+for real.
+
 ### `scripts/make-signing-cert.sh`
 
-Run once, on the first Mac. Import the same `.p12` on the second — **both Macs must share one leaf certificate**, or their designated requirements differ and grants do not transfer.
+Run once, on the first Mac. On the second, import the same `wwb.p12` — **both
+Macs must share one leaf certificate**, or their designated requirements differ
+and grants do not transfer.
 
-```bash
-#!/usr/bin/env bash
-# Creates a self-signed code-signing certificate with a stable designated
-# requirement, so TCC grants survive rebuilds.
-set -euo pipefail
+Three things in it are load-bearing and each was learned by the failure:
 
-NAME="WWB Local Signing"
-DIR="${1:-$HOME/.wwb-signing}"
-mkdir -p "$DIR"; cd "$DIR"
+- **The PKCS#12 password must not be empty.** `security import -P ""` fails with
+  *"MAC verification failed during PKCS12 import (wrong password?)"* for a `.p12`
+  exported with `-passout pass:` — with or without `-legacy`, and with any
+  `-macalg`. It reads exactly like a wrong password and is really an empty one.
+  The script uses a fixed, non-secret passphrase, and says in-line why that is
+  not a secret: the `.p12` protects a self-signed local code-signing leaf and
+  travels through 1Password.
+- **`-legacy` if and only if the `openssl` on `PATH` is OpenSSL 3.** OpenSSL 3's
+  default PKCS#12 algorithms cannot be read by Security.framework, so it needs
+  `-legacy`. macOS's own `/usr/bin/openssl` is **LibreSSL**, which already emits
+  legacy algorithms and rejects the flag outright — a hard-coded `-legacy` makes
+  the script fail on a Mac without Homebrew's openssl on `PATH`. The script
+  reads `openssl version` and branches.
+- **`-T /usr/bin/codesign`** pre-authorises codesign, so `install.sh` does not
+  stop on a keychain prompt halfway through every build.
 
-if security find-identity -v -p codesigning | grep -q "$NAME"; then
-  echo "Already present: $NAME"; exit 0
-fi
+**Trust is not optional and cannot be scripted.** Straight after import the
+identity is present but untrusted, and every consumer of it fails in a way that
+does not mention trust:
 
-cat > openssl.cnf <<'CNF'
-[req]
-distinguished_name = dn
-x509_extensions = v3
-prompt = no
-[dn]
-CN = WWB Local Signing
-[v3]
-basicConstraints = critical,CA:false
-keyUsage = critical,digitalSignature
-extendedKeyUsage = critical,codeSigning
-CNF
-
-openssl req -x509 -newkey rsa:2048 -nodes -days 7300 \
-  -keyout key.pem -out cert.pem -config openssl.cnf
-
-# -legacy is REQUIRED: OpenSSL 3's default PKCS#12 algorithms cannot be read
-# by Security.framework, and the import fails with a misleading error.
-openssl pkcs12 -export -legacy -inkey key.pem -in cert.pem \
-  -name "$NAME" -out wwb.p12 -passout pass:
-
-security import wwb.p12 -k ~/Library/Keychains/login.keychain-db \
-  -T /usr/bin/codesign -P ""
-
-echo
-echo "Imported. Two manual steps that cannot be scripted:"
-echo "  1. Open Keychain Access, find '$NAME', and set it to Always Trust."
-echo "  2. Copy $DIR/wwb.p12 to 1Password and import the SAME FILE on the other Mac."
-echo
-echo "Losing wwb.p12 means re-granting permissions on both machines."
 ```
+$ security find-identity -v -p codesigning       # valid identities only
+     0 valid identities found
+$ security find-identity -p codesigning          # all matching
+  1) F174…2284 "WWB Local Signing" (CSSMERR_TP_NOT_TRUSTED)
+$ codesign --sign "WWB Local Signing" …
+  WWB Local Signing: no identity found
+```
+
+Setting it to **Always Trust** in Keychain Access is what turns the first
+command's `0` into `1`, and `install.sh`'s precondition check is that first
+command — so the install refuses to start until the human step is done, rather
+than failing three minutes in at `codesign`.
 
 ### `scripts/install.sh`
 
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
-cd "$(dirname "$0")/.."
+Order is the whole design:
 
-export NVM_DIR="$HOME/.nvm"; [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
-nvm use    # honours .nvmrc
-
-npm ci
-npm run package
-
-APP="release/mac-arm64/Work Week Buddy.app"
-codesign --force --deep --sign "WWB Local Signing" "$APP"
-
-# The grant binds to bundle id + designated requirement + on-disk path.
-# Always this exact path, or the permissions do not apply.
-rm -rf "/Applications/Work Week Buddy.app"
-cp -R "$APP" /Applications/
-
-# HARD GATE. If the self-test fails, our own jiggle would be counted as human
-# input and hours would inflate with fake time — silently.
-"/Applications/Work Week Buddy.app/Contents/MacOS/Work Week Buddy" --selftest
-
-npm run doctor
-echo "Installed. Enable Launch at Login from the menu bar."
 ```
+node pin → npm ci → package → codesign → stop the LaunchAgent → replace
+/Applications → SELF-TEST (hard gate) → doctor (advisory) → LaunchAgent
+```
+
+- The bundle always lands at exactly `/Applications/Work Week Buddy.app`. A TCC
+  grant binds to (bundle id + designated requirement + on-disk path), so a
+  bundle run from `~/Downloads` or from `release/` has no permissions and tracks
+  nothing — silently.
+- `rm -rf` then `ditto`, never `cp -R` over an existing bundle: `cp` merges
+  directories, so a stale file from the previous build survives into the new app.
+- The LaunchAgent is booted out **before** the bundle is replaced. `KeepAlive`
+  would otherwise relaunch the app from a half-copied bundle.
+- The self-test is a **hard gate**. If it fails, the app cannot tell its own
+  synthetic jiggle from human input, and hours inflate with fake time without
+  anything looking wrong.
+- `doctor` is deliberately **not** a gate. On a first install the permissions
+  have not been granted yet, so it is red by construction at that point;
+  aborting on it would mean launch-at-login is never installed on precisely the
+  run that needs it.
+
+Every destination is overridable (`--dest`, `--app-src`, `--identity`,
+`--plist-dir`, `--log-dir`, `--no-sign`, `--no-launchctl`) for one reason: so the
+whole flow can be executed into `$TMPDIR` by a test. Nothing about the real
+install path is optional, and the defaults are the real paths.
+
+### `scripts/bringup-cloud.sh`
+
+Everything after `npx wrangler login`, in one command: create the D1 database
+(or adopt the existing one), apply `worker/schema.sql`, deploy the Worker, mint
+the two per-machine tokens, and print what to paste into the app. Idempotent —
+re-running it adopts rather than duplicates, and only rotates tokens when asked.
+It never runs `wrangler login` itself: that is a browser OAuth flow against a
+real, billable account, and it belongs to the human.
 
 ### `scripts/doctor.ts`
 
-Prints one line per invariant, and exits non-zero if any is red. Checked: both permission states, whether the tap is alive, the granted mask, the last self-test result and date, last successful sync, fingerprint match, age of the newest backup, and the local row count vs the cloud's.
+Prints one line per invariant, and exits non-zero if any is red. Checked: both
+permission states, whether the tap is alive, the granted mask, the last
+self-test result and date, last successful sync, fingerprint match, age of the
+newest backup, and the local row count vs the cloud's.
 
 ---
 

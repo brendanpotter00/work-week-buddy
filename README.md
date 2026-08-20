@@ -6,18 +6,27 @@ No timers to start. No projects to tag. No categories. It watches the same signa
 
 > **Status: built, not yet running on a real machine.**
 >
-> Every layer is implemented and tested — 708 tests across 50 files. The app
+> Every layer is implemented and tested — 831 tests across 58 files. The app
 > builds, launches as a menu-bar app with no Dock icon, creates its database,
 > and its own `--doctor` command reports honestly on what is and is not working.
 >
-> What is left is the part no amount of code can do for you:
+> [**`docs/BRINGUP.md`**](docs/BRINGUP.md) is the ordered checklist from a fresh
+> clone to two Macs syncing. What is left in it is the part no amount of code can
+> do for you:
 >
 > | Step | Why only you can do it |
 > |---|---|
 > | **Run `./spike/run-m0.sh` on the work Mac** | If device management blocks Input Monitoring for self-signed apps, keyboard tracking is impossible on the machine that generates most of the hours. Nothing else should start until this passes. |
+> | **Set the certificate to *Always Trust*** | It needs a GUI password prompt. Until it is done `codesign` says *"no identity found"* and never mentions trust. |
 > | **Grant Input Monitoring and Accessibility** | A permission prompt needs a human. Note the app already catches the case where macOS reports "granted" while the event mask it actually handed over is empty. |
-> | **Create the Cloudflare D1 database and Worker** | One `wrangler login`. Until then the app tracks locally and the doctor reports sync as *not configured* — which is a distinct state from *failing*. |
-> | **Run `./scripts/install.sh`** | Builds, signs with a local certificate, installs to `/Applications`, and gates on the self-test. |
+> | **`npx wrangler login`** | A browser flow against an account that can be billed. Everything after it is `npm run bringup:cloud`. |
+>
+> And one thing that is not waiting on you: **there is no UI yet for entering the
+> sync token**, so sync cannot be switched on even once the Worker is deployed.
+> The IPC channel and the Keychain-backed store both exist and are tested; the
+> settings pane that calls them does not. Until it lands the app tracks locally
+> and the doctor reports sync as *not configured* — a distinct state from
+> *failing*, and the rows are safe in the local mirror meanwhile.
 >
 > Start at [`docs/ROADMAP.md`](docs/ROADMAP.md) and read [`AGENTS.md`](AGENTS.md)
 > before changing anything — it lists thirteen mistakes that produce
@@ -62,6 +71,8 @@ Two settings turn it on:
 
 Both are written through one IPC call (`wwb:sync:setConfig`), applied to the running app without a relaunch, and the token is never read back out — the renderer only ever learns whether one exists. Deleting `sync-token.bin` returns the app to the unconfigured state; nothing else changes.
 
+> **Nothing calls that IPC yet.** There is no settings pane for the token, and DevTools is off in the packaged build, so today the second row of that table has no entry point. It is the one thing standing between a deployed Worker and two Macs actually syncing. `docs/BRINGUP.md` step 21.
+
 Once configured, `flush()` runs on interval close, on wake and at launch; `pull()` runs after every successful flush; and once a week the app exports itself to disk, compares its fingerprint against the cloud's, and checks the 72-hour silence alarm.
 
 ## What it costs
@@ -80,18 +91,25 @@ Nothing. No server to run, no Apple Developer account, no paid tier anywhere. Ro
 
 ## Install
 
+[**`docs/BRINGUP.md`**](docs/BRINGUP.md) is the numbered, copy-pasteable version
+of this, from a fresh clone to two Macs syncing, with what you should see at each
+step and what it means if you do not. This section is the shape of it.
+
 Built locally on each Mac, so Gatekeeper never engages and no notarization is needed. A self-signed certificate gives a stable code identity, which is what keeps your permission grants alive across rebuilds.
 
 ```bash
-./scripts/make-signing-cert.sh   # once, ever. Then set it to Always Trust in Keychain Access.
+nvm install && nvm use           # .nvmrc → 22.14.0; 22.1.0 is known-bad here
+./scripts/make-signing-cert.sh   # once, ever — then Always Trust it, see below
 ./scripts/install.sh             # npm ci → build → sign → /Applications → self-test → doctor → LaunchAgent
 ```
 
-`install.sh` does the `npm ci` and the build itself, and is safe to re-run — that is the upgrade path too. It always installs to exactly `/Applications/Work Week Buddy.app`, because a permission grant is bound to the app's path as well as its signature.
+`install.sh` does the `npm ci` and the build itself, and is safe to re-run — that is the upgrade path too. It always installs to exactly `/Applications/Work Week Buddy.app`, because a permission grant is bound to the app's path as well as its signature. The self-test is a **hard gate**: if the app cannot prove it tells its own synthetic jiggle from human input, the install stops before launch-at-login is wired up, because the alternative is a week that inflates with fake time and looks fine.
 
-On the **second** Mac, import the same `wwb.p12` that the first one produced (it lands in `~/.wwb-signing/`) instead of running `make-signing-cert.sh` again. Two separately generated certificates have different designated requirements, and grants do not transfer between them.
+**Always Trust is not a formality.** Straight after import the certificate is in the keychain and unusable, and nothing in the failure mentions trust — `codesign` just says *"no identity found"*. Open Keychain Access, find **WWB Local Signing**, and set *When using this certificate* to **Always Trust**. Then `./scripts/make-signing-cert.sh --show` must print `1 valid identities found`; `install.sh` checks exactly that and refuses to start until it does.
 
-Two things are deliberately not automated: setting the certificate to *Always Trust*, and answering the two permission prompts on first launch. Both need a human.
+**Back up `~/.wwb-signing/wwb.p12`.** On the **second** Mac, put that same file in place and run `make-signing-cert.sh` again — it re-imports rather than minting a second leaf. Two separately generated certificates have different designated requirements, and grants do not transfer between them. The archive's passphrase is `work-week-buddy` and is deliberately not a secret; the script explains why. Losing the file means re-granting Input Monitoring and Accessibility on both machines.
+
+Three things are deliberately not automated: `wrangler login`, setting the certificate to *Always Trust*, and answering the two permission prompts on first launch. Each is a person deciding something.
 
 Afterwards, and any time something looks wrong:
 
@@ -114,6 +132,29 @@ fails if either renders the wrong view, if either one's content is wider than
 its viewport, or if the fixed 560 × 640 onboarding window cannot hold its own
 contents. It runs in CI's macOS job. `docs/IMPL_UI.md` §7.3 has the full list.
 
+## The cloud half
+
+One `npx wrangler login` — a browser flow against your own account, which is why
+no script does it for you. Everything after it is one command:
+
+```bash
+npx wrangler login
+npm run bringup:cloud -- --this personal    # or --this work
+```
+
+It creates the D1 database, applies `worker/schema.sql`, deploys the Worker,
+mints the two per-machine tokens, sets this Mac's machine id, and prints what to
+paste. Safe to run again: an existing database is adopted rather than recreated,
+and a secret that is already set is left alone — Cloudflare cannot read a secret
+back, so a silent reset would take the other Mac offline with no error anywhere.
+
+**Each token's machine id must be that Mac's `IOPlatformUUID`.** The Worker
+stamps `machine_id` from the token and never from the request body, which is what
+stops a stolen token forging the other machine's rows — and it means a swapped or
+unset id fails *invisibly*: both Macs sync, both mirrors converge, every total is
+right, and the per-machine breakdown credits the wrong laptop. Forever.
+[`docs/BRINGUP.md`](docs/BRINGUP.md) step 12 is that caveat in full.
+
 ## Before anything is built
 
 Run the M0 spike on the machine you intend to track:
@@ -129,6 +170,7 @@ If device management blocks Input Monitoring for self-signed apps, keyboard trac
 
 | Document | What's in it |
 |---|---|
+| [`docs/BRINGUP.md`](docs/BRINGUP.md) | Fresh clone → two Macs syncing, numbered, with what each step should print |
 | [`docs/PRD.md`](docs/PRD.md) | The product: features, rules, acceptance criteria |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Stack, data flow, the countdown, sync, build and signing |
 | [`docs/DATA_MODEL.md`](docs/DATA_MODEL.md) | Schema, sync protocol, every metric as SQL |

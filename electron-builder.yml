@@ -14,12 +14,44 @@ mac:
   # Menu-bar only: no Dock icon, no app-switcher entry.
   extendInfo:
     LSUIElement: 1
-  # NEVER enable the App Sandbox. Under it the CoreMediaIO device list returns
-  # zero devices and camera detection dies silently. docs/MACOS.md section 4.
-  hardenedRuntime: false
-  gatekeeperAssert: false
+  # ── SIGNING IS DELIBERATELY NOT DONE HERE. ────────────────────────────────
+  # `identity: null` means, in electron-builder 26, "skip code signing
+  # entirely" — verified in app-builder-lib's MacTargetHelper.handleNullIdentity
+  # and visible in the build log as "skipped macOS code signing". It is NOT
+  # ad-hoc signing: that is `identity: "-"`, an explicit opt-in since v26.
+  #
+  # What comes out of `npm run package` therefore carries only the ad-hoc,
+  # linker-signed signature that Electron's own prebuilt binary shipped with
+  # (`codesign -dv` reports `Identifier=Electron`, `Signature=adhoc`,
+  # `Sealed Resources=none`). An ad-hoc signature has no stable designated
+  # requirement, so a bundle run straight from release/ loses its Input
+  # Monitoring and Accessibility grants on EVERY rebuild.
+  #
+  # scripts/install.sh is what gives the bundle its real identity, re-signing
+  # with the "WWB Local Signing" leaf from scripts/make-signing-cert.sh — one
+  # certificate, shared by both Macs, so the designated requirement never
+  # changes and the grants stick. Signing here instead would make
+  # `npm run package` fail on a fresh clone that has no certificate yet, which
+  # is exactly the path a first install has to walk.
   identity: null
+  # The two keys below do not execute while `identity` is null — the signing
+  # path returns before either is read. They are the settings that must hold if
+  # signing is ever moved back into electron-builder, and they are wrong to
+  # delete rather than merely inert:
+  #   hardenedRuntime: under the hardened runtime, library validation rejects
+  #     Electron's pre-signed frameworks when the app is re-signed with a leaf
+  #     carrying a different (here: no) Team ID. This is NOT the App Sandbox —
+  #     that is an entitlement, is never declared anywhere in this repo, and
+  #     must stay that way: under it the CoreMediaIO device list returns zero
+  #     devices and camera detection dies silently (docs/MACOS.md section 4).
+  #   notarize: there is no Apple Developer account and no distribution. The
+  #     app is built on the machine that runs it, so Gatekeeper never engages.
+  hardenedRuntime: false
   notarize: false
+  # NB: `gatekeeperAssert` is not a key in any version of electron-builder and
+  # used to live here; it failed schema validation and aborted `npm run package`
+  # with an unhelpful error. The real key is `gatekeeperAssess` (default false,
+  # which is what was wanted), so nothing replaces it.
 asar: true
 asarUnpack:
   - "**/node_modules/koffi/**"

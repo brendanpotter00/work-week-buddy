@@ -42,7 +42,12 @@ function sh(args: readonly string[], env: NodeJS.ProcessEnv = {}): { code: numbe
 
 describe("every shell script parses", () => {
   it("finds the scripts at all — a rename must not silently skip this gate", () => {
-    expect(shellScripts).toEqual(["install.sh", "launch-agent.sh", "make-signing-cert.sh"]);
+    expect(shellScripts).toEqual([
+      "bringup-cloud.sh",
+      "install.sh",
+      "launch-agent.sh",
+      "make-signing-cert.sh",
+    ]);
   });
 
   it.each(shellScripts)("bash -n %s", (name) => {
@@ -65,11 +70,24 @@ describe("every shell script parses", () => {
 describe("make-signing-cert.sh", () => {
   const src = readFileSync(join(SCRIPTS, "make-signing-cert.sh"), "utf8");
 
-  it("passes -legacy to openssl pkcs12", () => {
+  it("passes -legacy to openssl pkcs12 only when openssl is OpenSSL 3", () => {
     // OpenSSL 3's default PKCS#12 algorithms cannot be read by
-    // Security.framework, and the import fails with an error that reads like a
-    // wrong password. This is the single most easily lost line in the script.
-    expect(src).toMatch(/openssl pkcs12 -export -legacy\b/);
+    // Security.framework, so it needs -legacy. macOS's own /usr/bin/openssl is
+    // LibreSSL, which already emits legacy algorithms and REJECTS the flag
+    // ("unknown option '-legacy'") — so an unconditional -legacy breaks the
+    // script on any Mac without Homebrew's openssl ahead of it on PATH.
+    expect(src).toMatch(/LEGACY="-legacy"/);
+    expect(src).toMatch(/"OpenSSL 3\."\*\|"OpenSSL 4\."\*/);
+    expect(src).toMatch(/"\$OPENSSL" pkcs12 -export \$LEGACY/);
+  });
+
+  it("never exports the archive with an empty passphrase", () => {
+    // `security import -P ""` fails with "MAC verification failed during PKCS12
+    // import (wrong password?)" for an empty-password .p12 — with and without
+    // -legacy, and with any -macalg. It reads as a wrong password and is really
+    // an empty one, and it made step 2 of this script unreachable.
+    expect(src).toMatch(/-passout "pass:\$\{P12_PASS\}"/);
+    expect(src).toMatch(/\[ -n "\$P12_PASS" \] \|\| die/);
   });
 
   it("asks for a code-signing certificate, not a generic one", () => {
@@ -89,7 +107,7 @@ describe("make-signing-cert.sh", () => {
 
   it("does nothing when the identity is already in the keychain", () => {
     // Safe to run twice: the early exit is the idempotency.
-    expect(src).toMatch(/if identity_present; then\n\s+ok "Already present/);
+    expect(src).toMatch(/identity_present; then\n\s+ok "Already present/);
   });
 
   it("creates nothing in --dry-run", () => {
@@ -97,7 +115,9 @@ describe("make-signing-cert.sh", () => {
     const target = join(dir, "signing");
     const { code, out } = sh([join(SCRIPTS, "make-signing-cert.sh"), "--dir", target, "--dry-run"]);
     expect(code).toBe(0);
-    expect(out).toContain("openssl pkcs12 -export -legacy");
+    // -legacy is present or absent depending on which openssl this host has;
+    // asserting it unconditionally would fail on a Mac with only LibreSSL.
+    expect(out).toMatch(/openssl pkcs12 -export (-legacy )?-inkey/);
     expect(out).toContain("security import");
     expect(existsSync(target)).toBe(false);
   });
