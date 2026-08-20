@@ -1,0 +1,42 @@
+{
+  "name": "work-week-buddy",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./out/main/index.js",
+  "engines": {
+    "node": ">=22.14.0 <23"
+  },
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "npm run typecheck && electron-vite build",
+    "package": "npm run build && electron-builder --mac --dir",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:native": "vitest run --dir src/native --passWithNoTests"
+  },
+  "dependencies": {
+    "koffi": "3.1.5"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.20.0",
+    "@types/node": "^22.14.0",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "@vitejs/plugin-react": "5.2.0",
+    "electron": "43.4.1",
+    "electron-builder": "26.15.3",
+    "electron-vite": "5.0.0",
+    "eslint": "^9.20.0",
+    "fast-check": "^4.1.1",
+    "globals": "^16.0.0",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "typescript": "^5.7.0",
+    "typescript-eslint": "^8.24.0",
+    "vite": "7.3.6",
+    "vitest": "4.1.11"
+  }
+}

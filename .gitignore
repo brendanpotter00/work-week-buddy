@@ -11,3 +11,4 @@ release/
 local.db
 local.db-*
 .wrangler/
+out/

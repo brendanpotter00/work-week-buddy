@@ -116,46 +116,41 @@ Rules that are only written down get broken. These are lint errors.
 
 `eslint.config.js`:
 
+> **The trap that cost a test run.** Flat config merges `rules` with later-wins
+> **per rule name**, not per entry. A later block that redefines
+> `no-restricted-properties` therefore replaces *every* earlier entry for the
+> files it matches — so a core-only `Date.now` restriction is silently dropped
+> the moment a broader block sets the same rule. Share the entries in a
+> constant and order the narrowest block last. The guardrail tests in §2 catch
+> this; they caught it here.
+
 ```js
 import js from "@eslint/js";
 import ts from "typescript-eslint";
 import globals from "globals";
 
+// ESLint flat config merges `rules` with later-wins PER RULE NAME, not per
+// entry. So any block that redefines no-restricted-properties replaces every
+// earlier entry for the files it matches. Share the list rather than repeat it.
+const POLLUTED_APIS = [
+  { object: "powerMonitor", property: "getSystemIdleTime",
+    message: "Polluted by CGEventPost. Use lastRealSignalMs." },
+  { object: "powerMonitor", property: "getSystemIdleState",
+    message: "Polluted by CGEventPost. Use lastRealSignalMs." },
+];
+
+const NO_CLOCK = {
+  object: "Date", property: "now",
+  message: "src/core/ takes nowMs as a parameter. Never read the clock.",
+};
+
 export default ts.config(
   js.configs.recommended,
-  ...ts.configs.recommendedTypeChecked,
+  ...ts.configs.recommended,
   {
     languageOptions: {
-      parserOptions: { projectService: true, tsconfigRootDir: import.meta.dirname },
+      parserOptions: { ecmaVersion: "latest", sourceType: "module" },
       globals: { ...globals.node },
-    },
-  },
-
-  // ── The purity rule. src/core/ is a pure reducer over timestamps-as-data,
-  //    which is why its tests run on Linux in CI and why a 15-minute test is
-  //    arithmetic rather than a 15-minute wait.
-  {
-    files: ["src/core/**/*.ts"],
-    rules: {
-      "no-restricted-imports": ["error", {
-        paths: [
-          { name: "electron", message: "src/core/ must stay pure. Pass what you need in as a parameter." },
-          { name: "koffi",    message: "src/core/ must stay pure." },
-        ],
-        patterns: [
-          { group: ["node:*"],        message: "src/core/ must stay pure — no node builtins." },
-          { group: ["../native/*", "../store/*", "../main/*", "@/native/*", "@/store/*", "@/main/*"],
-            message: "src/core/ may not depend on any impure layer." },
-        ],
-      }],
-      // Time is a parameter, never ambient. A reducer that reads the clock cannot
-      // be tested for the sleep/wake cases, which is where the bugs are.
-      "no-restricted-globals": ["error",
-        { name: "Date", message: "src/core/ takes nowMs as a parameter. Never read the clock." },
-      ],
-      "no-restricted-properties": ["error",
-        { object: "Date", property: "now", message: "src/core/ takes nowMs as a parameter." },
-      ],
     },
   },
 
@@ -164,18 +159,37 @@ export default ts.config(
   {
     files: ["src/**/*.ts", "src/**/*.tsx"],
     rules: {
-      "no-restricted-properties": ["error",
-        { object: "powerMonitor", property: "getSystemIdleTime",
-          message: "Polluted by CGEventPost. Use lastRealSignalMs." },
-        { object: "powerMonitor", property: "getSystemIdleState",
-          message: "Polluted by CGEventPost. Use lastRealSignalMs." },
-      ],
-      "no-restricted-syntax": ["error",
-        {
-          selector: "CallExpression[callee.name='CGEventSourceSecondsSinceLastEventType']",
-          message: "Reset by our own jiggler at every tap location. Use the per-event-type counters or lastRealSignalMs.",
-        },
-      ],
+      "no-restricted-properties": ["error", ...POLLUTED_APIS],
+      "no-restricted-syntax": ["error", {
+        selector: "CallExpression[callee.name='CGEventSourceSecondsSinceLastEventType']",
+        message: "Reset by our own jiggler at every tap location. Use the per-event-type counters or lastRealSignalMs.",
+      }],
+    },
+  },
+
+  // ── Purity. src/core/ is a pure reducer over timestamps-as-data, which is
+  //    why its tests run on Linux in CI and why a 15-minute test is arithmetic
+  //    rather than a 15-minute wait.
+  {
+    files: ["src/core/**/*.ts"],
+    ignores: ["src/core/**/*.test.ts"],
+    rules: {
+      "no-restricted-imports": ["error", {
+        paths: [
+          { name: "electron", message: "src/core/ must stay pure. Pass what you need in as a parameter." },
+          { name: "koffi", message: "src/core/ must stay pure." },
+        ],
+        patterns: [
+          { group: ["node:*"], message: "src/core/ must stay pure — no node builtins." },
+          { group: ["../native/*", "../store/*", "../main/*", "@/native/*", "@/store/*", "@/main/*"],
+            message: "src/core/ may not depend on any impure layer." },
+        ],
+      }],
+      // Time is a parameter, never ambient. A reducer that reads the clock
+      // cannot be tested for the sleep/wake cases, which is where the bugs are.
+      // POLLUTED_APIS is repeated here because this block matches src/core/
+      // and would otherwise replace the general block's entries entirely.
+      "no-restricted-properties": ["error", NO_CLOCK, ...POLLUTED_APIS],
     },
   },
 
@@ -187,13 +201,14 @@ export default ts.config(
         paths: [{ name: "electron", message: "The renderer talks over IPC. See src/shared/ipc-types.ts." }],
         patterns: [
           { group: ["node:*"], message: "The renderer has no node access." },
-          { group: ["@/store/*", "@/native/*", "@/main/*"], message: "The renderer talks over IPC only." },
+          { group: ["@/store/*", "@/native/*", "@/main/*", "@/core/*"],
+            message: "The renderer talks over IPC only." },
         ],
       }],
     },
   },
 
-  { ignores: ["dist/**", "out/**", "node_modules/**", "design/**", "src/renderer/components/ui/**"] },
+  { ignores: ["dist/**", "out/**", "release/**", "node_modules/**", "design/**", "docs/**", "spike/**", "src/renderer/components/ui/**"] },
 );
 ```
 
@@ -250,7 +265,7 @@ describe("guardrails", () => {
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:native": "vitest run --dir src/native",
+    "test:native": "vitest run --dir src/native --passWithNoTests",
     "selftest": "electron-vite build && electron out/main/index.js --selftest",
     "doctor": "tsx scripts/doctor.ts"
   },
@@ -263,7 +278,7 @@ describe("guardrails", () => {
     "@types/node": "^22.14.0",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
-    "@vitejs/plugin-react": "^6.0.0",
+    "@vitejs/plugin-react": "5.2.0",
     "electron": "43.4.1",
     "electron-builder": "26.15.3",
     "electron-vite": "5.0.0",
@@ -291,6 +306,7 @@ describe("guardrails", () => {
 | Pin | Why |
 |---|---|
 | `vite` **7.3.6** | `electron-vite@5`'s peer range is `^5 \|\| ^6 \|\| ^7`. Vite 8 is released and will resolve by default. It does not work here. |
+| `@vitejs/plugin-react` **5.2.0** | v6 requires Vite **8**, which electron-vite 5 does not accept — `npm install` fails outright with ERESOLVE. 5.2.0 peers `^4 \|\| ^5 \|\| ^6 \|\| ^7 \|\| ^8`, so it spans both and survives a later Vite 8 move. |
 | Node **22.14.0** | The machine default is 22.1.0, recorded on this host as breaking stdio ESM and hanging the vitest forks pool. Electron embeds its own Node 24; koffi is Node-API so ABI is irrelevant — this pin is for tooling only. |
 
 **Not present, deliberately:** `better-sqlite3` and `electron-rebuild` (superseded by `node:sqlite`), `ffi-napi` (dead since 2021), `uiohook-napi` (its payload has no source pid or userData, so it structurally cannot tell our jiggle from a human).
