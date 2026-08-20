@@ -27,6 +27,7 @@ import type {
   SyncConfigState,
   UiSettings,
 } from "../shared/ipc-types";
+import { normalizeMachineLabel } from "./device-name";
 import { log } from "./log";
 import { APP_ORIGIN } from "./protocol";
 import type { AppRuntime, RuntimeChange } from "./runtime";
@@ -146,6 +147,16 @@ export interface IpcDeps {
     read(): SyncConfigState;
     write(patch: { workerUrl?: string; token?: string }): Promise<SyncConfigState>;
   };
+  /**
+   * Renames this Mac: `settings.json`, the local `machine` row, and a best-effort
+   * heartbeat so the other Mac hears about it. Resolves to the STORED name,
+   * which is trimmed and capped and therefore not always what was typed.
+   *
+   * Absent in tests that do not exercise the database, and then the handler
+   * still validates and still persists the setting — it simply has no row to
+   * write and no cloud to tell.
+   */
+  readonly renameMachine?: (raw: string) => Promise<string>;
   /** Test seam so the 30 s keepalive can be driven by fake timers. */
   readonly setRepeating?: (fn: () => void, ms: number) => NodeJS.Timeout;
 }
@@ -220,8 +231,32 @@ export function registerIpcHandlers(runtime: AppRuntime, deps: IpcDeps): void {
     return await deps.syncConfig.write(patch);
   });
 
+  /**
+   * Rename this Mac.
+   *
+   * NOTHING IS BACKFILLED. `work_interval` stores `machine_id` and never the
+   * label, and `byMachine()` LEFT JOINs `machine` for a display name — so this
+   * one-row write relabels every interval this Mac has ever recorded, the whole
+   * history included, the moment the next query runs. That is the owner's
+   * literal requirement, and it is a property of the schema rather than of this
+   * handler.
+   *
+   * Empty-after-trim REJECTS rather than storing `""`. A blank name renders as
+   * a blank row in the breakdown, which reads as a bug in the app rather than
+   * as a choice the person made.
+   */
   handle("wwb:machine:rename", async ({ label }) => {
-    await deps.settings.set("machineLabel", label.trim().slice(0, 60));
+    if (deps.renameMachine !== undefined) {
+      await deps.renameMachine(label);
+    } else {
+      const next = normalizeMachineLabel(label);
+      if (next === null) throw new Error("a device name cannot be empty");
+      await deps.settings.set("machineLabel", next);
+    }
+    // The status strip and the tray both show the machine name, and neither
+    // asks again on its own. Push the whole snapshot, the way every other
+    // change in this file does.
+    pushAll("wwb:push:status", runtime.liveStatus());
     return appInfo();
   });
 

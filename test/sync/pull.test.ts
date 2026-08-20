@@ -14,17 +14,25 @@ import type { DatabaseSync } from "node:sqlite";
 import { createWorkerClient, type WorkerClient } from "../../src/sync/client";
 import { pull, PULL_OVERLAP } from "../../src/sync/pull";
 import { countIntervals, pendingRows } from "../../src/store/intervals";
-import { getSyncState, setSyncState } from "../../src/store/sync-state";
-import { makeRow, openTestDb } from "../fakes/seed-db";
+import { DEFAULT_POLICY } from "../../src/store/policy";
+import { byMachine } from "../../src/store/queries";
+import {
+  getSyncState,
+  readMachines,
+  setSyncState,
+  upsertMachine,
+} from "../../src/store/sync-state";
+import { makeRow, openTestDb, t } from "../fakes/seed-db";
 import { BASE_URL, FakeCloud, MACHINE_WORK, TOKEN_PERSONAL, TOKEN_WORK } from "./fake-cloud";
+
+/** A client speaking for "the other Mac" — the work token, the work machine id. */
+function other(cloud: FakeCloud): WorkerClient {
+  return createWorkerClient({ baseUrl: BASE_URL, token: TOKEN_WORK, fetchImpl: cloud.fetch });
+}
 
 /** Fill the cloud from "the other Mac", one POST per 200 rows. */
 async function seedCloud(cloud: FakeCloud, count: number, prefix = "w"): Promise<string[]> {
-  const other = createWorkerClient({
-    baseUrl: BASE_URL,
-    token: TOKEN_WORK,
-    fetchImpl: cloud.fetch,
-  });
+  const client = other(cloud);
   const ids: string[] = [];
   const rows = Array.from({ length: count }, (_, i) => {
     const id = `${prefix}-${String(i).padStart(4, "0")}`;
@@ -39,7 +47,7 @@ async function seedCloud(cloud: FakeCloud, count: number, prefix = "w"): Promise
     });
   });
   for (let i = 0; i < rows.length; i += 200) {
-    await other.postIntervals(rows.slice(i, i + 200));
+    await client.postIntervals(rows.slice(i, i + 200));
   }
   cloud.calls.length = 0; // the seeding is not part of what a test asserts
   return ids;
@@ -206,5 +214,111 @@ describe("pull", () => {
 
     expect(res.watermark).toBe(10);
     expect(getSyncState(db, "pull_watermark")).toBe("10");
+  });
+});
+
+/**
+ * The other Mac's NAME.
+ *
+ * Pulling intervals alone leaves them anonymous: `work_interval` carries
+ * `machine_id` and never a label, so without this half the breakdown renders
+ * the other Mac as a bare IOPlatformUUID forever, with nothing to notice.
+ */
+describe("pull: machine labels", () => {
+  it("brings the other machine's name back, and byMachine uses it", async () => {
+    const cloud = new FakeCloud();
+    // One countable hour on the other Mac, uploaded by the other Mac, so the
+    // row arrives here stamped with the WORK machine id by the Worker.
+    await other(cloud).postIntervals([
+      makeRow({
+        id: "w-long",
+        machineId: "ignored — the Worker stamps it from the token",
+        start: "2026-08-17T09:00:00Z",
+        end: "2026-08-17T10:00:00Z",
+      }),
+    ]);
+    await other(cloud).heartbeat({ label: "The loft mini", appVersion: "0.1.0" });
+    const { db, client } = local(cloud);
+
+    // Before the pull, this mirror has never heard of that machine.
+    expect(readMachines(db)).toEqual([]);
+
+    const res = await pull(db, client);
+
+    expect(res.machines).toBe(1);
+    expect(res.machinesError).toBeNull();
+    expect(readMachines(db)).toEqual([
+      {
+        machineId: MACHINE_WORK,
+        label: "The loft mini",
+        osVersion: null,
+        appVersion: "0.1.0",
+        lastSeenMs: expect.any(Number),
+      },
+    ]);
+    // The interval and the label arrived over two different routes; the LEFT
+    // JOIN is what puts them together. Without the machine row this reads back
+    // as a raw IOPlatformUUID.
+    expect(byMachine(db, DEFAULT_POLICY, "UTC", t("2026-08-19T12:00:00Z"))[0]).toMatchObject({
+      machineId: MACHINE_WORK,
+      label: "The loft mini",
+      hours: 1,
+    });
+  });
+
+  it("lets MAX(last_seen_ms) settle a conflict, not arrival order", async () => {
+    const cloud = new FakeCloud();
+    await other(cloud).heartbeat({ label: "MacBook Pro" });
+    const { db, client } = local(cloud);
+    await pull(db, client);
+    const pulledAt = readMachines(db)[0]!.lastSeenMs;
+
+    // This Mac renamed that machine locally at a LATER instant than the cloud
+    // row was stamped — which is exactly the shape of a rename made offline,
+    // where the heartbeat has not gone out yet. Re-pulling the older cloud row
+    // must not revert it.
+    upsertMachine(db, {
+      machineId: MACHINE_WORK,
+      label: "The loft mini",
+      lastSeenMs: pulledAt + 60_000,
+    });
+
+    await pull(db, client);
+
+    expect(readMachines(db)[0]?.label).toBe("The loft mini");
+    expect(readMachines(db)[0]?.lastSeenMs).toBe(pulledAt + 60_000);
+  });
+
+  it("takes a NEWER cloud label over an older local one", async () => {
+    const cloud = new FakeCloud();
+    const { db, client } = local(cloud);
+    upsertMachine(db, { machineId: MACHINE_WORK, label: "stale", lastSeenMs: 1 });
+    await other(cloud).heartbeat({ label: "The loft mini" });
+
+    await pull(db, client);
+
+    expect(readMachines(db)[0]?.label).toBe("The loft mini");
+  });
+
+  it("reports a machine read that failed instead of failing the interval pull", async () => {
+    // A Worker deployed before `GET /machines` existed answers 404. Labels are
+    // cosmetic; the hours are not, and they are already ingested by this point.
+    // So this is REPORTED, and `src/main/sync.ts` logs it — never swallowed,
+    // and never allowed to lose a row.
+    const cloud = new FakeCloud();
+    await seedCloud(cloud, 4);
+    const { db } = local(cloud);
+    const client = {
+      ...createWorkerClient({ baseUrl: BASE_URL, token: TOKEN_PERSONAL, fetchImpl: cloud.fetch }),
+      getMachines: () => Promise.reject(new Error("GET /machines → 404")),
+    };
+
+    const res = await pull(db, client);
+
+    expect(res.ingested).toBe(4);
+    expect(countIntervals(db)).toBe(4);
+    expect(res.machines).toBe(0);
+    expect(res.machinesError).toMatch(/404/);
+    expect(getSyncState(db, "pull_watermark")).toBe("4");
   });
 });

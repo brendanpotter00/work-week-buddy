@@ -164,6 +164,7 @@ function realSync(
         db,
         config: resolved.config,
         configError: resolved.error,
+        machineId: "machine-a",
         appVersion: "0.0.0-test",
         tz: "UTC",
         backupDir: tmp(),

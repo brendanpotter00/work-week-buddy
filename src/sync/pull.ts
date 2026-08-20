@@ -21,7 +21,7 @@
  */
 import type { DatabaseSync } from "node:sqlite";
 import { ingest } from "../store/intervals";
-import { getSyncState, setSyncState } from "../store/sync-state";
+import { getSyncState, setSyncState, upsertMachine } from "../store/sync-state";
 import { MAX_PULL_LIMIT, type WorkerClient } from "./client";
 
 /** Rows re-read behind the watermark on every pull. Never lower this. */
@@ -37,6 +37,18 @@ export interface PullResult {
   readonly received: number;
   readonly watermark: number;
   readonly pages: number;
+  /** Machine rows read from `GET /machines` and upserted. */
+  readonly machines: number;
+  /**
+   * Why the machine read did not happen, or `null` when it did.
+   *
+   * Reported rather than thrown, and reported rather than swallowed. The
+   * machine table carries LABELS; `work_interval` carries the data. An app
+   * updated ahead of its Worker gets a 404 here, and failing the whole pull on
+   * that would stop the other Mac's *hours* arriving over a cosmetic route.
+   * `src/main/sync.ts` logs this, so it is visible rather than silent.
+   */
+  readonly machinesError: string | null;
 }
 
 export interface PullOptions {
@@ -83,7 +95,45 @@ export async function pull(
     since = maxSeq;
   }
 
-  return { ingested, received, watermark, pages };
+  const labels = await pullMachines(db, client);
+
+  return { ingested, received, watermark, pages, ...labels };
+}
+
+/**
+ * The other Mac's name.
+ *
+ * `work_interval` stores `machine_id` and never the label, so a pulled row is
+ * anonymous until the machine row that names it arrives. This is where it
+ * arrives. `upsertMachine` decides conflicts on `last_seen_ms`, which is what
+ * stops a stale cloud row reverting a rename this Mac made while offline —
+ * the rename stamped a newer `last_seen_ms` than the heartbeat it has not
+ * managed to send yet.
+ *
+ * `lastSeenMs` is the CLOUD's value, not `now()`. Stamping the read instant
+ * here would make every pulled row look freshly alive and would make the
+ * conflict rule meaningless, since the last reader would always win.
+ */
+async function pullMachines(
+  db: DatabaseSync,
+  client: WorkerClient,
+): Promise<{ machines: number; machinesError: string | null }> {
+  let rows;
+  try {
+    rows = await client.getMachines();
+  } catch (err) {
+    return { machines: 0, machinesError: err instanceof Error ? err.message : String(err) };
+  }
+  for (const m of rows) {
+    upsertMachine(db, {
+      machineId: m.machineId,
+      ...(m.label === null ? {} : { label: m.label }),
+      ...(m.osVersion === null ? {} : { osVersion: m.osVersion }),
+      ...(m.appVersion === null ? {} : { appVersion: m.appVersion }),
+      lastSeenMs: m.lastSeenMs,
+    });
+  }
+  return { machines: rows.length, machinesError: null };
 }
 
 /**

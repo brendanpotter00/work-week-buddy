@@ -164,6 +164,7 @@ app.whenReady().then(async () => {
     tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
     openPrivacyPane: (which) => void shell.openExternal(privacyPaneUrl(which)),
     syncConfig: services.syncConfig,
+    renameMachine: async (raw) => (await services.naming.rename(raw)).label,
     relaunch: () => {
       app.relaunch({ args: process.argv.slice(1) });
       app.exit(0);
