@@ -138,12 +138,16 @@ describe("rows are never deleted or updated", () => {
   it("issues no UPDATE against a payload column anywhere in src/store", () => {
     const allowed = new Set(["cloud_seq", "synced_at_ms"]);
     for (const { file, text } of sources) {
-      for (const m of text.matchAll(/UPDATE\s+work_interval\s+SET\s+([\s\S]*?)\s+WHERE/gi)) {
+      // The terminator is optional on purpose: `UPDATE work_interval SET
+      // key_events = 0` with no WHERE at all is the worst case this guard
+      // exists for, and a regex that requires WHERE would sail straight past it.
+      for (const m of text.matchAll(
+        /UPDATE\s+work_interval\s+SET\s+([\s\S]*?)(?:\bWHERE\b|;|`|$)/gim,
+      )) {
         const set = m[1] ?? "";
-        const assigned = [...set.matchAll(/([a-z_]+)\s*=/gi)]
-          .map((x) => (x[1] ?? "").toLowerCase())
-          // COALESCE(synced_at_ms, ?) reads a column; it does not assign one.
-          .filter((c) => c !== "coalesce");
+        const assigned = [...set.matchAll(/([a-z_]+)\s*=/gi)].map((x) =>
+          (x[1] ?? "").toLowerCase(),
+        );
         for (const col of assigned) {
           expect(`${file}: ${col}`).toBe(`${file}: ${allowed.has(col) ? col : "a payload column"}`);
         }

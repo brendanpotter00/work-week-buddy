@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { openDb } from "../../src/store/db";
+import { localDateOf } from "../../src/store/dates";
 import { insertClosed, type IntervalRow } from "../../src/store/intervals";
 import type { Policy } from "../../src/store/policy";
 import { upsertMachine } from "../../src/store/sync-state";
@@ -66,7 +67,9 @@ export function makeRow(spec: RowSpec): IntervalRow {
     durationS: Math.round((endedAtMs - startedAtMs) / 1000),
     endReason: spec.endReason ?? "idle_timeout",
     tz,
-    localDate: spec.localDate ?? spec.start.slice(0, 10),
+    // Minted the way production mints it, so a bug in localDateOf cannot hide
+    // behind a fixture that computed the date some other way.
+    localDate: spec.localDate ?? localDateOf(startedAtMs, tz),
     keyEvents: spec.keyEvents ?? 0,
     mouseEvents: spec.mouseEvents ?? 0,
     cameraS: spec.cameraS ?? 0,

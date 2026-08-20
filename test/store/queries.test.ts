@@ -159,6 +159,15 @@ describe("metrics", () => {
     ]);
     upsertMachine(db, { machineId: "unseen-mac", label: "the loft mini", lastSeenMs: NOW_IN_WEEK });
     expect(byMachine(db, P, "UTC", NOW_IN_WEEK)[0]?.label).toBe("the loft mini");
+
+    // A later heartbeat that carries no label must not erase the one we have.
+    upsertMachine(db, { machineId: "unseen-mac", lastSeenMs: NOW_IN_WEEK + 60_000 });
+    expect(byMachine(db, P, "UTC", NOW_IN_WEEK)[0]?.label).toBe("the loft mini");
+    // And an out-of-order one cannot move last_seen_ms backwards.
+    upsertMachine(db, { machineId: "unseen-mac", lastSeenMs: 1 });
+    expect(
+      db.prepare("SELECT last_seen_ms FROM machine WHERE machine_id = 'unseen-mac'").get(),
+    ).toMatchObject({ last_seen_ms: NOW_IN_WEEK + 60_000 });
   });
 
   it("6) the honesty widget shows both numbers", () => {

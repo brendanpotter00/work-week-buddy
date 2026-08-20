@@ -39,15 +39,19 @@ export function upsertMachine(
     `INSERT INTO machine (machine_id,label,os_version,app_version,last_seen_ms)
      VALUES (?,?,?,?,?)
      ON CONFLICT(machine_id) DO UPDATE SET
-       label=excluded.label, os_version=excluded.os_version,
-       app_version=excluded.app_version,
+       -- A heartbeat that omits a field must not erase it. Binding NULL and
+       -- keeping the stored value means a late or partial heartbeat cannot
+       -- revert a machine labelled "work" back to its raw id.
+       label=COALESCE(excluded.label, machine.label),
+       os_version=COALESCE(excluded.os_version, machine.os_version),
+       app_version=COALESCE(excluded.app_version, machine.app_version),
        -- commutative: an out-of-order heartbeat can never move it backwards
        last_seen_ms=MAX(machine.last_seen_ms, excluded.last_seen_ms)`,
   ).run(
     m.machineId,
-    m.label ?? m.machineId,
-    m.osVersion ?? "",
-    m.appVersion ?? "",
+    m.label ?? null,
+    m.osVersion ?? null,
+    m.appVersion ?? null,
     m.lastSeenMs,
   );
 }
