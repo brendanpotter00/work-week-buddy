@@ -24,8 +24,12 @@ import {
   safeStorage,
   shell,
 } from "electron";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { APP_NAME } from "../shared/constants";
+import { SMOKE_PROFILE_PREFIX } from "./smoke-report";
 import {
   createCoreServices,
   wirePowerMonitor,
@@ -61,9 +65,21 @@ protocol.registerSchemesAsPrivileged([
 
 const mode = readCliMode(process.argv);
 
+if (mode.kind === "smoke") {
+  // A THROWAWAY PROFILE, claimed before whenReady() so Electron's own caches
+  // land in it too. The smoke run opens a database, writes settings and toggles
+  // the jiggler; it does none of that to the real profile. Inlined rather than
+  // imported from ./smoke so the smoke module — which pulls in the fake signal
+  // source — stays out of the shipped main bundle. `runSmoke()` re-checks the
+  // path before it opens anything.
+  app.setPath("userData", mkdtempSync(join(tmpdir(), SMOKE_PROFILE_PREFIX)));
+}
+
 // Menu-bar only: no Dock icon, no app-switcher entry. LSUIElement covers the
 // packaged app; this covers `electron-vite dev`, where Info.plist does not apply.
-if (process.platform === "darwin") app.dock?.hide();
+// The smoke run is the exception: `capturePage()` needs windows that actually
+// composite, and an accessory app's never become key.
+if (process.platform === "darwin" && mode.kind !== "smoke") app.dock?.hide();
 
 if (mode.kind === "normal") {
   // Two processes both writing one SQLite file and both holding an event tap is
@@ -84,6 +100,16 @@ app.whenReady().then(async () => {
     // time, silently.
     const { runSelfTestCli } = await import("../native/selftest-cli");
     app.exit(await runSelfTestCli());
+    return;
+  }
+
+  if (mode.kind === "smoke") {
+    // Launches both windows for real and measures them. `src/main/smoke.ts`
+    // has the why; the short version is that the dashboard shipped crammed
+    // into the onboarding window past 708 green tests, because nothing ever
+    // opened a window and looked at it.
+    const { runSmokeCli } = await import("./smoke");
+    app.exit(await runSmokeCli());
     return;
   }
 

@@ -74,12 +74,24 @@ function bridgeFor(s: Setup = {}): StubBridge {
   });
 }
 
+/**
+ * Waits for the SNAPSHOT, not merely for a render.
+ *
+ * The first frame has `perms.data === null`, and in that frame every badge says
+ * "Checking…" and every pane offers "Grant access" because `promptConsumed` is
+ * not known yet. Asserting against that frame passes or fails depending on how
+ * loaded the machine is — which is a flaky test, and a flaky test in the file
+ * that guards a shipped bug is worse than none.
+ */
 async function mount(s: Setup = {}) {
   installDomStubs();
   const bridge = bridgeFor(s);
   installBridge(bridge);
   const r = renderApp(<Onboarding />);
-  await waitFor(() => expect(r.container.querySelector('[data-slot="pane-status"]')).not.toBeNull());
+  await waitFor(() => {
+    const badge = r.container.querySelector('[data-slot="pane-status"]');
+    expect(badge?.getAttribute("data-state") ?? "unknown").not.toBe("unknown");
+  });
   return { ...r, bridge };
 }
 
@@ -198,6 +210,15 @@ describe("a live grant reaches an open window", () => {
 });
 
 describe("the jiggler switch never appears on and does nothing", () => {
+  /** The switch, once the toggles snapshot has actually landed. */
+  async function switchOf(container: HTMLElement, wantDisabled: boolean): Promise<HTMLElement> {
+    const sel = '[data-slot="jiggler-row"] [data-slot="switch"]';
+    await waitFor(() =>
+      expect(container.querySelector(sel)?.hasAttribute("disabled")).toBe(wantDisabled),
+    );
+    return container.querySelector<HTMLElement>(sel)!;
+  }
+
   it("renders disabled without Accessibility, and says why", async () => {
     const { container } = await mount({
       perms: permissionSnapshot(),
@@ -206,10 +227,10 @@ describe("the jiggler switch never appears on and does nothing", () => {
         jigglerUnavailableReason: "needs Accessibility",
       }),
     });
-    const row = container.querySelector<HTMLElement>('[data-slot="jiggler-row"]');
-    expect(row).not.toBeNull();
-    expect(row?.textContent).toMatch(/needs Accessibility/);
-    expect(row?.querySelector("button")?.hasAttribute("disabled")).toBe(true);
+    await switchOf(container, true);
+    expect(container.querySelector('[data-slot="jiggler-row"]')?.textContent).toMatch(
+      /needs Accessibility/,
+    );
   });
 
   it("becomes clickable when Accessibility is granted", async () => {
@@ -217,8 +238,7 @@ describe("the jiggler switch never appears on and does nothing", () => {
       perms: grantedSnapshot(),
       toggleState: toggles({ jigglerAvailable: true }),
     });
-    const sw = container.querySelector<HTMLElement>('[data-slot="jiggler-row"] button');
-    expect(sw?.hasAttribute("disabled")).toBe(false);
+    await switchOf(container, false);
   });
 
   it("sends the toggle over wwb:toggles:set rather than flipping locally", async () => {
@@ -226,8 +246,9 @@ describe("the jiggler switch never appears on and does nothing", () => {
       perms: grantedSnapshot(),
       toggleState: toggles({ jigglerAvailable: true }),
     });
+    const sw = await switchOf(container, false);
     await act(async () => {
-      fireEvent.click(container.querySelector<HTMLElement>('[data-slot="jiggler-row"] button')!);
+      fireEvent.click(sw);
     });
     const set = bridge.calls.find((c) => c.channel === "wwb:toggles:set");
     expect(set?.payload).toMatchObject({ key: "jiggler", value: true });

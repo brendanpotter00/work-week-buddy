@@ -67,9 +67,9 @@ const PANES: readonly Pane[] = [
     title: "Input Monitoring",
     requirement: "required",
     icon: <KeyRound className="size-4" />,
-    why: "Lets the app notice that a key was pressed. It never sees which key, never reads what you type, and stores no text at all.",
+    why: "Notices that a key was pressed — never which key. No text is read or stored.",
     without:
-      "Without it your typing is invisible, so your hours quietly read low. Mouse and camera still count, which is what makes it hard to spot.",
+      "Without it your typing is invisible, so your hours quietly read low. Mouse and camera still count, which is what hides it.",
     // The MASK is the authority, not the TCC row: granted-with-no-keyboard-bits
     // is the whole reason this screen has a restart button.
     state: (p) =>
@@ -80,7 +80,7 @@ const PANES: readonly Pane[] = [
     title: "Accessibility",
     requirement: "optional",
     icon: <MousePointer2 className="size-4" />,
-    why: "Used only by the mouse jiggler, which posts an event carrying no coordinates — it cannot move your cursor.",
+    why: "Used only by the mouse jiggler, whose event carries no coordinates.",
     without: "Tracking is completely unaffected. The jiggler switch simply stays off.",
     state: (p) => (p.accessibility === "granted" ? "granted" : "not-granted"),
   },
@@ -148,15 +148,18 @@ export function Onboarding(): React.ReactElement {
   return (
     <div data-view="onboarding" className="flex h-svh flex-col overflow-hidden bg-background">
       {/* `titleBarStyle: "hiddenInset"` leaves no chrome to drag, so the header
-          is the drag region and its buttons opt back out. pt-9 clears the
-          traffic lights at trafficLightPosition { x: 14, y: 14 }. */}
-      <header className="shrink-0 px-7 pt-9 [-webkit-app-region:drag]">
-        <h1 className="font-heading text-[20px] leading-tight font-semibold tracking-tight">
+          IS the drag region and its buttons opt back out. pt-8 clears the
+          traffic lights, which occupy roughly x 14–74 / y 14–27 at
+          trafficLightPosition { x: 14, y: 14 } — the title starts below them
+          because at px-7 it would otherwise start underneath them. */}
+      <header className="shrink-0 px-7 pt-8 [-webkit-app-region:drag]">
+        <h1 className="font-heading text-[19px] leading-tight font-semibold tracking-tight">
           Two permissions
         </h1>
+        {/* ONE line. Every line here is a line the panes below do not get, and
+            they are the ones that have to fit a window nobody can resize. */}
         <p className="mt-1 text-xs text-muted-foreground">
-          Work Week Buddy measures when you are at the keyboard. It needs one of these to be
-          honest about your hours, and one only if you want the jiggler.
+          One keeps your hours honest. The other is only the jiggler.
         </p>
       </header>
 
@@ -175,25 +178,30 @@ export function Onboarding(): React.ReactElement {
         ) : null}
 
         {snapshot?.relaunchRequired ? (
+          /* The button sits BESIDE the text, not under it. Stacked it cost ~45 px
+             in the tallest state this screen has, and those pixels come out of a
+             560 × 640 box that cannot be resized — the Accessibility pane's own
+             buttons were being clipped to pay for them. */
           <section
             data-slot="relaunch-banner"
             role="alert"
-            className="mb-3 rounded-lg border border-destructive/40 bg-destructive/10 px-4 py-3"
+            className="mb-3 flex items-center gap-3 rounded-lg border border-destructive/40 bg-destructive/10 px-4 py-3"
           >
-            <div className="text-sm font-medium">Restart to finish Input Monitoring</div>
-            <p className="mt-1 text-xs text-muted-foreground">
-              The grant landed, but macOS hands the keyboard access out when the app starts — the
-              running copy still cannot see typing. Restarting closes your current interval
-              cleanly first, so nothing is lost.
-            </p>
-            <Button size="sm" className="mt-2.5" onClick={() => run(ipc.relaunch())}>
+            <div className="min-w-0 flex-1">
+              <div className="text-sm font-medium">Restart to finish Input Monitoring</div>
+              <p className="mt-0.5 text-xs text-muted-foreground">
+                macOS hands keyboard access out at launch, so the running copy still cannot see
+                typing. Restarting closes your open interval cleanly first.
+              </p>
+            </div>
+            <Button size="sm" className="shrink-0" onClick={() => run(ipc.relaunch())}>
               <RotateCw className="size-3.5" />
               Restart now
             </Button>
           </section>
         ) : null}
 
-        <div className="flex flex-col gap-3 pb-4">
+        <div className="flex flex-col gap-2.5 pb-3">
           {PANES.map((pane) => {
             const state = snapshot ? pane.state(snapshot) : "unknown";
             const promptSpent = snapshot?.promptConsumed[pane.id] ?? false;
@@ -202,7 +210,7 @@ export function Onboarding(): React.ReactElement {
                 key={pane.id}
                 data-slot="permission-pane"
                 data-permission={pane.id}
-                className="rounded-lg border border-border bg-card px-4 py-3.5"
+                className="rounded-lg border border-border bg-card px-4 py-3"
               >
                 <div className="flex items-center gap-2">
                   <span className="text-muted-foreground">{pane.icon}</span>
@@ -215,11 +223,16 @@ export function Onboarding(): React.ReactElement {
                   </span>
                 </div>
 
-                <p className="mt-2 text-xs text-muted-foreground">{pane.why}</p>
-                <p className="mt-1.5 text-xs text-muted-foreground">{pane.without}</p>
+                <p className="mt-1.5 text-xs text-muted-foreground">{pane.why}</p>
+                {/* What you lose by not granting it. Once it IS granted the
+                    sentence is stale — and the space it frees is space this
+                    window does not have to spare in the state that matters. */}
+                {state === "granted" ? null : (
+                  <p className="mt-1 text-xs text-muted-foreground">{pane.without}</p>
+                )}
 
                 {state === "granted" ? null : (
-                  <div className="mt-3 flex flex-wrap items-center gap-2">
+                  <div className="mt-2.5 flex flex-wrap items-center gap-2">
                     {/* The system prompt is ONE SHOT per app identity (§4.1).
                         Once it is spent the only route left is the Settings
                         pane, so stop offering a button that does nothing. */}
@@ -242,7 +255,7 @@ export function Onboarding(): React.ReactElement {
                 {pane.id === "accessibility" ? (
                   <label
                     data-slot="jiggler-row"
-                    className="mt-3 flex items-center justify-between rounded-md border border-border bg-muted px-3 py-2"
+                    className="mt-2.5 flex items-center justify-between rounded-md border border-border bg-muted px-3 py-1.5"
                     title={toggles.data?.jigglerUnavailableReason ?? undefined}
                   >
                     <span className="flex items-center gap-2 text-xs">

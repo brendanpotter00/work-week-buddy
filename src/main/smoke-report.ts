@@ -24,6 +24,15 @@
  */
 import { WINDOW_SIZE } from "../shared/constants";
 
+/**
+ * The smoke run gets a throwaway `userData` directory under the system temp
+ * dir, never the real profile: it opens a database, writes settings and toggles
+ * the jiggler. `index.ts` mints the directory before `whenReady()` and
+ * `runSmoke()` refuses to open anything unless the path it was handed carries
+ * this prefix — one constant so the claim and the check cannot drift.
+ */
+export const SMOKE_PROFILE_PREFIX = "wwb-smoke-";
+
 export type SmokeWindow = "dashboard" | "onboarding";
 
 /**
@@ -61,8 +70,13 @@ export interface WindowProbe {
   /**
    * The one region allowed to scroll in the onboarding window. If it is
    * scrolling, the copy has outgrown a window nobody can resize.
+   *
+   * `contentHeight` is what the panes actually use, which `scrollHeight` cannot
+   * tell you once everything fits — it clamps to `clientHeight` and reports a
+   * screen with 4 px to spare identically to one with 80. The difference is the
+   * whole margin the next paragraph of copy has to live in.
    */
-  innerScroll: { clientHeight: number; scrollHeight: number } | null;
+  innerScroll: { clientHeight: number; scrollHeight: number; contentHeight: number } | null;
   /** Diagnostic only — names the offender when something IS too wide. */
   widest: { tag: string; className: string; width: number } | null;
   headings: string[];
@@ -90,6 +104,14 @@ export interface SmokeReport {
 
 /** Sub-pixel layout rounds; 1 px of slack is not a squished window. */
 const SLACK = 1;
+
+/**
+ * One line of `text-xs` (16 px), rounded up. The onboarding panes must fit
+ * their region with at least this much left over: "it happens to fit on this
+ * machine" is not the same claim as "it fits", and the difference between them
+ * is a font-metric change nobody will connect to the clipped button.
+ */
+const HEADROOM = 16;
 
 const EXPECTED: ReadonlyArray<{ window: SmokeWindow; scenario: SmokeScenario }> = [
   { window: "dashboard", scenario: "degraded" },
@@ -175,7 +197,17 @@ export function checkSmokeReport(report: SmokeReport): string[] {
       if (p.innerScroll && p.innerScroll.scrollHeight > p.innerScroll.clientHeight + SLACK) {
         fail.push(
           `${where}: the permission panes overflow their region ` +
-            `(${p.innerScroll.scrollHeight}px of content in ${p.innerScroll.clientHeight}px).`,
+            `(${p.innerScroll.contentHeight}px of content in ${p.innerScroll.clientHeight}px).`,
+        );
+      } else if (p.innerScroll && p.innerScroll.clientHeight - p.innerScroll.contentHeight < HEADROOM) {
+        // A screen that fits with nothing to spare is one font metric away from
+        // not fitting, and the failure is invisible until someone with a
+        // different macOS version opens it. Ask for a line's worth of room.
+        fail.push(
+          `${where}: the permission panes fit with only ` +
+            `${p.innerScroll.clientHeight - p.innerScroll.contentHeight}px to spare ` +
+            `(${p.innerScroll.contentHeight}px in ${p.innerScroll.clientHeight}px); ` +
+            `${HEADROOM}px is the minimum, because this window cannot be resized.`,
         );
       }
       for (const needed of ["Input Monitoring", "Accessibility", "Done"]) {
