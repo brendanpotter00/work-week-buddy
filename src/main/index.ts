@@ -1,57 +1,216 @@
-import { app, Tray, Menu, nativeImage } from "electron";
-import { APP_NAME } from "../shared/constants";
-
-let tray: Tray | null = null;
-
 /**
- * `--selftest`: install the real event tap, post one stamped jiggle, assert the
- * tap identified it as ours, print JSON, exit. No tray, no window, no single-
- * instance lock — it must be runnable while the app is already running.
+ * The entry point — `docs/IMPL_UI.md` §1.1 / §1.3.
  *
- * This is the hard gate in install.sh. If it fails, our own synthetic input
- * would be counted as human input and hours would inflate with fake time,
- * silently. See src/native/selftest-cli.ts.
+ * This file is module-scope side effects, on purpose and in a specific order.
+ * Everything that can be tested lives in `bootstrap.ts`; what remains here is
+ * the ordering itself, which is load-bearing:
+ *
+ *   1. `app.setName()` before anything reads `userData` (which is derived from it)
+ *   2. `registerSchemesAsPrivileged()` at MODULE SCOPE, before `whenReady()` —
+ *      called after ready it is a silent no-op and every ESM import 404s
+ *   3. the CLI mode, before the lock — `--selftest`/`--doctor` run beside a live
+ *      instance and must not take it
+ *   4. the single-instance lock, exiting with `app.exit(0)` and never
+ *      `app.quit()`: `quit()` fires `before-quit`, which would close the
+ *      RUNNING instance's interval from this doomed process
  */
-const SELFTEST = process.argv.includes("--selftest");
+import { BrowserWindow, Menu, app, dialog, powerMonitor, protocol, shell } from "electron";
 
-/**
- * Menu-bar only. No Dock icon, no app-switcher entry.
- * LSUIElement in electron-builder.yml covers the packaged app; this covers
- * `electron-vite dev`, where Info.plist does not apply.
- */
-if (process.platform === "darwin") {
-  app.dock?.hide();
+import { APP_NAME } from "../shared/constants";
+import {
+  createCoreServices,
+  wirePowerMonitor,
+  wireQuit,
+  wireWindowLifecycle,
+} from "./bootstrap";
+import { readCliMode } from "./cli";
+import { disposeIpc, pushAll, pushToAllWindows, registerIpcHandlers } from "./ipc";
+import { log } from "./log";
+import { buildAppMenu } from "./menu";
+import { privacyPaneUrl, shouldShowOnboarding, startPermissionPoll } from "./onboarding";
+import { APP_SCHEME, registerAppProtocol } from "./protocol";
+import { SettingsStore } from "./settings";
+import { TrayController } from "./tray";
+import { closeAllWindows, getOnboardingWindow, showDashboard, showOnboarding } from "./windows";
+
+app.setName(APP_NAME);
+
+// 2. MUST be at module scope. `standard: true` gives app:// a real origin,
+//    which is what ESM, the CSP and localStorage all need.
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: APP_SCHEME,
+    privileges: {
+      standard: true,
+      secure: true,
+      supportFetchAPI: true,
+      corsEnabled: true,
+      stream: true,
+    },
+  },
+]);
+
+const mode = readCliMode(process.argv);
+
+// Menu-bar only: no Dock icon, no app-switcher entry. LSUIElement covers the
+// packaged app; this covers `electron-vite dev`, where Info.plist does not apply.
+if (process.platform === "darwin") app.dock?.hide();
+
+if (mode.kind === "normal") {
+  // Two processes both writing one SQLite file and both holding an event tap is
+  // a corruption you would not notice for weeks.
+  if (!app.requestSingleInstanceLock()) app.exit(0);
+  app.on("second-instance", () => {
+    void showDashboard();
+  });
 }
 
-// Two processes both writing one SQLite file and both holding an event tap is
-// a corruption you would not notice for weeks.
-if (!SELFTEST && !app.requestSingleInstanceLock()) {
-  app.quit();
-}
+const settings = new SettingsStore(() => app.getPath("userData"));
+let tray: TrayController | null = null;
 
 app.whenReady().then(async () => {
-  if (SELFTEST) {
+  if (mode.kind === "selftest") {
+    // The hard gate in scripts/install.sh. If this fails, our own synthetic
+    // input would be counted as human input and hours would inflate with fake
+    // time, silently.
     const { runSelfTestCli } = await import("../native/selftest-cli");
     app.exit(await runSelfTestCli());
     return;
   }
-  // An empty image plus a title: the menu bar shows text, and there is no
-  // binary asset to keep in sync.
-  tray = new Tray(nativeImage.createEmpty());
-  tray.setTitle("—h");
-  tray.setToolTip(APP_NAME);
-  tray.setContextMenu(
-    Menu.buildFromTemplate([
-      { label: `${APP_NAME} — not yet tracking`, enabled: false },
-      { type: "separator" },
-      { label: "Quit", role: "quit" },
-    ]),
-  );
+
+  await settings.load();
+
+  if (mode.kind === "doctor") {
+    const services = await createCoreServices({
+      userDataDir: app.getPath("userData"),
+      settings,
+      appVersion: app.getVersion(),
+      isPackaged: app.isPackaged,
+    });
+    const report = await services.runtime.doctor();
+    process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+    app.exit(report.allGreen ? 0 : 1);
+    return;
+  }
+
+  if (mode.kind === "install-launch-agent" || mode.kind === "uninstall-launch-agent") {
+    log.warn(`${mode.kind} is not implemented in this build`);
+    app.exit(1);
+    return;
+  }
+
+  registerAppProtocol();
+  buildAppMenu(() => void showDashboard(settings.get("windowBackground")));
+
+  const services = await createCoreServices({
+    userDataDir: app.getPath("userData"),
+    settings,
+    appVersion: app.getVersion(),
+    isPackaged: app.isPackaged,
+  });
+  const runtime = services.runtime;
+  await runtime.start();
+  services.watchdog.start();
+
+  registerIpcHandlers(runtime, {
+    settings,
+    appVersion: app.getVersion(),
+    isPackaged: app.isPackaged,
+    tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    openPrivacyPane: (which) => void shell.openExternal(privacyPaneUrl(which)),
+    relaunch: () => {
+      app.relaunch({ args: process.argv.slice(1) });
+      app.exit(0);
+    },
+    closeOnboarding: () => getOnboardingWindow()?.close(),
+    showDashboard: () => showDashboard(settings.get("windowBackground")),
+  });
+
+  // The tray IS the app: it exists before any window and outlives every window.
+  tray = new TrayController(runtime, {
+    settings,
+    isPackaged: app.isPackaged,
+    showDashboard: () => void showDashboard(settings.get("windowBackground")),
+    showOnboarding: () => void showOnboarding(settings.get("windowBackground")),
+    openPrivacyPane: (which) => void shell.openExternal(privacyPaneUrl(which)),
+    showErrorBox: (title, content) => dialog.showErrorBox(title, content),
+    askJigglerPause: async () => {
+      const { response, checkboxChecked } = await dialog.showMessageBox({
+        type: "question",
+        buttons: ["Keep tracking", "Also pause tracking"],
+        defaultId: 0,
+        cancelId: 0,
+        message: "Jiggler on — this time will not count as work.",
+        detail:
+          "Intervals recorded while the jiggler runs are still stored, but they are " +
+          "excluded from your hours. Tracking keeps running so that choice stays " +
+          "reversible later.\n\nPause tracking as well?",
+        checkboxLabel: "Don’t ask again",
+        checkboxChecked: false,
+      });
+      return { response, checkboxChecked };
+    },
+  });
+  tray.refresh("boot");
+
+  // ONE subscription fans out to the tray and to every open window.
+  runtime.on("change", (kind) => {
+    tray?.onRuntimeChange(kind);
+    pushToAllWindows(runtime, kind);
+  });
+
+  wireWindowLifecycle({
+    app,
+    hasWindows: () => BrowserWindow.getAllWindows().length > 0,
+    showDashboard: () => void showDashboard(settings.get("windowBackground")),
+  });
+  wirePowerMonitor({ powerMonitor, runtime, tray });
+  wireQuit({
+    app,
+    runtime,
+    onBeforeExit: () => {
+      disposeIpc();
+      services.watchdog.stop();
+      tray?.destroy();
+      closeAllWindows();
+    },
+  });
+
+  // First launch after a clean install says so immediately. A normal launch
+  // opens no window at all.
+  const perms = await runtime.refreshPermissions();
+  if (shouldShowOnboarding(perms, settings.get("onboardingDismissed"))) {
+    await showOnboarding(settings.get("windowBackground"));
+    // 1 Hz TCC read, alive only while that window exists, hard stop at 45 s.
+    // In MAIN because the onboarding window spends its life behind System
+    // Settings and hidden renderer timers collapse (AGENTS.md trap #10).
+    startPermissionPoll({
+      isWindowOpen: () => getOnboardingWindow() !== null,
+      read: () => runtime.permissions(),
+      onChange: (snap) => {
+        pushAll("wwb:push:permissions", snap);
+        tray?.refresh("permissions");
+      },
+    });
+  }
+}).catch((err: unknown) => {
+  // A boot that fails halfway leaves a menu-bar app that measures nothing and
+  // says nothing. Say something, then exit non-zero so a LaunchAgent restart
+  // is a restart rather than a zombie.
+  log.error("boot failed", err);
+  dialog.showErrorBox(APP_NAME, `Work Week Buddy could not start:\n${String(err)}`);
+  app.exit(1);
 });
 
-// Tracking continues with no window open, so the app must not quit when the
-// last window closes. On macOS that is the default, but it is stated here
-// because it is load-bearing rather than incidental.
-app.on("window-all-closed", () => {
-  // intentionally empty
+app.on("browser-window-created", () => {
+  // Keep the app menu alive across window churn: an LSUIElement app that loses
+  // its menu also loses ⌘C/⌘V, which reads as "Electron is broken".
+  if (Menu.getApplicationMenu() === null) {
+    buildAppMenu(() => void showDashboard(settings.get("windowBackground")));
+  }
+});
+
+process.on("uncaughtException", (err) => {
+  log.error("uncaughtException", err);
+  dialog.showErrorBox(APP_NAME, `Unexpected error:\n${String(err)}`);
 });
