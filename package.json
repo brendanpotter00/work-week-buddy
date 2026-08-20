@@ -16,7 +16,11 @@
     "test": "vitest run --coverage",
     "test:watch": "vitest",
     "test:native": "vitest run src/native test/native --passWithNoTests",
-    "selftest": "electron-vite build && electron out/main/index.js --selftest"
+    "selftest": "electron-vite build && electron out/main/index.js --selftest",
+    "doctor": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/doctor.ts",
+    "install:app": "bash scripts/install.sh",
+    "signing-cert": "bash scripts/make-signing-cert.sh",
+    "launch-agent": "bash scripts/launch-agent.sh"
   },
   "dependencies": {
     "koffi": "3.1.5"

@@ -50,10 +50,22 @@ Nothing. No server to run, no Apple Developer account, no paid tier anywhere. Ro
 
 Built locally on each Mac, so Gatekeeper never engages and no notarization is needed. A self-signed certificate gives a stable code identity, which is what keeps your permission grants alive across rebuilds.
 
+```bash
+./scripts/make-signing-cert.sh   # once, ever. Then set it to Always Trust in Keychain Access.
+./scripts/install.sh             # npm ci → build → sign → /Applications → self-test → doctor → LaunchAgent
 ```
-npm ci
-npm run build
-./scripts/install.sh        # signs, copies to /Applications, runs the self-test, installs the LaunchAgent
+
+`install.sh` does the `npm ci` and the build itself, and is safe to re-run — that is the upgrade path too. It always installs to exactly `/Applications/Work Week Buddy.app`, because a permission grant is bound to the app's path as well as its signature.
+
+On the **second** Mac, import the same `wwb.p12` that the first one produced (it lands in `~/.wwb-signing/`) instead of running `make-signing-cert.sh` again. Two separately generated certificates have different designated requirements, and grants do not transfer between them.
+
+Two things are deliberately not automated: setting the certificate to *Always Trust*, and answering the two permission prompts on first launch. Both need a human.
+
+Afterwards, and any time something looks wrong:
+
+```bash
+npm run doctor              # one line per invariant; non-zero exit if any is red
+npm run launch-agent status # is launch-at-login actually loaded?
 ```
 
 ## Before anything is built
