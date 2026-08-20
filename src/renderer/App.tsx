@@ -33,6 +33,7 @@ import { Bar, BarChart, CartesianGrid, XAxis } from "recharts";
 import { Coffee, Laptop, Monitor, Moon, MousePointer2, Sun } from "lucide-react";
 
 import { AlertBanner } from "@/renderer/components/alert-banner";
+import { DeviceName } from "@/renderer/components/device-name";
 import { Badge } from "@/renderer/components/ui/badge";
 import { Button } from "@/renderer/components/ui/button";
 import {
@@ -421,6 +422,8 @@ export function App(): React.ReactElement {
                 </div>
               )}
             </div>
+            <Separator className="my-4" />
+            <DeviceName />
             <Separator className="my-4" />
             <div className="flex items-center justify-between">
               <span className="text-xs text-muted-foreground">Idle timeout</span>
