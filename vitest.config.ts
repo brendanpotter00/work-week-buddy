@@ -9,6 +9,13 @@ export default defineConfig({
     // The forks pool hangs on Node 22.1.0. The .nvmrc pin is the real fix;
     // this is belt-and-braces so a wrong-Node run fails rather than hangs.
     pool: "threads",
+    // Generous, because two files are inherently slow rather than badly
+    // written: test/guardrails.test.ts spawns ESLint seven times, and
+    // typescript-eslint's first load is heavy. The default 5s is enough idle
+    // and not enough on a loaded machine. Real unit tests finish in
+    // milliseconds, so this only ever rescues the pathological case.
+    testTimeout: 30_000,
+    hookTimeout: 30_000,
     include: ["src/**/*.test.ts", "test/**/*.test.ts", "worker/**/*.test.ts"],
     coverage: {
       provider: "v8",
