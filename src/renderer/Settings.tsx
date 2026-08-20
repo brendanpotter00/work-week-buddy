@@ -154,7 +154,10 @@ export function Settings(): React.ReactElement {
                 id="meeting-apps"
                 label="Counts as a meeting"
                 hint="Mic in use AND one of these running keeps a session open with no mouse movement."
-                placeholder="us.zoom.xos"
+                // Deliberately NOT one of the seeded ids: a placeholder that
+                // repeats a row already in the list above reads as a duplicate
+                // rather than as an example.
+                placeholder="add a bundle id, e.g. com.apple.FaceTime"
                 values={value?.meetingApps ?? []}
                 disabled={value === null}
                 onChange={(next) => write({ meetingApps: next })}
@@ -163,7 +166,7 @@ export function Settings(): React.ReactElement {
                 id="mic-ignore"
                 label="Never a meeting"
                 hint="Dictation tools hold the mic all day. Left in, one of them makes every waking hour look like a call."
-                placeholder="com.electron.wispr-flow"
+                placeholder="add a bundle id, e.g. com.apple.VoiceMemos"
                 values={value?.micIgnoreApps ?? []}
                 disabled={value === null}
                 onChange={(next) => write({ micIgnoreApps: next })}
