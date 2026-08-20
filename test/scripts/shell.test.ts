@@ -42,7 +42,12 @@ function sh(args: readonly string[], env: NodeJS.ProcessEnv = {}): { code: numbe
 
 describe("every shell script parses", () => {
   it("finds the scripts at all — a rename must not silently skip this gate", () => {
-    expect(shellScripts).toEqual(["install.sh", "launch-agent.sh", "make-signing-cert.sh"]);
+    expect(shellScripts).toEqual([
+      "bringup-cloud.sh",
+      "install.sh",
+      "launch-agent.sh",
+      "make-signing-cert.sh",
+    ]);
   });
 
   it.each(shellScripts)("bash -n %s", (name) => {

@@ -1,7 +1,18 @@
 name = "wwb-sync"
 main = "src/index.ts"
 compatibility_date = "2026-08-01"
+# Both Macs reach this over the internet and there is no custom domain, so the
+# workers.dev subdomain IS the deployment. Stated rather than left to the
+# default, because "the deploy succeeded and there is no URL" is a confusing
+# half-hour.
+workers_dev = true
 
+# ── DO NOT DEPLOY THIS FILE DIRECTLY. ───────────────────────────────────────
+# It is a template. `scripts/bringup-cloud.sh` copies it to
+# worker/wrangler.generated.toml with the real database_id substituted in, and
+# every wrangler command it runs passes `--config` pointing at that copy. The
+# generated file is gitignored: this repo is public, and a tracked file that
+# names live account resources is a habit worth not starting.
 [[d1_databases]]
 binding = "DB"
 database_name = "wwb"
