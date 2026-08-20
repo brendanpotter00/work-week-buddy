@@ -226,7 +226,7 @@ export function App(): React.ReactElement {
             settings pane, so the caveat the stopwatch shows and the numbers the
             stat cards show were computed under the same policy. */}
         <LiveStopwatch
-          status={status ?? null}
+          status={status}
           policy={metrics?.policy ?? DEFAULT_METRICS_POLICY}
           nowMs={nowMs}
         />
