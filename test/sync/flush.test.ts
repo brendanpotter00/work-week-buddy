@@ -17,9 +17,10 @@ import type { DatabaseSync } from "node:sqlite";
 import {
   BACKOFF_CAP_MS,
   BACKOFF_LADDER_MS,
-  createFlusher,
   FLUSH_PAGE_SIZE,
   noteCloudWrite,
+  STOPPED,
+  type Flusher,
   type FlusherDeps,
   type TimerHandle,
 } from "../../src/sync/flush";
@@ -28,6 +29,7 @@ import { getSyncState } from "../../src/store/sync-state";
 import { makeRow, openTestDb } from "../fakes/seed-db";
 import { insertClosed } from "../../src/store/intervals";
 import { BASE_URL, FakeCloud, TOKEN_PERSONAL } from "./fake-cloud";
+import { testFlusher } from "./flusher";
 
 /** A scheduler you can inspect: no wall-clock waiting anywhere in this file. */
 class TestTimers {
@@ -117,7 +119,7 @@ interface Rig {
   readonly db: DatabaseSync;
   readonly cloud: FakeCloud;
   readonly timers: TestTimers;
-  readonly flusher: ReturnType<typeof createFlusher>;
+  readonly flusher: Flusher;
 }
 
 function rig(overrides: Partial<FlusherDeps> = {}, fetchImpl?: typeof fetch): Rig {
@@ -129,7 +131,7 @@ function rig(overrides: Partial<FlusherDeps> = {}, fetchImpl?: typeof fetch): Ri
     token: TOKEN_PERSONAL,
     fetchImpl: fetchImpl ?? cloud.fetch,
   });
-  const flusher = createFlusher({
+  const flusher = testFlusher({
     db,
     client,
     scheduleTimer: timers.schedule,
@@ -428,5 +430,106 @@ describe("flush — single-flight and paging", () => {
     const db = openTestDb();
     noteCloudWrite(db, 42);
     expect(getSyncState(db, "last_cloud_write_ms")).toBe("42");
+  });
+});
+
+/**
+ * `cancel()` disarms. `stop()` disarms AND waits.
+ *
+ * The difference is the whole reason this block exists: a drain past its first
+ * await still reads rows out of the database, and the backoff retry is
+ * `void flush()` from inside a timer — no promise, nobody holding it, nothing
+ * to await. Whoever closes the database next (⌘Q, a test's teardown) needs one
+ * call that means "and nothing of yours is still running".
+ */
+describe("flush — stop(), so no drain outlives its database", () => {
+  it("returns only once the drain already in flight has finished", async () => {
+    const cloud = new FakeCloud();
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const order: string[] = [];
+    const parking: typeof fetch = async (input, init) => {
+      await held;
+      order.push("request answered");
+      return cloud.fetch(input, init);
+    };
+    const { db, flusher } = rig({}, parking);
+    intervals(db, 2);
+
+    const draining = flusher.flush();
+    const stopping = flusher.stop().then(() => order.push("stop returned"));
+    release();
+    await stopping;
+
+    // The order IS the property. Anything else means `stop()` handed back
+    // control while a drain was still reading the database it is about to
+    // close, which is the failure this whole file is guarding against.
+    expect(order).toEqual(["request answered", "stop returned"]);
+    expect((await draining).confirmed).toBe(2);
+  });
+
+  it("refuses to start a new drain, and says so rather than throwing", async () => {
+    const { db, cloud, flusher } = rig();
+    intervals(db, 3);
+
+    await flusher.stop();
+    const res = await flusher.flush();
+
+    expect(res).toMatchObject({ attempted: 0, confirmed: 0, drained: false, error: STOPPED });
+    expect(cloud.postCount()).toBe(0);
+    expect(pendingCount(db)).toBe(3);
+  });
+
+  it("leaves a retry that fires anyway with nothing to do", async () => {
+    // A timer whose callback is already queued cannot be un-fired — clearing
+    // the handle is too late. So the refusal has to live in `flush()` itself,
+    // and this fires the callback by hand to prove it does.
+    const fired: Array<() => void> = [];
+    const { db, cloud, flusher } = rig({
+      scheduleTimer: (fn) => {
+        fired.push(fn);
+        return fired.length;
+      },
+      cancelTimer: () => undefined,
+    });
+    intervals(db, 2);
+    cloud.offline = true;
+    await flusher.flush();
+    expect(fired).toHaveLength(1);
+
+    await flusher.stop();
+    cloud.offline = false;
+    const postsBefore = cloud.postCount();
+    fired[0]?.();
+
+    expect(cloud.postCount()).toBe(postsBefore);
+    expect(cloud.count()).toBe(0);
+    expect(pendingCount(db)).toBe(2);
+  });
+
+  it("disarms the armed retry and resets the ladder", async () => {
+    const { db, cloud, timers, flusher } = rig();
+    intervals(db, 1);
+    cloud.offline = true;
+    await flusher.flush();
+    expect(timers.count()).toBe(1);
+
+    await flusher.stop();
+
+    expect(timers.count()).toBe(0);
+    expect(flusher.timerArmed()).toBe(false);
+    expect(flusher.backoffMs()).toBe(0);
+  });
+
+  it("is idempotent, because teardown cannot know whether quit already ran", async () => {
+    const { db, flusher } = rig();
+    intervals(db, 1);
+
+    await flusher.stop();
+    await flusher.stop();
+
+    expect(flusher.timerArmed()).toBe(false);
   });
 });

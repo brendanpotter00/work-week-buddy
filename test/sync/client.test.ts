@@ -7,6 +7,8 @@
  * sent, which is precisely the bug worth catching.
  */
 import { describe, it, expect } from "vitest";
+import { setFlagsFromString } from "node:v8";
+import { runInNewContext } from "node:vm";
 import {
   createWorkerClient,
   HttpError,
@@ -34,6 +36,16 @@ function interval(id: string, minute: number, machineId = "personal") {
     keyEvents: 12,
     mouseEvents: 3,
   });
+}
+
+/** A real collection, without asking the runner for `--expose-gc`. */
+function collectGarbage(): void {
+  setFlagsFromString("--expose-gc");
+  try {
+    (runInNewContext("gc") as () => void)();
+  } finally {
+    setFlagsFromString("--no-expose-gc");
+  }
 }
 
 describe("the Worker client", () => {
@@ -168,6 +180,28 @@ describe("the Worker client", () => {
     expect(
       cloud.d1.query<{ machine_id: string; label: string }>("SELECT * FROM machine"),
     ).toMatchObject([{ machine_id: MACHINE_PERSONAL, label: "personal" }]);
+  });
+
+  it("answers a POST that a garbage collection interrupts", async () => {
+    // ── The flake this pins. ────────────────────────────────────────────────
+    // undici's `Request.clone()` tees the body, keeps one branch for the
+    // ORIGINAL request, and registers that branch in a FinalizationRegistry
+    // keyed on the CLONE. Peeking at a body through a throwaway clone and then
+    // collecting therefore CANCELS the body the server has not read yet: the
+    // Worker sees nothing, answers `400 expected a JSON object`, and a
+    // perfectly well-formed upload fails. Collections are frequent on a loaded
+    // machine and rare on an idle one, which is exactly how it presented — a
+    // couple of failures in twenty runs under load, three different test names,
+    // and never once on a quiet laptop.
+    const cloud = new FakeCloud();
+    cloud.beforeDispatch = collectGarbage;
+
+    const res = await clientFor(cloud).postIntervals([interval("a", 0)]);
+
+    expect(res.present).toEqual([{ id: "a", seq: 1 }]);
+    expect(cloud.count()).toBe(1);
+    // …and the fake still counted the rows it peeked at.
+    expect(cloud.calls.at(-1)?.rows).toBe(1);
   });
 
   it("returns the cloud fingerprint fields it was promised", async () => {

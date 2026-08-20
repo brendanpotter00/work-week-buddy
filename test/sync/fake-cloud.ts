@@ -16,6 +16,10 @@
  *   hiddenSeqs         a committed row is not yet visible to a range read,
  *                      which is how AUTOINCREMENT identities really behave
  *
+ * `beforeDispatch` is not a network fake at all — it is a seam for driving a
+ * garbage collection into the moment between reading a request body and
+ * answering it. See the comment on `fetch` for why that moment is dangerous.
+ *
  * The tokens are obvious nonsense, deliberately. AGENTS.md: the real token
  * never appears in a fixture or a commit.
  */
@@ -61,6 +65,13 @@ export class FakeCloud {
   failWithStatus: number | null = null;
   /** Committed rows a range read cannot see yet — out-of-order visibility. */
   readonly hiddenSeqs = new Set<number>();
+  /**
+   * Runs after the request body has been read and before the Worker is
+   * reached — the window in which a `clone()`-based peek used to lose the
+   * body to the garbage collector. `client.test.ts` forces a collection here
+   * so that trap can never be reintroduced unnoticed.
+   */
+  beforeDispatch: (() => void) | null = null;
 
   constructor() {
     this.env = {
@@ -74,13 +85,33 @@ export class FakeCloud {
 
   /** Hand this to `createWorkerClient({ fetchImpl })`. */
   readonly fetch: typeof fetch = async (input, init) => {
-    const req = new Request(input as RequestInfo, init);
-    const url = new URL(req.url);
+    const incoming = new Request(input as RequestInfo, init);
+    const url = new URL(incoming.url);
     const path = url.pathname;
-    const rows = await countRows(req);
+
+    // ── The body is read ONCE, here, and never again. ────────────────────────
+    // `clone()` is NOT a safe way to peek at a request body. undici's
+    // `cloneBody` tees the stream, hands the clone one branch, gives the
+    // ORIGINAL the other — and registers the ORIGINAL's branch in a
+    // FinalizationRegistry keyed on the clone. Collecting the throwaway clone
+    // therefore CANCELS the body the Worker has not read yet:
+    //
+    //     await req.clone().json();   // peek
+    //     <a garbage collection>      // undici cancels req's body stream
+    //     await req.json();           // TypeError: Body is unusable
+    //
+    // The Worker catches that, sees no body, and answers `400 expected a JSON
+    // object` — for a request that was perfectly well formed. It happens only
+    // when a GC lands inside that window, which is why it looked like a rare,
+    // unrelated, load-only flake in three different tests. So: read the text,
+    // count from the text, and hand the Worker a request rebuilt from the same
+    // text. Nothing in this file reads a body twice.
+    const bodyText = incoming.body === null ? null : await incoming.text();
+    const rows = countRows(incoming.method, path, bodyText);
+    this.beforeDispatch?.();
     const record = (outcome: CloudCall["outcome"]): void => {
       this.calls.push({
-        method: req.method,
+        method: incoming.method,
         path,
         since: numParam(url, "since"),
         limit: numParam(url, "limit"),
@@ -100,7 +131,14 @@ export class FakeCloud {
       return new Response("nope", { status: this.failWithStatus });
     }
 
-    const res = await worker.fetch(req, this.env);
+    const res = await worker.fetch(
+      new Request(incoming.url, {
+        method: incoming.method,
+        headers: incoming.headers,
+        ...(bodyText === null ? {} : { body: bodyText }),
+      }),
+      this.env,
+    );
 
     if (this.dropResponses > 0) {
       this.dropResponses--;
@@ -111,7 +149,7 @@ export class FakeCloud {
     }
 
     record("answered");
-    return this.hiddenSeqs.size > 0 && req.method === "GET" && path === "/intervals"
+    return this.hiddenSeqs.size > 0 && incoming.method === "GET" && path === "/intervals"
       ? await hideSeqs(res, this.hiddenSeqs)
       : res;
   };
@@ -154,10 +192,10 @@ function numParam(url: URL, name: string): number | null {
   return raw === null ? null : Number(raw);
 }
 
-async function countRows(req: Request): Promise<number> {
-  if (req.method !== "POST" || new URL(req.url).pathname !== "/intervals") return 0;
+function countRows(method: string, path: string, bodyText: string | null): number {
+  if (method !== "POST" || path !== "/intervals" || bodyText === null) return 0;
   try {
-    const body = (await req.clone().json()) as { rows?: unknown[] };
+    const body = JSON.parse(bodyText) as { rows?: unknown[] };
     return Array.isArray(body.rows) ? body.rows.length : 0;
   } catch {
     return 0;

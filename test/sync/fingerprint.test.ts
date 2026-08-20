@@ -15,12 +15,12 @@ import {
   reconcile,
   type ReconcileReport,
 } from "../../src/sync/fingerprint";
-import { createFlusher } from "../../src/sync/flush";
 import { pull } from "../../src/sync/pull";
 import { fingerprintSha256 as workerSha256 } from "../../worker/src/fingerprint.js";
 import { insertClosed } from "../../src/store/intervals";
 import { makeRow, openTestDb } from "../fakes/seed-db";
 import { BASE_URL, FakeCloud, TOKEN_PERSONAL } from "./fake-cloud";
+import { testFlusher } from "./flusher";
 
 /** The digest of the empty string. An empty table is a real value, not a case. */
 const EMPTY_SHA = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
@@ -99,7 +99,7 @@ describe("reconcile", () => {
     const db = openTestDb();
     const client = clientFor(cloud);
     rows(db, ["a", "b", "c"]);
-    await createFlusher({ db, client }).flush();
+    await testFlusher({ db, client }).flush();
 
     const report = await reconcile(db, client);
 
@@ -114,7 +114,7 @@ describe("reconcile", () => {
     const client = clientFor(cloud);
     const db = openTestDb();
     rows(db, ["a", "b"]);
-    await createFlusher({ db, client }).flush();
+    await testFlusher({ db, client }).flush();
 
     // The other Mac's rows arrive by pull; the local synced set must converge
     // on the cloud set or the weekly check means nothing.
@@ -125,7 +125,7 @@ describe("reconcile", () => {
       token: TOKEN_PERSONAL,
       fetchImpl: cloud.fetch,
     });
-    await createFlusher({ db: otherCloudRows, client: otherClient }).flush();
+    await testFlusher({ db: otherCloudRows, client: otherClient }).flush();
 
     await pull(db, client);
 
@@ -139,7 +139,7 @@ describe("reconcile", () => {
     const db = openTestDb();
     const client = clientFor(cloud);
     rows(db, ["a", "b", "c"]);
-    await createFlusher({ db, client }).flush();
+    await testFlusher({ db, client }).flush();
 
     // Silent loss: no error, no exception, nothing in any log. This check is
     // the only thing in the product that would ever notice.
@@ -159,7 +159,7 @@ describe("reconcile", () => {
     const db = openTestDb();
     const client = clientFor(cloud);
     rows(db, ["a", "b"]);
-    await createFlusher({ db, client }).flush();
+    await testFlusher({ db, client }).flush();
     cloud.wipe();
 
     await reconcile(db, client);

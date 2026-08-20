@@ -13,13 +13,13 @@
  */
 import { describe, it, expect } from "vitest";
 import { createWorkerClient } from "../../src/sync/client";
-import { createFlusher } from "../../src/sync/flush";
 import { pull } from "../../src/sync/pull";
 import { fromCloudRow, toWireRow } from "../../src/sync/wire";
 import { parseNdjson } from "../../src/sync/restore";
 import { insertClosed } from "../../src/store/intervals";
 import { makeRow, openTestDb } from "../fakes/seed-db";
 import { BASE_URL, FakeCloud, TOKEN_PERSONAL } from "./fake-cloud";
+import { testFlusher } from "./flusher";
 
 const GOOD = toWireRow(
   makeRow({
@@ -114,7 +114,7 @@ describe("a presence answer that cannot be trusted", () => {
     ["a body that is a string", "ok"],
   ])("leaves every row pending: %s", async (_name, body) => {
     const db = pendingIntervals(2);
-    const flusher = createFlusher({
+    const flusher = testFlusher({
       db,
       client: client(answering(body)),
       scheduleTimer: () => null,
@@ -133,7 +133,7 @@ describe("a presence answer that cannot be trusted", () => {
 
   it("tolerates a missing server_ms — it is a diagnostic, not the rule", async () => {
     const db = pendingIntervals(1);
-    const flusher = createFlusher({
+    const flusher = testFlusher({
       db,
       client: client(answering({ present: [{ id: "i-0", seq: 4 }] })),
       scheduleTimer: () => null,
@@ -191,7 +191,7 @@ describe("the real timer, not the injected one", () => {
     // No scheduleTimer override: this exercises the production default, which
     // unrefs its handle so a pending retry can never be the reason a CLI run
     // refuses to exit.
-    const flusher = createFlusher({ db, client: client(cloud.fetch) });
+    const flusher = testFlusher({ db, client: client(cloud.fetch) });
 
     await flusher.flush();
     expect(flusher.timerArmed()).toBe(true);
@@ -211,7 +211,7 @@ describe("the real timer, not the injected one", () => {
       db.exec("UPDATE work_interval SET synced_at_ms = 1, cloud_seq = 1");
       throw new TypeError("fetch failed");
     });
-    const flusher = createFlusher({
+    const flusher = testFlusher({
       db,
       client: raceyClient,
       scheduleTimer: () => {

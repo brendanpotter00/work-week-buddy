@@ -18,11 +18,12 @@
 import { describe, it, expect } from "vitest";
 import type { DatabaseSync } from "node:sqlite";
 import { createWorkerClient } from "../../src/sync/client";
-import { createFlusher, type Flusher } from "../../src/sync/flush";
+import type { Flusher } from "../../src/sync/flush";
 import { pull } from "../../src/sync/pull";
 import { localFingerprint } from "../../src/sync/fingerprint";
 import { insertClosed } from "../../src/store/intervals";
 import { makeRow, openTestDb } from "../fakes/seed-db";
+import { testFlusher } from "./flusher";
 import {
   BASE_URL,
   FakeCloud,
@@ -83,7 +84,7 @@ function machine(cloud: FakeCloud, name: string, token: string, machineId: strin
     flusher: undefined as unknown as Flusher,
   };
   return Object.assign(m, {
-    flusher: createFlusher({
+    flusher: testFlusher({
       db,
       client: m.client,
       // No retry timers in this test: every flush is driven explicitly, so a
