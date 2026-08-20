@@ -34,6 +34,7 @@ import { Coffee, Laptop, Monitor, Moon, MousePointer2, Sun } from "lucide-react"
 
 import { AlertBanner } from "@/renderer/components/alert-banner";
 import { DeviceName } from "@/renderer/components/device-name";
+import { LiveStopwatch } from "@/renderer/components/live-stopwatch";
 import { Badge } from "@/renderer/components/ui/badge";
 import { Button } from "@/renderer/components/ui/button";
 import {
@@ -55,7 +56,7 @@ import { useTheme } from "@/renderer/lib/theme-provider";
 import { useAppInfo, useLiveStatus, useMetrics, useNowMs, useToggles } from "@/renderer/lib/ipc";
 import { useResolvedTheme } from "@/renderer/lib/use-resolved-theme";
 import { useThemeMirror } from "@/renderer/lib/use-theme-mirror";
-import type { DegradedReason } from "@/shared/ipc-types";
+import { DEFAULT_METRICS_POLICY, type DegradedReason } from "@/shared/ipc-types";
 import {
   creditedOpenMs,
   formatAgo,
@@ -220,8 +221,18 @@ export function App(): React.ReactElement {
           />
         ) : null}
 
+        {/* The headline: how long this session has been running, and how much
+            of today is already banked. `metrics.policy` rather than the
+            settings pane, so the caveat the stopwatch shows and the numbers the
+            stat cards show were computed under the same policy. */}
+        <LiveStopwatch
+          status={status ?? null}
+          policy={metrics?.policy ?? DEFAULT_METRICS_POLICY}
+          nowMs={nowMs}
+        />
+
         {/* Live status strip */}
-        <section className="mt-6 flex items-center gap-3 rounded-lg border border-border bg-card px-4 py-3">
+        <section className="mt-4 flex items-center gap-3 rounded-lg border border-border bg-card px-4 py-3">
           <span className="relative flex size-2">
             {/* A pulsing dot while idle is a lie. §5.6. */}
             {working ? (

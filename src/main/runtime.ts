@@ -59,6 +59,7 @@ import type {
   DoctorReport,
   EndReason,
   FlushResult,
+  HoldKind,
   LiveStatus,
   MetricsBundle,
   MetricsPolicy,
@@ -673,7 +674,7 @@ class Runtime implements AppRuntime {
     const nowMs = this.now();
     const open = this.state.open;
     const hours = this.closedHours(nowMs);
-    const held: SignalKind | null = open === null ? null : this.heldBy();
+    const held: HoldKind | null = open === null ? null : this.heldBy();
 
     return {
       asOfMs: nowMs,
@@ -698,7 +699,7 @@ class Runtime implements AppRuntime {
     };
   }
 
-  private heldBy(): SignalKind | null {
+  private heldBy(): HoldKind | null {
     if (this.state.cameraOn) return "camera";
     if (this.state.micMeeting) return "mic";
     return null;
