@@ -4,7 +4,24 @@ A macOS menu-bar app that answers one question honestly: **how many hours did I 
 
 No timers to start. No projects to tag. No categories. It watches the same signals Slack watches to decide you're "active" — real keystrokes, clicks, and whether your camera is live — and turns them into work intervals you can look back on.
 
-> **Status: not built yet.** This repo currently contains the specification only. It is written to be implemented by coding agents; start at [`docs/ROADMAP.md`](docs/ROADMAP.md) and read [`AGENTS.md`](AGENTS.md) first.
+> **Status: built, not yet running on a real machine.**
+>
+> Every layer is implemented and tested — 708 tests across 50 files. The app
+> builds, launches as a menu-bar app with no Dock icon, creates its database,
+> and its own `--doctor` command reports honestly on what is and is not working.
+>
+> What is left is the part no amount of code can do for you:
+>
+> | Step | Why only you can do it |
+> |---|---|
+> | **Run `./spike/run-m0.sh` on the work Mac** | If device management blocks Input Monitoring for self-signed apps, keyboard tracking is impossible on the machine that generates most of the hours. Nothing else should start until this passes. |
+> | **Grant Input Monitoring and Accessibility** | A permission prompt needs a human. Note the app already catches the case where macOS reports "granted" while the event mask it actually handed over is empty. |
+> | **Create the Cloudflare D1 database and Worker** | One `wrangler login`. Until then the app tracks locally and the doctor reports sync as *not configured* — which is a distinct state from *failing*. |
+> | **Run `./scripts/install.sh`** | Builds, signs with a local certificate, installs to `/Applications`, and gates on the self-test. |
+>
+> Start at [`docs/ROADMAP.md`](docs/ROADMAP.md) and read [`AGENTS.md`](AGENTS.md)
+> before changing anything — it lists thirteen mistakes that produce
+> plausible-looking wrong data and throw no error.
 
 ## How it decides you're working
 
