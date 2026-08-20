@@ -1,0 +1,335 @@
+/**
+ * The tray, against a hand-written `electron` double.
+ *
+ * The title is the product's headline number. Everything asserted here is a
+ * number that would otherwise be wrong in a way nobody notices: a title that
+ * freezes when a window closes, a title that shrinks when an interval ends, a
+ * menu bar that redraws 300 times a second, a permission failure that reads as
+ * a quiet zero.
+ */
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { MenuItemConstructorOptions } from "electron";
+
+vi.mock("electron", () => import("../../test/fakes/electron"));
+
+import {
+  Tray as FakeTray,
+  addFakeWindow,
+  app as fakeApp,
+  dialog as fakeDialog,
+  resetElectronMock,
+  shell as fakeShell,
+} from "../../test/fakes/electron";
+import { onWindowAllClosed } from "./bootstrap";
+import { TrayController, type TrayDeps } from "./tray";
+import { countIntervals } from "../store";
+import { MIN, T0, fakeSettings, makeHarness, type Harness } from "../../test/helpers/runtime";
+import { privacyPaneUrl } from "./onboarding";
+
+let h: Harness;
+let tray: TrayController;
+
+function makeTray(over: Partial<TrayDeps> = {}): TrayController {
+  const deps: TrayDeps = {
+    settings: fakeSettings(),
+    showDashboard: () => {},
+    showOnboarding: () => {},
+    openPrivacyPane: (which) => void fakeShell.openExternal(privacyPaneUrl(which)),
+    showErrorBox: (title, content) => fakeDialog.showErrorBox(title, content),
+    askJigglerPause: null,
+    ...over,
+  };
+  const t = new TrayController(h.runtime, deps);
+  // The single subscription `index.ts` makes.
+  h.runtime.on("change", (kind) => t.onRuntimeChange(kind));
+  t.refresh("boot");
+  return t;
+}
+
+function instance(): FakeTray {
+  return FakeTray.instances.at(-1)!;
+}
+
+/**
+ * Flush microtasks WITHOUT advancing the clock.
+ *
+ * `vi.runOnlyPendingTimersAsync()` would also fire the armed 15-minute
+ * deadline, closing an interval the test had not asked to close — which is how
+ * a "two rows" assertion quietly becomes three.
+ */
+async function settle(): Promise<void> {
+  for (let i = 0; i < 8; i++) await Promise.resolve();
+}
+
+function labels(t: TrayController): string[] {
+  return t
+    .template()
+    .map((i: MenuItemConstructorOptions) => (typeof i.label === "string" ? i.label : "—"));
+}
+
+beforeEach(() => {
+  resetElectronMock();
+  vi.useFakeTimers();
+  vi.setSystemTime(T0);
+});
+
+afterEach(() => {
+  tray?.destroy();
+  h?.close();
+  vi.useRealTimers();
+});
+
+describe("the title", () => {
+  it("uses monospaced digits, or it jitters every minute", async () => {
+    h = await makeHarness();
+    tray = makeTray();
+    expect(instance().titleOptions).toEqual({ fontType: "monospacedDigit" });
+  });
+
+  it("shows '—h' before any data and never a bare 0", async () => {
+    h = await makeHarness();
+    tray = makeTray();
+    expect(instance().title).toBe("—h");
+  });
+
+  it("advances once a minute from MAIN while an interval is open, and freezes after", async () => {
+    h = await makeHarness();
+    tray = makeTray();
+    expect(tray.hasMinuteTimer).toBe(false);
+    expect(tray.hasRolloverTimer).toBe(true);
+
+    h.source.key(Date.now());
+    expect(tray.hasMinuteTimer).toBe(true);
+    // "Frozen" means the timer does not exist, not that it ticks and no-ops.
+    expect(tray.hasRolloverTimer).toBe(false);
+
+    for (let i = 0; i < 4; i++) {
+      vi.advanceTimersByTime(MIN);
+      h.source.key(Date.now());
+    }
+    expect(instance().title).toBe("0.1h");
+
+    vi.advanceTimersByTime(16 * MIN);
+    expect(tray.hasMinuteTimer).toBe(false);
+    expect(tray.hasRolloverTimer).toBe(true);
+    // The number did NOT shrink when the interval closed: the tray credited the
+    // open interval to its last signal all along, which is what the close rule
+    // then wrote.
+    expect(instance().title).toBe("0.1h");
+  });
+
+  it("ignores the 'signal' change entirely — 300 of them redraw nothing", async () => {
+    h = await makeHarness();
+    tray = makeTray();
+    h.source.key(Date.now());
+    const before = instance().titles.length;
+    for (let i = 0; i < 300; i++) {
+      tray.onRuntimeChange("signal");
+      h.source.mouse(Date.now());
+    }
+    expect(instance().titles.length).toBe(before);
+  });
+
+  it("adds nothing for an open interval the jiggler has made uncountable", async () => {
+    h = await makeHarness();
+    tray = makeTray({ settings: fakeSettings({ countJigglerTime: 0 }) });
+    h.source.key(Date.now());
+    await tray.onJigglerToggled(true);
+    for (let i = 0; i < 10; i++) {
+      vi.advanceTimersByTime(MIN);
+      h.source.key(Date.now());
+    }
+    // Ten minutes of jiggler-covered work and the headline has not moved off
+    // zero: the same `v_countable` filter, applied to the row that does not
+    // exist yet. (`0.0h`, not `—h`: a row DOES exist — the pre-boundary one —
+    // so this is a true zero rather than an absence of data.)
+    expect(instance().title).toBe("0.0h");
+  });
+});
+
+describe("a closed window is not a stopped app", () => {
+  it("closing the dashboard neither stops tracking nor freezes the title", async () => {
+    h = await makeHarness();
+    tray = makeTray();
+
+    const win = addFakeWindow();
+    h.source.key(Date.now());
+    vi.advanceTimersByTime(MIN);
+    h.source.key(Date.now());
+
+    // The user presses ⌘W.
+    win.destroy();
+    onWindowAllClosed();
+
+    // The app is emphatically still running.
+    expect(fakeApp.quitCalls).toBe(0);
+    expect(fakeApp.exitCode).toBeNull();
+    expect(tray.hasMinuteTimer).toBe(true);
+
+    const titlesBefore = instance().titles.length;
+    for (let i = 0; i < 3; i++) {
+      vi.advanceTimersByTime(MIN);
+      h.source.key(Date.now());
+    }
+    // The minute timer lives in MAIN and is owned by no window, so the title
+    // kept advancing with the window gone.
+    expect(instance().titles.length).toBeGreaterThan(titlesBefore);
+    expect(instance().title).toBe("0.1h");
+
+    // …and the interval still lands in the store.
+    vi.advanceTimersByTime(16 * MIN);
+    expect(countIntervals(h.db)).toBe(1);
+    expect(instance().title).toBe("0.1h");
+  });
+});
+
+describe("the jiggler menu item", () => {
+  it("closes the current interval and opens a new one, both homogeneous", async () => {
+    h = await makeHarness();
+    tray = makeTray();
+    h.source.key(Date.now());
+    vi.advanceTimersByTime(5 * MIN);
+    h.source.key(Date.now());
+
+    // Exactly what the menu item's click handler does.
+    const item = tray.template().find((i) => i.label === "Jiggler")!;
+    (item.click as () => void)();
+    await settle();
+
+    vi.advanceTimersByTime(5 * MIN);
+    h.source.key(Date.now());
+    vi.advanceTimersByTime(16 * MIN);
+
+    const stored = h.db
+      .prepare("SELECT duration_s, jiggler_s, started_at_ms, ended_at_ms FROM work_interval ORDER BY started_at_ms")
+      .all() as unknown as Array<{
+      duration_s: number;
+      jiggler_s: number;
+      started_at_ms: number;
+      ended_at_ms: number;
+    }>;
+    expect(stored).toHaveLength(2);
+    expect(stored[0]!.ended_at_ms).toBe(stored[1]!.started_at_ms);
+    for (const row of stored) expect([0, row.duration_s]).toContain(row.jiggler_s);
+    expect(stored[0]!.jiggler_s).toBe(0);
+    expect(stored[1]!.jiggler_s).toBe(stored[1]!.duration_s);
+  });
+
+  it("renders DISABLED with a reason when Accessibility is missing, never merely unchecked", async () => {
+    h = await makeHarness({ start: false });
+    h.source.perms = { listenEvent: true, postEvent: false, axTrusted: false };
+    await h.runtime.start();
+    tray = makeTray();
+
+    const item = tray.template().find((i) => String(i.label).startsWith("Jiggler"))!;
+    expect(item.enabled).toBe(false);
+    expect(item.label).toBe("Jiggler — needs Accessibility");
+    expect(item.checked).toBe(false);
+  });
+
+  it("offers to pause, and remembers 'don't ask again'", async () => {
+    h = await makeHarness();
+    const settings = fakeSettings();
+    let asked = 0;
+    tray = makeTray({
+      settings,
+      askJigglerPause: async () => {
+        asked++;
+        return { response: 1, checkboxChecked: true };
+      },
+    });
+    h.source.key(Date.now());
+
+    await tray.onJigglerToggled(true);
+    expect(asked).toBe(1);
+    expect(h.runtime.toggles().paused).toBe(true);
+    expect(settings.get("jigglerPausePrompt")).toBe("never");
+
+    await tray.onJigglerToggled(false);
+    await tray.onJigglerToggled(true);
+    // Asked once, ever.
+    expect(asked).toBe(1);
+  });
+});
+
+describe("the degraded state is loud", () => {
+  it("puts a ⚠︎ in the title, an alert icon, and a clickable fix at the very top", async () => {
+    h = await makeHarness();
+    tray = makeTray();
+    h.source.key(Date.now());
+    vi.advanceTimersByTime(5 * MIN);
+    h.source.key(Date.now());
+    vi.advanceTimersByTime(16 * MIN);
+    expect(instance().title).toBe("0.1h");
+
+    // Input Monitoring revoked in System Settings while the app runs.
+    h.source.stripKeyboardBits();
+    h.runtime.onWatchdogTick(h.source.probe(), Date.now());
+
+    expect(instance().title).toBe("0.1h ⚠︎");
+    expect(instance().image.path).toMatch(/trayAlertTemplate\.png$/);
+    expect(instance().tooltip).toMatch(/Keyboard is not being tracked/);
+
+    const menu = tray.template();
+    expect(labels(tray)[0]).toBe("⚠︎  Keyboard is not being tracked — fix…");
+    // Enabled and clickable: a warning you cannot act on is decoration.
+    expect(menu[0]!.enabled).not.toBe(false);
+    (menu[0]!.click as () => void)();
+    expect(fakeShell.opened.at(-1)).toContain("Privacy_ListenEvent");
+
+    // The hours it DID record are still on screen. A silent zero is the failure
+    // mode this whole path exists to prevent.
+    expect(instance().title).not.toBe("—h ⚠︎");
+    expect(h.runtime.liveStatus().closedHoursThisWeek).toBe(0.08);
+  });
+});
+
+describe("the menu", () => {
+  it("shows the current interval, today, this week and the machine", async () => {
+    h = await makeHarness({ machineId: "0123456789abcdef" });
+    tray = makeTray();
+    h.source.key(Date.now());
+    vi.advanceTimersByTime(4 * MIN);
+    h.source.key(Date.now());
+
+    const l = labels(tray);
+    expect(l).toContain("Working · 4m");
+    expect(l.some((x) => x.startsWith("last signal 0s ago"))).toBe(true);
+    expect(l.some((x) => x.startsWith("Today"))).toBe(true);
+    expect(l.some((x) => x.startsWith("This week"))).toBe(true);
+    expect(l).toContain("Machine        01234567");
+    expect(l).toContain("Keep awake");
+    expect(l).toContain("Pause tracking");
+    expect(l).toContain("Quit Work Week Buddy");
+  });
+
+  it("surfaces a failed sync rather than swallowing it", async () => {
+    h = await makeHarness();
+    tray = makeTray();
+    const item = tray.template().find((i) => i.label === "Sync now")!;
+    (item.click as () => void)();
+    await settle();
+    expect(fakeDialog.errors.at(-1)?.title).toBe("Sync failed");
+  });
+});
+
+describe("the week-rollover timer", () => {
+  it("re-renders at Monday 00:00 so an idle Monday does not show last week's total", async () => {
+    h = await makeHarness();
+    tray = makeTray();
+    h.source.key(Date.now());
+    vi.advanceTimersByTime(5 * MIN);
+    h.source.key(Date.now());
+    vi.advanceTimersByTime(16 * MIN);
+    expect(instance().title).toBe("0.1h");
+    expect(tray.hasRolloverTimer).toBe(true);
+
+    // Sleep through the boundary with no input at all.
+    vi.advanceTimersByTime(8 * 24 * 60 * MIN);
+
+    // Last week's 0.1h is gone from the menu bar without anyone touching a key.
+    expect(instance().title).toBe("0.0h");
+    // And the next week's timer is armed, not left dangling.
+    expect(tray.hasRolloverTimer).toBe(true);
+  });
+});

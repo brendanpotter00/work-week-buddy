@@ -15,6 +15,16 @@ export default defineConfig({
   preload: {
     plugins: [externalizeDepsPlugin()],
     resolve: { alias: { "@": resolve("src") } },
+    build: {
+      // TRAP (docs/IMPL_UI.md §1.10): a sandboxed preload MUST be CommonJS.
+      // package.json carries "type": "module", so electron-vite would emit
+      // out/preload/index.mjs — and an ESM preload under `sandbox: true` fails
+      // to load with NO renderer error at all. `window.wwb` is simply
+      // `undefined` and every IPC call throws "cannot read invoke". Pinning
+      // both the format and the filename is what keeps `windows.ts`'s
+      // `preloadPath()` pointing at a file that exists AND loads.
+      rollupOptions: { output: { format: "cjs", entryFileNames: "index.js" } },
+    },
   },
   renderer: {
     root: "src/renderer",
