@@ -231,6 +231,22 @@ function selfTest(r: DoctorReport, nowMs: number): Invariant {
 function lastSync(r: DoctorReport, nowMs: number): Invariant {
   const s = r.sync;
   const pending = `${count(s.pendingRows)} pending`;
+
+  // ── THREE STATES, NOT TWO ────────────────────────────────────────────────
+  // An owner who has not created his D1 database and deployed the Worker has
+  // nothing wrong with him. "Never synced" would be a lie by implication —
+  // there is nothing to sync WITH — and a red line would be an outright one.
+  // The rows are safe in the mirror either way, which is what `pending` says.
+  if (!s.configured) {
+    const why = s.lastFlushError === null ? "" : ` (${s.lastFlushError})`;
+    return {
+      id: "sync",
+      label: "Last cloud write",
+      level: "warn",
+      detail: `not configured${why} — ${pending}, held in the local mirror`,
+    };
+  }
+
   const anchor = s.lastCloudWriteMs ?? s.lastFlushOkMs;
   if (anchor === null) {
     return {
@@ -252,6 +268,11 @@ function lastSync(r: DoctorReport, nowMs: number): Invariant {
   }
   if (s.lastFlushError !== null) {
     return { id: "sync", label: "Last cloud write", level: "warn", detail: `${when} — last error: ${s.lastFlushError}` };
+  }
+  if (s.lastPullError !== null) {
+    // A pull can fail while the flush that preceded it succeeded: rows are
+    // leaving this Mac but the other Mac's rows are not arriving.
+    return { id: "sync", label: "Last cloud write", level: "warn", detail: `${when} — last pull failed: ${s.lastPullError}` };
   }
   return { id: "sync", label: "Last cloud write", level: "ok", detail: when };
 }

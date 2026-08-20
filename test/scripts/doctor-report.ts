@@ -55,10 +55,12 @@ export const GREEN: DoctorReport = {
   camera: { deviceCount: 1, inUse: false, listenerRegistered: true, lastReadMs: NOW - MINUTE },
   mic: { inUse: false, meetingAppRunning: false, meetingApp: null, needsPermission: false },
   sync: {
+    configured: true,
     pendingRows: 0,
     lastFlushOkMs: NOW - 40 * MINUTE,
     lastFlushError: null,
     lastPullMs: NOW - 40 * MINUTE,
+    lastPullError: null,
     watermark: NOW - 40 * MINUTE,
     lastCloudWriteMs: NOW - 40 * MINUTE,
     silentForMs: 40 * MINUTE,

@@ -12,6 +12,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { FakeSignalSource } from "../../src/native";
 import { DEFAULT_POLICY, openDb, type Policy } from "../../src/store";
 import { createRuntime, type AppRuntime, type RuntimeChange } from "../../src/main/runtime";
+import type { SyncSeam } from "../../src/main/sync-seam";
 import type { MainSettings } from "../../src/main/settings";
 import { SETTINGS_DEFAULTS } from "../../src/main/settings";
 
@@ -36,6 +37,12 @@ export async function makeHarness(
     jigglerIntervalMs?: number;
     idleTimeoutMs?: number;
     start?: boolean;
+    /**
+     * Omitted behaves exactly like an unconfigured install. A function form is
+     * offered because the interesting seam — the real sync service — needs the
+     * harness's own database, which does not exist until this call.
+     */
+    sync?: SyncSeam | ((db: DatabaseSync) => SyncSeam) | null;
   } = {},
 ): Promise<Harness> {
   const policy: Policy = { ...DEFAULT_POLICY, ...over.policy };
@@ -54,6 +61,9 @@ export async function makeHarness(
     // Deterministic ids: a failing case is reproducible and row order is stable.
     newId: () => `iv-${n++}`,
     jigglerIntervalMs: over.jigglerIntervalMs ?? 30_000,
+    ...(over.sync === undefined
+      ? {}
+      : { sync: typeof over.sync === "function" ? over.sync(db) : over.sync }),
     ...(over.idleTimeoutMs === undefined ? {} : { config: { idleTimeoutMs: over.idleTimeoutMs } }),
   });
   const changes: RuntimeChange[] = [];

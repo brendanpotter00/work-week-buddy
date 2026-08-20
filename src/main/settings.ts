@@ -25,6 +25,15 @@ export interface MainSettings {
   minIntervalS: number;
   countJigglerTime: 0 | 1;
   graceS: number;
+  /**
+   * The sync Worker's base URL. Empty until the owner deploys one, and empty is
+   * the ordinary state — the app measures hours with no cloud at all.
+   *
+   * **The token is deliberately not here.** `settings.json` is plaintext on
+   * disk; the token goes through Electron `safeStorage` into `sync-token.bin`
+   * (see `token.ts`). A URL is not a credential. AGENTS.md, "Secrets".
+   */
+  syncWorkerUrl: string;
 }
 
 export const SETTINGS_DEFAULTS: MainSettings = {
@@ -40,6 +49,7 @@ export const SETTINGS_DEFAULTS: MainSettings = {
   minIntervalS: DEFAULTS.minIntervalMs / 1000,
   countJigglerTime: DEFAULTS.countJigglerTime ? 1 : 0,
   graceS: 0,
+  syncWorkerUrl: "",
 };
 
 export class SettingsStore {

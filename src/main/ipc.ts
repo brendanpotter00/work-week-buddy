@@ -24,6 +24,7 @@ import type {
   InvokeContract,
   PushChannel,
   PushContract,
+  SyncConfigState,
   UiSettings,
 } from "../shared/ipc-types";
 import { log } from "./log";
@@ -128,6 +129,16 @@ export interface IpcDeps {
   readonly relaunch: () => void;
   readonly closeOnboarding: () => void;
   readonly showDashboard: () => Promise<unknown> | unknown;
+  /**
+   * Reads and writes the sync configuration. The URL goes to `settings.json`;
+   * the token goes to `safeStorage` and NEVER comes back out over IPC.
+   * Absent in tests that do not exercise it, and then the two config channels
+   * report an unconfigured install rather than failing.
+   */
+  readonly syncConfig?: {
+    read(): SyncConfigState;
+    write(patch: { workerUrl?: string; token?: string }): Promise<SyncConfigState>;
+  };
   /** Test seam so the 30 s keepalive can be driven by fake timers. */
   readonly setRepeating?: (fn: () => void, ms: number) => NodeJS.Timeout;
 }
@@ -143,6 +154,7 @@ function uiSettingsOf(s: Readonly<MainSettings>): UiSettings {
     minIntervalS: s.minIntervalS,
     countJigglerTime: s.countJigglerTime,
     graceS: s.graceS,
+    syncWorkerUrl: s.syncWorkerUrl,
   };
 }
 
@@ -185,6 +197,21 @@ export function registerIpcHandlers(runtime: AppRuntime, deps: IpcDeps): void {
   handle("wwb:doctor:get", () => runtime.doctor());
   handle("wwb:doctor:selftest", () => runtime.selfTest());
   handle("wwb:sync:flush", () => runtime.flushNow());
+
+  const noSyncConfig = (): SyncConfigState => ({
+    workerUrl: deps.settings.get("syncWorkerUrl"),
+    tokenPresent: false,
+    configured: false,
+    error: null,
+    vaultAvailable: false,
+  });
+  handle("wwb:sync:config", () => deps.syncConfig?.read() ?? noSyncConfig());
+  handle("wwb:sync:setConfig", async (patch) => {
+    // The token arrives, is encrypted, and is forgotten. What goes back is a
+    // boolean saying one exists — never the token, in any shape.
+    if (deps.syncConfig === undefined) return noSyncConfig();
+    return await deps.syncConfig.write(patch);
+  });
 
   handle("wwb:machine:rename", async ({ label }) => {
     await deps.settings.set("machineLabel", label.trim().slice(0, 60));
