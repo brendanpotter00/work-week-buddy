@@ -162,6 +162,47 @@ describe("the handlers", () => {
     await invoke("wwb:machine:rename", { label: `  ${"x".repeat(200)}  ` });
     expect(settings.get("machineLabel")).toHaveLength(60);
   });
+
+  it("refuses a blank rename rather than storing an empty name", async () => {
+    h = await makeHarness();
+    const settings = fakeSettings({ machineLabel: "MacBook Pro" });
+    await register({ settings: settings as unknown as SettingsStore });
+
+    // `""` would render as a blank row in the per-machine breakdown, which
+    // reads as a broken app rather than as a choice somebody made. The renderer
+    // sees a rejected invoke and says so.
+    await expect(invoke("wwb:machine:rename", { label: "   " })).rejects.toThrow(
+      /cannot be empty/,
+    );
+    expect(settings.get("machineLabel")).toBe("MacBook Pro");
+  });
+
+  it("hands the rename to main's naming service when there is one", async () => {
+    h = await makeHarness();
+    const renamed: string[] = [];
+    const settings = fakeSettings({ machineLabel: "MacBook Pro" });
+    await register({
+      settings: settings as unknown as SettingsStore,
+      renameMachine: async (raw: string) => {
+        renamed.push(raw);
+        await settings.set("machineLabel", raw.trim());
+        return raw.trim();
+      },
+    });
+    const win = addFakeWindow();
+
+    const info = (await invoke("wwb:machine:rename", {
+      label: " The loft mini ",
+    })) as { machineLabel: string };
+
+    // One writer, not two: the handler must not also write the setting itself,
+    // or the local `machine` row and `settings.json` could disagree.
+    expect(renamed).toEqual([" The loft mini "]);
+    expect(info.machineLabel).toBe("The loft mini");
+    // The status strip and the tray both show the name and neither re-asks on
+    // its own, so the rename pushes a whole fresh snapshot.
+    expect(win.sent.map((s) => s.channel)).toContain("wwb:push:status");
+  });
 });
 
 describe("push fan-out", () => {

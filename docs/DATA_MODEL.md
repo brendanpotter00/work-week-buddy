@@ -71,6 +71,7 @@ CREATE TABLE IF NOT EXISTS sync_state (k TEXT PRIMARY KEY, v TEXT);
 4. Therefore insert is commutative and idempotent — batch order, interleaving, partial application and replay are all safe.
 5. The only shared row is the heartbeat, made commutative anyway:
    `ON CONFLICT(machine_id) DO UPDATE SET last_seen_ms = MAX(machine.last_seen_ms, excluded.last_seen_ms)`
+   The machine's **label** lives on that row and nowhere else — never on `work_interval`. That is what makes renaming a Mac a one-row write that relabels its entire history at query time, rather than a backfill that can leave old rows disagreeing with new ones. The label follows the same `MAX(last_seen_ms)` rule, so a rename made offline outranks the older cloud row a later pull brings back.
 6. **Clock skew produces no conflicts**, only UI ordering noise. `closed_local_ms` vs `server_ms` makes it diagnosable.
 
 **Overlapping intervals across the two Macs are correct and expected** — typing on the work Mac while a meeting runs on the personal Mac. Summing them double-counts: measured 10% error on a three-interval case from a single 30-minute overlap. The metrics below handle this with an explicit union.
@@ -83,7 +84,8 @@ CREATE TABLE IF NOT EXISTS sync_state (k TEXT PRIMARY KEY, v TEXT);
 |---|---|
 | `POST /intervals` | `{machine_id, rows[]}` → `INSERT … ON CONFLICT(id) DO NOTHING` via `DB.batch()`; returns the ids now **present** |
 | `GET /intervals?since=<seq>&limit=1000` | pull |
-| `POST /heartbeat` | liveness |
+| `POST /heartbeat` | liveness, and the machine's own label |
+| `GET /machines` | the read half of the heartbeat — how one Mac learns the other's name |
 | `GET /fingerprint` | `{count, max_ended_at_ms, sha256(sorted ids)}` |
 
 **No DELETE, no UPDATE, no arbitrary SQL, ever.** One bearer secret per machine, compared with `timingSafeEqual`. The Worker stamps `machine_id` from the token, so a stolen token cannot forge the other machine's rows. Revoking the work Mac is one `wrangler secret put`.

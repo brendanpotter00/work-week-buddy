@@ -17,6 +17,7 @@ import { createSignalSource, type SignalSource } from "../native";
 import { DEFAULT_POLICY, defaultDbPath, openDb, type Policy } from "../store";
 import type { SyncConfigState } from "../shared/ipc-types";
 import { log } from "./log";
+import { createMachineNaming, type MachineNaming } from "./device-name";
 import { createRuntime, type AppRuntime } from "./runtime";
 import { readPlatformUuid } from "./machine-id";
 import type { SettingsStore } from "./settings";
@@ -163,6 +164,8 @@ export interface CoreServices {
   sync: SyncService;
   /** Backs the two `wwb:sync:config:*` channels. */
   syncConfig: SyncConfigGateway;
+  /** Backs `wwb:machine:rename`, and owns this Mac's row in `machine`. */
+  naming: MachineNaming;
 }
 
 export interface SyncConfigGateway {
@@ -260,11 +263,14 @@ export async function createCoreServices(opts: {
   const tokens = createTokenStore(() => opts.userDataDir, opts.vault ?? null);
   const resolved = resolveSyncConfig(opts.settings.get("syncWorkerUrl"), tokens.read());
   let emitChange: (kind: "sync" | "rows-pulled") => void = () => undefined;
+  // A thunk, not a string: a rename mid-session has to reach the next heartbeat.
+  const currentLabel = (): string => opts.settings.get("machineLabel");
   const sync = createSyncService({
     db,
     config: resolved.config,
     configError: resolved.error,
-    machineLabel: opts.settings.get("machineLabel"),
+    machineId,
+    machineLabel: currentLabel,
     appVersion: opts.appVersion,
     ...(opts.osVersion === undefined ? {} : { osVersion: opts.osVersion }),
     tz,
@@ -273,11 +279,27 @@ export async function createCoreServices(opts: {
     onChange: (kind) => emitChange(kind),
   });
 
+  // Before this call an install had NO row in `machine` at all — nothing wrote
+  // one — so `byMachine`'s LEFT JOIN found nothing and every machine on the
+  // dashboard rendered as a raw IOPlatformUUID. `init()` settles the default
+  // name (macOS's own ComputerName) and writes the row.
+  const naming = createMachineNaming({
+    db,
+    machineId,
+    settings: opts.settings,
+    appVersion: opts.appVersion,
+    ...(opts.osVersion === undefined ? {} : { osVersion: opts.osVersion }),
+    pushHeartbeat: async () => {
+      await sync.heartbeatNow();
+    },
+  });
+  await naming.init();
+
   const runtime = createRuntime({
     db,
     source,
     machineId,
-    machineLabel: opts.settings.get("machineLabel"),
+    machineLabel: currentLabel,
     appVersion: opts.appVersion,
     tz,
     policy,
@@ -292,7 +314,7 @@ export async function createCoreServices(opts: {
   const watchdog = createWatchdog({ source, target: runtime });
   const syncConfig = createSyncConfigGateway({ settings: opts.settings, tokens, sync });
 
-  return { runtime, watchdog, source, machineId, policy, sync, syncConfig };
+  return { runtime, watchdog, source, machineId, policy, sync, syncConfig, naming };
 }
 
 export function policyFromSettings(settings: SettingsStore): Policy {

@@ -21,6 +21,7 @@
  * no reachability probe, no `navigator.onLine`, no ping. See `flush.ts`.
  */
 import type { CloudPayload, IntervalRow } from "../store/intervals";
+import type { MachineRecord } from "../store/sync-state";
 import { fromCloudRow, toWireRow } from "./wire";
 
 /**
@@ -70,6 +71,8 @@ export interface WorkerClient {
   getIntervals(since: number, limit?: number): Promise<PullPage>;
   /** POST /heartbeat. Liveness only; it moves no interval. */
   heartbeat(info?: HeartbeatInfo): Promise<void>;
+  /** GET /machines — the read half of the heartbeat. Labels, not intervals. */
+  getMachines(): Promise<MachineRecord[]>;
   /** GET /fingerprint — the reconciliation target. */
   fingerprint(): Promise<CloudFingerprint>;
   /** GET /health — unauthenticated, for bring-up on the work Mac's proxy. */
@@ -162,6 +165,11 @@ export function createWorkerClient(cfg: WorkerClientConfig): WorkerClient {
       await request("POST", "/heartbeat", { body: info });
     },
 
+    async getMachines() {
+      const body = await request("GET", "/machines");
+      return asArray(body, "machines").map(parseMachine);
+    },
+
     async fingerprint() {
       const body = await request("GET", "/fingerprint");
       const o = asObject(body, "fingerprint");
@@ -200,6 +208,34 @@ function parsePost(body: unknown): PostResult {
     present,
     serverMs: typeof serverMs === "number" ? serverMs : Date.now(),
   };
+}
+
+/**
+ * One machine row off the wire.
+ *
+ * Stricter than it looks on `machine_id` and `last_seen_ms`, and deliberately
+ * loose on the rest. The id is the join key — a row without one cannot be
+ * stored at all — and `last_seen_ms` is the whole conflict rule, so a junk
+ * value there would let a stale label win. The descriptive fields are text or
+ * they are absent; anything else reads as absent, which `upsertMachine` treats
+ * as "says nothing" rather than "clear it".
+ */
+function parseMachine(raw: unknown, i: number): MachineRecord {
+  const row = asObject(raw, `machines[${String(i)}]`);
+  const machineId = stringField(row, "machine_id");
+  if (machineId === "") throw new Error(`machines[${String(i)}]: empty machine_id`);
+  return {
+    machineId,
+    label: optionalText(row, "label"),
+    osVersion: optionalText(row, "os_version"),
+    appVersion: optionalText(row, "app_version"),
+    lastSeenMs: numberField(row, "last_seen_ms"),
+  };
+}
+
+function optionalText(o: Record<string, unknown>, key: string): string | null {
+  const v = o[key];
+  return typeof v === "string" && v !== "" ? v : null;
 }
 
 function asObject(v: unknown, what: string): Record<string, unknown> {

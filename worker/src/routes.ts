@@ -1,5 +1,5 @@
 /**
- * The route table. Five entries, and this table is the ONLY place a method is
+ * The route table. Six entries, and this table is the ONLY place a method is
  * registered.
  *
  * ── There is no DELETE and no UPDATE, anywhere. ─────────────────────────────
@@ -245,6 +245,24 @@ const heartbeat: Handler = async ({ req, env, machineId }) => {
   return Response.json({ ok: true });
 };
 
+// ── GET /machines ───────────────────────────────────────────────────────────
+// The read half of the heartbeat, and the only way Mac A learns what Mac B is
+// called. Without it a pulled `work_interval` row renders under a raw
+// IOPlatformUUID forever, because `machine_id` is the only machine identity a
+// row carries — the label is deliberately NOT denormalised onto it, so that
+// renaming stays a one-row update instead of a backfill.
+//
+// A plain read of a table with two rows in it: no `since`, no paging, no
+// watermark. Anything cleverer would be bookkeeping for a set that cannot grow
+// past the number of Macs the owner has.
+const getMachines: Handler = async ({ env }) => {
+  const r = await env.DB.prepare(
+    `SELECT machine_id, label, os_version, app_version, last_seen_ms
+       FROM machine ORDER BY machine_id`,
+  ).all();
+  return Response.json({ machines: r.results });
+};
+
 // ── GET /fingerprint ────────────────────────────────────────────────────────
 const fingerprint: Handler = async ({ env }) => {
   const agg = await env.DB.prepare(
@@ -270,6 +288,7 @@ export const ROUTES = {
   "POST /intervals": { auth: true, handler: postIntervals },
   "GET /intervals": { auth: true, handler: getIntervals },
   "POST /heartbeat": { auth: true, handler: heartbeat },
+  "GET /machines": { auth: true, handler: getMachines },
   "GET /fingerprint": { auth: true, handler: fingerprint },
 } as const satisfies Record<string, Route>;
 

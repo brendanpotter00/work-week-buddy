@@ -154,7 +154,12 @@ export interface RuntimeOptions {
   readonly db: DatabaseSync;
   readonly source: SignalSource;
   readonly machineId: string;
-  readonly machineLabel?: string;
+  /**
+   * READ PER CALL, never captured. A rename must show up in the tray title and
+   * the status strip without a relaunch, and a string held here would freeze
+   * both at whatever the name was when the app booted.
+   */
+  readonly machineLabel?: () => string;
   readonly appVersion: string;
   /** IANA zone. Read once at boot; rows carry the zone they happened in. */
   readonly tz: string;
@@ -685,7 +690,7 @@ class Runtime implements AppRuntime {
       micCapturing: this.micInUse,
       meetingAppRunning: this.o.isMeetingAppRunning?.() ?? false,
       machineId: this.machineId,
-      machineLabel: this.o.machineLabel ?? "",
+      machineLabel: this.o.machineLabel?.() ?? "",
       closedHoursThisWeek: hours.week,
       closedHoursToday: hours.today,
       jigglerOnForOpenInterval: open !== null && this.state.jiggler,
@@ -825,7 +830,7 @@ class Runtime implements AppRuntime {
       },
       machine: {
         machineId: this.machineId,
-        label: this.o.machineLabel ?? "",
+        label: this.o.machineLabel?.() ?? "",
         osVersion: process.platform,
         tz: this.o.tz,
       },
