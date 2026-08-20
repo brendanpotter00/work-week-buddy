@@ -45,12 +45,28 @@ function baseWebPreferences(): Electron.WebPreferences {
  * The hash IS the view (`ROUTE` in `src/shared/constants.ts`). The renderer
  * reads it back in `src/renderer/lib/route.ts`; nothing else distinguishes the
  * two windows, in dev or in the packaged bundle.
+ *
+ * Exported and pure so the SEAM can be tested from BOTH ENDS AT ONCE:
+ * `test/renderer/routing.test.tsx` feeds this exact URL through `routeOf()` and
+ * asserts the right view comes back. A URL form this side emits and the other
+ * side does not match is the bug that shipped, and it is invisible to any test
+ * that exercises only one half.
+ *
+ * `/index.html` is spelled out rather than left to the origin's default
+ * document: `app://wwb#/onboarding` has no path at all, and a hash hung off a
+ * bare origin is the form most likely to be dropped by a redirect.
  */
+export function viewUrl(base: string, hash: string): string {
+  return `${base}/index.html#${hash}`;
+}
+
+/** Where this build serves the renderer from. Dev is a Vite server. */
+export function rendererBase(): string {
+  return process.env["ELECTRON_RENDERER_URL"] ?? APP_ORIGIN;
+}
+
 function load(win: BrowserWindow, hash: string): Promise<void> {
-  const dev = process.env["ELECTRON_RENDERER_URL"];
-  return dev
-    ? win.loadURL(`${dev}/index.html#${hash}`)
-    : win.loadURL(`${APP_ORIGIN}/index.html#${hash}`);
+  return win.loadURL(viewUrl(rendererBase(), hash));
 }
 
 function lockDownNavigation(win: BrowserWindow): void {
