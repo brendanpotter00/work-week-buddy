@@ -8,6 +8,7 @@
  */
 import { BrowserWindow, app, shell } from "electron";
 import { join } from "node:path";
+import { ROUTE, WINDOW_SIZE } from "../shared/constants";
 import { APP_ORIGIN } from "./protocol";
 
 /**
@@ -40,6 +41,11 @@ function baseWebPreferences(): Electron.WebPreferences {
   };
 }
 
+/**
+ * The hash IS the view (`ROUTE` in `src/shared/constants.ts`). The renderer
+ * reads it back in `src/renderer/lib/route.ts`; nothing else distinguishes the
+ * two windows, in dev or in the packaged bundle.
+ */
 function load(win: BrowserWindow, hash: string): Promise<void> {
   const dev = process.env["ELECTRON_RENDERER_URL"];
   return dev
@@ -66,15 +72,10 @@ export async function showDashboard(backgroundColor = "#FFFFFF"): Promise<Browse
   }
 
   dashboard = new BrowserWindow({
-    width: 1100,
-    height: 860,
-    // 880 is not a round number. The 53-week heatmap is ~745 px and does not
-    // shrink: 880 − 64 (page px-8) − 40 (card px-5) = 776 px of inner width,
-    // i.e. 31 px of headroom. Below 880 the heatmap's own overflow-x wrapper
-    // starts scrolling, which is the intended behaviour — the page body never
-    // scrolls horizontally.
-    minWidth: 880,
-    minHeight: 620,
+    // The geometry, and the arithmetic behind 880, live in
+    // `src/shared/constants.ts` — the smoke run asserts against the same
+    // numbers, and a window size that is checked elsewhere needs one home.
+    ...WINDOW_SIZE.dashboard,
     show: false,
     title: "Work Week Buddy",
     titleBarStyle: "hiddenInset",
@@ -92,7 +93,7 @@ export async function showDashboard(backgroundColor = "#FFFFFF"): Promise<Browse
     dashboard = null;
   });
 
-  await load(dashboard, "/");
+  await load(dashboard, ROUTE.dashboard);
   return dashboard;
 }
 
@@ -103,8 +104,7 @@ export async function showOnboarding(backgroundColor = "#FFFFFF"): Promise<Brows
     return onboarding;
   }
   onboarding = new BrowserWindow({
-    width: 560,
-    height: 640,
+    ...WINDOW_SIZE.onboarding,
     resizable: false,
     minimizable: false,
     maximizable: false,
@@ -121,7 +121,7 @@ export async function showOnboarding(backgroundColor = "#FFFFFF"): Promise<Brows
   onboarding.on("closed", () => {
     onboarding = null;
   });
-  await load(onboarding, "/onboarding");
+  await load(onboarding, ROUTE.onboarding);
   return onboarding;
 }
 
