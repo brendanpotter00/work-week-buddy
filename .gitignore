@@ -12,3 +12,4 @@ local.db
 local.db-*
 .wrangler/
 out/
+coverage/

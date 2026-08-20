@@ -10,5 +10,13 @@ export default defineConfig({
     // this is belt-and-braces so a wrong-Node run fails rather than hangs.
     pool: "threads",
     include: ["src/**/*.test.ts", "test/**/*.test.ts", "worker/**/*.test.ts"],
+    coverage: {
+      provider: "v8",
+      include: ["src/core/**", "src/store/**", "src/sync/**", "worker/src/**"],
+      // src/core/ is pure: no I/O, no network, no clock. There is no legitimate
+      // reason for a gap in it, and a gap here is a gap in the only part of the
+      // product that cannot be spot-checked by looking at the screen.
+      thresholds: { "src/core/**": { statements: 100, branches: 95, functions: 100, lines: 100 } },
+    },
   },
 });
