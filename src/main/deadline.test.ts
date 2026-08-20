@@ -181,8 +181,11 @@ describe("the lazy countdown", () => {
     const d = createDeadline(fire);
     d.arm(Date.now() - 1000);
     expect(d.armedFor).toBeLessThan(Date.now() + 1);
-    await new Promise((r) => setTimeout(r, 5));
-    expect(fire).toHaveBeenCalledOnce();
+    // Wait for the callback rather than for a fixed 5ms. The armed delay
+    // clamps to 0, so idle this always won — but under load (a concurrent
+    // npm install, say) a fixed sleep is a coin flip, and a flaky test in a
+    // suite meant to gate merges is worse than a failing one.
+    await vi.waitFor(() => expect(fire).toHaveBeenCalledOnce());
     expect(d.armedFor).toBeNull();
 
     // And that cancel() reaches the real clearTimeout.

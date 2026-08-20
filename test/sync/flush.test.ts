@@ -65,7 +65,13 @@ class TestTimers {
     const pending = [...this.armed.values()];
     this.armed.clear();
     for (const timer of pending) timer.fn();
-    for (let tick = 0; tick < 200; tick++) {
+    // Bound this by WALL CLOCK, not by a tick count. A fixed number of
+    // macrotask ticks is load-sensitive by construction: the flush this
+    // started does database work and a fake round trip, and on a busy machine
+    // that legitimately needs more ticks than an idle one. Reproduced under
+    // CPU load, where a 200-tick budget failed roughly one run in four.
+    const deadline = Date.now() + 10_000;
+    while (Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, 0));
       if (until === undefined || until()) return;
     }
