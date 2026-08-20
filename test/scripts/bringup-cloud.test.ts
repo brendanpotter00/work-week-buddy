@@ -99,7 +99,14 @@ describe("bringup-cloud.sh", () => {
   });
 
   it("creates, applies, deploys and sets — in that order", () => {
-    const r = bringup(["--this", "personal", "--machine-id-work", "WORK-UUID"]);
+    // BOTH machine ids explicitly, so the call sequence is the same everywhere.
+    // Left to `ioreg` this asserts four `secret put`s on macOS and three on the
+    // Linux half of CI, where there is no ioreg and this Mac's slot goes unset.
+    const r = bringup([
+      "--this", "personal",
+      "--machine-id-personal", "PERSONAL-UUID",
+      "--machine-id-work", "WORK-UUID",
+    ]);
     expect(r.code, r.out).toBe(0);
 
     const seq = r.calls.map((c) => c.split(" ").slice(0, 2).join(" "));
