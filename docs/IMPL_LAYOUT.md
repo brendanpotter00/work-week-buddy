@@ -587,23 +587,56 @@ Three things in it are load-bearing and each was learned by the failure:
 - **`-T /usr/bin/codesign`** pre-authorises codesign, so `install.sh` does not
   stop on a keychain prompt halfway through every build.
 
-**Trust is not optional and cannot be scripted.** Straight after import the
-identity is present but untrusted, and every consumer of it fails in a way that
-does not mention trust:
+**Trust is NOT required.** This section used to claim the opposite, and it was
+the most expensive wrong sentence in the repo: it added a GUI step that needs a
+login password, cannot be scripted, has to be repeated on the second Mac, and
+sends the reader hunting through Keychain Access for a certificate that
+`find-identity -v` insists is not there.
+
+Re-measured on macOS 26, against a leaf with **zero trust settings** in the
+user, admin and system domains (`security dump-trust-settings` in each):
 
 ```
-$ security find-identity -v -p codesigning       # valid identities only
-     0 valid identities found
 $ security find-identity -p codesigning          # all matching
-  1) F174…2284 "WWB Local Signing" (CSSMERR_TP_NOT_TRUSTED)
-$ codesign --sign "WWB Local Signing" …
-  WWB Local Signing: no identity found
+  1) 6B69…F037 "WWB Local Signing" (CSSMERR_TP_NOT_TRUSTED)
+$ security find-identity -v -p codesigning       # "valid" = the chain validates
+     …the self-signed leaf is filtered out
+$ codesign --force --sign 6B69…F037 App.app      # by hash
+  App.app: replacing existing signature          → exit 0
+$ codesign --force --sign "WWB Local Signing" …  # by common name
+  → exit 0
+$ codesign -d -r- App.app
+  designated => identifier "com.bpotter.workweekbuddy"
+                and certificate leaf = H"6b69…f037"
+$ codesign --verify -R <that requirement> <a REBUILT App.app>
+  App.app: explicit requirement satisfied        → exit 0
 ```
 
-Setting it to **Always Trust** in Keychain Access is what turns the first
-command's `0` into `1`, and `install.sh`'s precondition check is that first
-command — so the install refuses to start until the human step is done, rather
-than failing three minutes in at `codesign`.
+…and, decisively, `SecCodeCopyGuestWithAttributes(pid)` +
+`SecCodeCheckValidity(code, [], requirement)` — the exact pair `tccd` runs
+against a client process — returns `errSecSuccess` for a **live, rebuilt**,
+untrusted-cert-signed process. Signing by SHA-1 is documented in `man codesign`:
+*"If identity consists of exactly forty hexadecimal digits, it is instead
+interpreted as the SHA-1 hash of the certificate part of the desired identity."*
+
+The reason trust cannot matter is in the requirement itself: `certificate leaf =
+H"…"` is a hash comparison with **no `anchor` clause**, so no chain is ever
+built. Trust governs chain validation — Gatekeeper, `spctl`, and `-v`. Gatekeeper
+is not involved either, because a locally built bundle has no
+`com.apple.quarantine` attribute; `spctl` "rejects" the ad-hoc bundle that runs
+fine today, which is the proof.
+
+The earlier note recorded `codesign --sign "WWB Local Signing"` answering *"no
+identity found"*. **That does not reproduce**, and the likeliest explanation is a
+`.p12` whose private key never made it into the keychain — which is a missing
+key, not a missing trust setting, and the two look identical from the outside.
+`--show` now distinguishes them.
+
+What genuinely depended on trust was **this repo's own precondition check**:
+`install.sh` gated on `find-identity -v`, which hides an identity whose chain
+does not validate. The gate now resolves the identity without `-v` and then
+signs a throwaway Mach-O and reads the requirement back — testing the operation
+we care about instead of a proxy for it.
 
 ### `scripts/install.sh`
 

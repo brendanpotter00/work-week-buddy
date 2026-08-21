@@ -17,7 +17,6 @@ No timers to start. No projects to tag. No categories. It watches the same signa
 > | Step | Why only you can do it |
 > |---|---|
 > | **Run `./spike/run-m0.sh` on the work Mac** | If device management blocks Input Monitoring for self-signed apps, keyboard tracking is impossible on the machine that generates most of the hours. Nothing else should start until this passes. |
-> | **Set the certificate to *Always Trust*** | It needs a GUI password prompt. Until it is done `codesign` says *"no identity found"* and never mentions trust. |
 > | **Grant Input Monitoring and Accessibility** | A permission prompt needs a human. Note the app already catches the case where macOS reports "granted" while the event mask it actually handed over is empty. |
 > | **`npx wrangler login`** | A browser flow against an account that can be billed. Everything after it is `npm run bringup:cloud`. |
 >
@@ -100,17 +99,17 @@ Built locally on each Mac, so Gatekeeper never engages and no notarization is ne
 
 ```bash
 nvm install && nvm use           # .nvmrc → 22.14.0; 22.1.0 is known-bad here
-./scripts/make-signing-cert.sh   # once, ever — then Always Trust it, see below
+./scripts/make-signing-cert.sh   # once, ever — no GUI, no trust step, no password
 ./scripts/install.sh             # npm ci → build → sign → /Applications → self-test → doctor → LaunchAgent
 ```
 
 `install.sh` does the `npm ci` and the build itself, and is safe to re-run — that is the upgrade path too. It always installs to exactly `/Applications/Work Week Buddy.app`, because a permission grant is bound to the app's path as well as its signature. The self-test is a **hard gate**: if the app cannot prove it tells its own synthetic jiggle from human input, the install stops before launch-at-login is wired up, because the alternative is a week that inflates with fake time and looks fine.
 
-**Always Trust is not a formality.** Straight after import the certificate is in the keychain and unusable, and nothing in the failure mentions trust — `codesign` just says *"no identity found"*. Open Keychain Access, find **WWB Local Signing**, and set *When using this certificate* to **Always Trust**. Then `./scripts/make-signing-cert.sh --show` must print `1 valid identities found`; `install.sh` checks exactly that and refuses to start until it does.
+**There is no "Always Trust" step.** There used to be, and it was wrong. Keychain Access will show **WWB Local Signing** as untrusted forever, and that is fine: trust governs *chain validation* — Gatekeeper, `spctl`, `security find-identity -v` — and none of those are in this picture. `codesign` signs with an untrusted leaf without complaint, and the designated requirement it produces pins the certificate by hash without naming an anchor, so no chain is ever built and TCC never consults trust. Verify with `./scripts/make-signing-cert.sh --show`, which signs a throwaway binary and prints the requirement it got back.
 
 **Back up `~/.wwb-signing/wwb.p12`.** On the **second** Mac, put that same file in place and run `make-signing-cert.sh` again — it re-imports rather than minting a second leaf. Two separately generated certificates have different designated requirements, and grants do not transfer between them. The archive's passphrase is `work-week-buddy` and is deliberately not a secret; the script explains why. Losing the file means re-granting Input Monitoring and Accessibility on both machines.
 
-Three things are deliberately not automated: `wrangler login`, setting the certificate to *Always Trust*, and answering the two permission prompts on first launch. Each is a person deciding something.
+Two things are deliberately not automated: `wrangler login`, and answering the two permission prompts on first launch. Each is a person deciding something. Note that a prompt is **one shot per permission** — if you dismiss or deny one, macOS never asks again, and the app will say so and send you to System Settings rather than drawing a button that cannot work.
 
 Afterwards, and any time something looks wrong:
 
