@@ -142,6 +142,22 @@ describe("PermissionTracker.read", () => {
     expect(requests).toBe(1);
   });
 
+  it("stays 'denied' after a spent prompt even when the TCC row reads granted", async () => {
+    // kTCCServicePostEvent can be granted while AXIsProcessTrusted is false, so
+    // the HID reading is not evidence either way here. Having already spent the
+    // prompt is, and it outranks a row that cannot settle the question.
+    const source = sourceWith({
+      postEvent: true,
+      axTrusted: false,
+      postEventAccess: "granted",
+    });
+    const status = await statusOf(source);
+    const t = new PermissionTracker();
+    t.markConsumed("accessibility");
+
+    expect(t.read(source, status).accessibility).toBe("denied");
+  });
+
   it("prefers the capability check over the TCC row for 'granted'", async () => {
     // Accessibility is TWO facts and IOHIDCheckAccess only knows one of them.
     // A kTCCServicePostEvent row can read granted while AXIsProcessTrusted is

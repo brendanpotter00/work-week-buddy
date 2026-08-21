@@ -58,9 +58,13 @@ function hasBits(hex: string, bits: number): boolean {
  * say granted while `AXIsProcessTrusted` is false, and calling that "granted"
  * would re-introduce the silent failure this class exists to catch.
  *
- * `denied` then comes from TCC directly. Only when the HID call has nothing to
- * say ("unknown") do we fall back to this process's own memory of having burnt
- * the prompt.
+ * `denied` then comes from TCC directly — that is the new part, and the part
+ * that survives a relaunch. `promptConsumed` stays underneath it unconditionally
+ * rather than only for "unknown": Accessibility is two facts, so
+ * kTCCServicePostEvent can read "granted" while AXIsProcessTrusted is false and
+ * the app still cannot post. In that shape the HID call is not evidence of
+ * anything, and if we have already spent the prompt the honest answer is still
+ * "denied" — offering to ask again would be the old lie in a new place.
  */
 export function resolveState(
   capable: boolean,
@@ -69,7 +73,7 @@ export function resolveState(
 ): PermissionState {
   if (capable) return "granted";
   if (access === "denied") return "denied";
-  if (access === "unknown" && promptConsumed) return "denied";
+  if (promptConsumed) return "denied";
   return "undetermined";
 }
 
