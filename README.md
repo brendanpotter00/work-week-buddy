@@ -6,7 +6,7 @@ No timers to start. No projects to tag. No categories. It watches the same signa
 
 > **Status: built, not yet running on a real machine.**
 >
-> Every layer is implemented and tested — 1005 tests across 67 files. The app
+> Every layer is implemented and tested — 1016 tests across 67 files. The app
 > builds, launches as a menu-bar app with no Dock icon, creates its database,
 > and its own `--doctor` command reports honestly on what is and is not working.
 >
