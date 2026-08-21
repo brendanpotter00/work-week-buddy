@@ -34,6 +34,9 @@ REPO="$PWD"
 DEFAULT_APP_DEST="/Applications/Work Week Buddy.app"
 
 IDENTITY="WWB Local Signing"
+# Resolved from the keychain in the precondition block; codesign_sign prefers it
+# over the common name so two certificates sharing a CN cannot be confused.
+IDENTITY_HASH=""
 DEFAULT_KEYCHAIN="${HOME}/Library/Keychains/login.keychain-db"
 KEYCHAIN="$DEFAULT_KEYCHAIN"
 APP_DEST="$DEFAULT_APP_DEST"
@@ -111,11 +114,40 @@ run() {
 # keychain the flag is redundant — codesign already searches it — and this is
 # the one command in the flow that cannot be tested (it needs a trusted
 # certificate), so it stays byte-identical to what has always been run.
+# Resolves the leaf's SHA-1. Deliberately NOT `find-identity -v` — see the
+# precondition block below, and scripts/make-signing-cert.sh's header for the
+# measurements. Signing by hash rather than by common name also removes the
+# ambiguity of two certificates sharing a CN, which is exactly what happens
+# after someone re-mints instead of importing the shared wwb.p12.
+identity_hash() {
+  security find-identity -p codesigning "$KEYCHAIN" 2>/dev/null \
+    | awk -v want="$IDENTITY" '
+        index($0, want) == 0 { next }
+        { for (i = 1; i <= NF; i++) if ($i ~ /^[0-9A-Fa-f]{40}$/) { print $i; exit } }
+      '
+}
+
+# The precondition that means something: sign a throwaway Mach-O and confirm the
+# designated requirement that comes back pins this exact certificate. A copy of
+# /usr/bin/true stands in because it is a real Mach-O present on every Mac.
+signing_probe_ok() {
+  hash="$1"
+  probe_dir="$(mktemp -d)"
+  # shellcheck disable=SC2064 -- expand probe_dir NOW; it is about to go away.
+  trap "rm -rf '$probe_dir'" RETURN
+  cp /usr/bin/true "$probe_dir/probe" 2>/dev/null || return 1
+  set -- --force --timestamp=none --sign "$hash"
+  if [ "$KEYCHAIN" != "$DEFAULT_KEYCHAIN" ]; then set -- "$@" --keychain "$KEYCHAIN"; fi
+  codesign "$@" "$probe_dir/probe" >/dev/null 2>&1 || return 1
+  codesign -d -r- "$probe_dir/probe" 2>/dev/null \
+    | grep -qi "certificate leaf = H\"$hash\""
+}
+
 codesign_sign() {
   app="$1"
   set -- --force --deep --timestamp=none
   if [ "$KEYCHAIN" != "$DEFAULT_KEYCHAIN" ]; then set -- "$@" --keychain "$KEYCHAIN"; fi
-  run codesign "$@" --sign "$IDENTITY" "$app"
+  run codesign "$@" --sign "${IDENTITY_HASH:-$IDENTITY}" "$app"
 }
 
 launch_agent() {
@@ -149,22 +181,34 @@ if [ "$DO_SIGN" != "1" ]; then
   info "Grants do not survive a rebuild without a stable designated requirement."
 elif [ "$DRY_RUN" = "1" ]; then
   info "would require the '$IDENTITY' codesigning identity"
-elif security find-identity -v -p codesigning "$KEYCHAIN" 2>/dev/null | grep -q "$IDENTITY"; then
-  ok "signing identity present: $IDENTITY"
 else
-  bad "no VALID '$IDENTITY' codesigning identity in $KEYCHAIN."
-  # "Absent" and "present but untrusted" are different problems with the same
-  # symptom, and the untrusted one is the likely one: `security import` leaves
-  # the leaf in the keychain and `codesign` still says "no identity found".
-  if security find-identity -p codesigning "$KEYCHAIN" 2>/dev/null | grep -q "$IDENTITY"; then
-    info "It IS in the keychain but is not trusted (CSSMERR_TP_NOT_TRUSTED)."
-    info "Open Keychain Access, find '$IDENTITY', and set it to Always Trust."
-  else
+  # NOT `find-identity -v`. -v means "the chain validates", which for a
+  # self-signed leaf it never will unless someone marks it Always Trust in
+  # Keychain Access by hand. That flag is the entire reason this repo used to
+  # demand a GUI trust step: the identity was perfectly able to sign, and the
+  # precondition check said "0 valid identities found" anyway. codesign does not
+  # consult trust — measured, see scripts/make-signing-cert.sh's header — so the
+  # gate is now "resolve the identity, then actually sign something with it".
+  IDENTITY_HASH="$(identity_hash)"
+  if [ -z "$IDENTITY_HASH" ]; then
+    bad "no '$IDENTITY' codesigning identity in $KEYCHAIN."
     info "Run ./scripts/make-signing-cert.sh first (once per Mac, importing the"
     info "SAME wwb.p12 on both — a second, freshly minted certificate has a"
     info "different designated requirement and your grants will not transfer)."
+    exit 1
   fi
-  exit 1
+  if signing_probe_ok "$IDENTITY_HASH"; then
+    ok "signing identity usable: $IDENTITY ($IDENTITY_HASH)"
+    info "Keychain Access will show it untrusted. That is expected and fine:"
+    info "trust governs chain validation, and the designated requirement below"
+    info "pins the leaf by hash without naming an anchor."
+  else
+    bad "'$IDENTITY' is in $KEYCHAIN but codesign cannot sign with it."
+    info "This is NOT a trust problem — trust is not required and never was."
+    info "The usual cause is a certificate imported without its private key."
+    info "Check with: ./scripts/make-signing-cert.sh --show"
+    exit 1
+  fi
 fi
 
 # ── 1. node ─────────────────────────────────────────────────────────────────

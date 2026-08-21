@@ -246,7 +246,14 @@ describe.runIf(isMac)("install.sh, executed end to end into a scratch tree", () 
     ]);
 
     expect(r.code).toBe(1);
-    expect(r.out).toContain("no VALID 'WWB Local Signing' codesigning identity");
+    // Not "no VALID identity". "Valid" was `find-identity -v`, which means "the
+    // certificate chain validates" — something a self-signed leaf never does
+    // unless someone marks it Always Trust in Keychain Access by hand. The
+    // identity was usable the whole time; only this check said otherwise, and
+    // it sent people hunting through Keychain Access for a problem that did not
+    // exist. The gate is now "resolve it, then actually sign with it".
+    expect(r.out).toContain("no 'WWB Local Signing' codesigning identity");
+    expect(r.out).not.toContain("Always Trust");
     expect(r.out).toContain("make-signing-cert.sh");
     expect(existsSync(dest)).toBe(false);
   });

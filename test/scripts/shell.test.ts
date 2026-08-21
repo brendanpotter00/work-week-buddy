@@ -113,7 +113,19 @@ describe("make-signing-cert.sh", () => {
   it("creates nothing in --dry-run", () => {
     const dir = mkdtempSync(join(tmpdir(), "wwb-cert-"));
     const target = join(dir, "signing");
-    const { code, out } = sh([join(SCRIPTS, "make-signing-cert.sh"), "--dir", target, "--dry-run"]);
+    // A keychain path that does not exist stands in for "no certificate yet",
+    // which is the state this dry run is describing. It USED to be safe to omit
+    // this and let the script look at the real login keychain, because the
+    // presence check was `find-identity -v` and -v hides an untrusted
+    // self-signed leaf — so a developer who had actually run this script still
+    // got the "no identity" path here. The check no longer lies, so the test
+    // has to say which keychain it means.
+    const { code, out } = sh([
+      join(SCRIPTS, "make-signing-cert.sh"),
+      "--dir", target,
+      "--keychain", join(dir, "no-such.keychain"),
+      "--dry-run",
+    ]);
     expect(code).toBe(0);
     // -legacy is present or absent depending on which openssl this host has;
     // asserting it unconditionally would fail on a Mac with only LibreSSL.

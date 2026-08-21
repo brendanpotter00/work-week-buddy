@@ -6,9 +6,10 @@
 # to (bundle id + designated requirement + on-disk path). The bundle that comes
 # out of `npm run package` carries only Electron's own ad-hoc, linker-signed
 # signature (`identity: null` in electron-builder.yml means "skip signing", not
-# "sign ad-hoc"), and an ad-hoc signature has no stable identity — so every
-# rebuild looks like a different app and every rebuild re-prompts. One leaf
-# certificate, reused forever, is what makes the grant stick.
+# "sign ad-hoc"), and an ad-hoc signature's designated requirement is literally
+# the cdhash of that one build — so every rebuild looks like a different app and
+# every rebuild re-prompts. One leaf certificate, reused forever, is what makes
+# the grant stick.
 #
 # Run ONCE, on the first Mac. On the second Mac, import the SAME wwb.p12 —
 # a second, locally generated certificate has a different public key and
@@ -17,6 +18,38 @@
 # Safe to run twice: if the identity is already in the keychain it exits 0
 # without touching anything, and if wwb.p12 already exists it re-imports that
 # file rather than minting a new leaf.
+#
+# ── There is NO "Always Trust" step, and there never needed to be. ──────────
+# This script used to end by telling you to open Keychain Access and set the
+# certificate to Always Trust, and install.sh refused to run until you had.
+# That was wrong, and it was the single most confusing thing in the whole
+# bring-up. Measured on macOS 26, with the leaf explicitly UNTRUSTED
+# (`security find-identity -p codesigning` annotating it CSSMERR_TP_NOT_TRUSTED):
+#
+#   codesign --force --sign <sha1> app     →  succeeds
+#   codesign --force --sign "<CN>"  app    →  succeeds
+#   codesign -d -r- app                    →  designated =>
+#                                               identifier "…" and
+#                                               certificate leaf = H"<sha1>"
+#   codesign --verify -R <that req> app'   →  explicit requirement satisfied
+#                                             (on a REBUILT app with a new cdhash)
+#   SecCodeCheckValidity(live pid, req)    →  errSecSuccess
+#
+# That last line is the one that matters: it is the exact call tccd makes
+# against a client process, and it passes. Trust settings govern CHAIN
+# VALIDATION — Gatekeeper, `spctl`, `find-identity -v`. The designated
+# requirement above pins the leaf by hash and names no anchor, so no chain is
+# ever built and trust is never consulted. Gatekeeper is not in the picture
+# either: a locally built bundle carries no com.apple.quarantine attribute, so
+# it is never assessed (`spctl` "rejects" the ad-hoc bundle that runs fine
+# today, which is the proof).
+#
+# What DID depend on trust was this repo's own precondition check:
+# `security find-identity -v` filters out anything whose chain does not
+# validate, so a perfectly usable identity was reported as "0 valid identities
+# found" and install.sh stopped. The check is now "sign something and read the
+# requirement back", which tests the operation we actually care about instead of
+# a proxy for it.
 set -euo pipefail
 
 NAME="WWB Local Signing"
@@ -46,6 +79,7 @@ P12_PASS="work-week-buddy"
 DRY_RUN=0
 SHOW_ONLY=0
 DO_IMPORT=1
+PRINT_HASH=0
 
 usage() {
   cat <<USAGE
@@ -58,7 +92,9 @@ usage: scripts/make-signing-cert.sh [options]
   --p12-pass PASS   PKCS#12 passphrase (default "work-week-buddy"; must be non-empty)
   --no-import       create the key material only; do not touch any keychain
   --dry-run         print what would happen; create and import nothing
-  --show            print the existing identity and its fingerprint, then exit
+  --show            print the existing identity, its fingerprint, and proof that
+                    it can sign; exit non-zero if it cannot
+  --print-hash      print just the SHA-1 of the identity and exit (for scripts)
 USAGE
 }
 
@@ -74,6 +110,7 @@ while [ $# -gt 0 ]; do
     --no-import) DO_IMPORT=0; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     --show) SHOW_ONLY=1; shift ;;
+    --print-hash) PRINT_HASH=1; shift ;;
     -h|--help) usage; exit 0 ;;
     -*) printf 'unknown option: %s\n\n' "$1" >&2; usage >&2; exit 2 ;;
     # Positional dir, kept because docs/IMPL_LAYOUT.md §9 documents `$1`.
@@ -123,34 +160,107 @@ case "$OPENSSL_VERSION" in
   "OpenSSL 3."*|"OpenSSL 4."*) LEGACY="-legacy" ;;
 esac
 
+# ── finding the identity ────────────────────────────────────────────────────
+# NOT `find-identity -v`. The -v flag means "valid", and valid means "the chain
+# validates" — which a self-signed leaf's never will unless someone marks it
+# Always Trust by hand. codesign does not care (see the header), so neither does
+# this. `find-identity` without -v lists every certificate that has a matching
+# PRIVATE KEY in the keychain, which is the actual definition of an identity and
+# the only thing signing needs.
+identity_hash() {
+  security find-identity -p codesigning "$KEYCHAIN" 2>/dev/null \
+    | awk -v want="$NAME" '
+        index($0, want) == 0 { next }
+        { for (i = 1; i <= NF; i++) if ($i ~ /^[0-9A-Fa-f]{40}$/) { print $i; exit } }
+      '
+}
+
 identity_present() {
-  security find-identity -v -p codesigning "$KEYCHAIN" 2>/dev/null | grep -q "$NAME"
+  [ -n "$(identity_hash)" ]
 }
 
 print_identity() {
-  security find-identity -v -p codesigning "$KEYCHAIN" 2>/dev/null | grep "$NAME" || true
+  security find-identity -p codesigning "$KEYCHAIN" 2>/dev/null | grep "$NAME" || true
 }
+
+# ── the proof ───────────────────────────────────────────────────────────────
+# The honest question is never "is this certificate trusted" — it is "can
+# codesign sign with it, and does the signature carry the stable requirement
+# TCC will remember". So ask exactly that: sign a throwaway Mach-O and read the
+# designated requirement back out. A copy of /usr/bin/true is used because it is
+# a real Mach-O that exists on every Mac; codesign happily re-signs a copy.
+#
+# Echoes the requirement on success so both Macs can be compared: it is the
+# string TCC stores, and if the two differ the grants cannot transfer.
+proves_it_can_sign() {
+  hash="$1"
+  probe_dir="$(mktemp -d)"
+  # shellcheck disable=SC2064 -- expand probe_dir NOW; it is about to go away.
+  trap "rm -rf '$probe_dir'" RETURN
+  cp /usr/bin/true "$probe_dir/probe" 2>/dev/null || return 1
+  set -- --force --timestamp=none --sign "$hash"
+  if [ "$KEYCHAIN" != "${HOME}/Library/Keychains/login.keychain-db" ]; then
+    set -- "$@" --keychain "$KEYCHAIN"
+  fi
+  codesign "$@" "$probe_dir/probe" >/dev/null 2>&1 || return 1
+  PROVEN_REQUIREMENT="$(codesign -d -r- "$probe_dir/probe" 2>/dev/null \
+    | sed -n 's/^designated => //p')"
+  case "$PROVEN_REQUIREMENT" in
+    *"certificate leaf = H\"$(printf '%s' "$hash" | tr '[:upper:]' '[:lower:]')\""*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+PROVEN_REQUIREMENT=""
+
+# ── --print-hash: one line, for install.sh ──────────────────────────────────
+if [ "$PRINT_HASH" = "1" ]; then
+  h="$(identity_hash)"
+  [ -n "$h" ] || exit 1
+  printf '%s\n' "$h"
+  exit 0
+fi
 
 printf "\033[1mWork Week Buddy — signing certificate\033[0m\n"
 info "openssl: $OPENSSL ($OPENSSL_VERSION${LEGACY:+, using $LEGACY})"
 info "keychain: $KEYCHAIN"
 
+# ── --show: say ONE true thing ──────────────────────────────────────────────
+# This used to print "no 'WWB Local Signing' identity" and then, on the very
+# next line, "it IS in the keychain but is not trusted" — two contradictory
+# claims, neither of which was the thing the reader needed. There are exactly
+# three states and each gets one answer.
 if [ "$SHOW_ONLY" = "1" ]; then
-  if identity_present; then
-    ok "identity present"
-    print_identity
-    info "Compare this SHA-1 with the other Mac. They MUST match, or the two"
-    info "machines have different designated requirements and grants will not"
-    info "transfer between them."
+  HASH="$(identity_hash)"
+  if [ -z "$HASH" ]; then
+    bad "no '$NAME' identity in $KEYCHAIN."
+    info "Run ./scripts/make-signing-cert.sh to create and import one."
+    info "On the SECOND Mac, put the first Mac's ~/.wwb-signing/wwb.p12 in place"
+    info "first — a freshly minted leaf has a different designated requirement"
+    info "and its grants do not transfer."
+    exit 1
+  fi
+  if proves_it_can_sign "$HASH"; then
+    ok "identity present and able to sign: $NAME"
+    info "SHA-1: $HASH"
+    printf "\n"
+    info "COMPARE THAT SHA-1 WITH THE OTHER MAC. It is the half of the app's"
+    info "designated requirement that identifies the signer, so if the two"
+    info "differ the machines have different identities and grants do not"
+    info "transfer. The other half is the app's bundle id, which never varies."
+    printf "\n"
+    info "Proof it signs (a throwaway binary, hence the 'probe' identifier):"
+    info "  $PROVEN_REQUIREMENT"
+    printf "\n"
+    info "Untrusted in Keychain Access is FINE and expected. Trust governs chain"
+    info "validation (Gatekeeper, 'find-identity -v'); the requirement above"
+    info "pins the leaf by hash and names no anchor, so no chain is ever built."
     exit 0
   fi
-  warn "no '$NAME' identity in $KEYCHAIN"
-  # Present-but-untrusted is a completely different problem from absent, and it
-  # is the likely one. Say which.
-  if security find-identity -p codesigning "$KEYCHAIN" 2>/dev/null | grep -q "$NAME"; then
-    bad "it IS in the keychain but is not trusted (CSSMERR_TP_NOT_TRUSTED)."
-    info "Open Keychain Access, find '$NAME', and set it to Always Trust."
-  fi
+  bad "'$NAME' is in $KEYCHAIN but codesign cannot sign with it."
+  print_identity
+  info "This is NOT a trust problem — trust is not required and never was."
+  info "The usual cause is a certificate imported without its private key."
+  info "Delete it in Keychain Access and re-run ./scripts/make-signing-cert.sh."
   exit 1
 fi
 
@@ -221,32 +331,32 @@ hdr "2. Import into the keychain"
 run security import "$DIR/wwb.p12" -k "$KEYCHAIN" -T /usr/bin/codesign -P "$P12_PASS"
 
 if [ "$DRY_RUN" = "1" ]; then
-  hdr "dry run — nothing was created, imported, or trusted"
+  hdr "dry run — nothing was created or imported"
   exit 0
 fi
 
-hdr "3. Trust it — this is a REQUIRED step, not a tidy-up"
-# Measured, not assumed. Straight after import the identity is in the keychain
-# and unusable, and nothing in the failure says the word "trust":
-#
-#   security find-identity -v -p codesigning   →  0 valid identities found
-#   security find-identity    -p codesigning   →  1) … "WWB Local Signing"
-#                                                     (CSSMERR_TP_NOT_TRUSTED)
-#   codesign --sign "WWB Local Signing" …      →  "no identity found"
-#
-# install.sh's precondition check is that first command, so the install refuses
-# to start until this is done rather than dying three minutes in at codesign.
-if identity_present; then
-  ok "imported AND trusted"
-  print_identity
+hdr "3. Prove it can sign"
+# Not "trust it". Signing a throwaway binary and reading the requirement back is
+# the whole acceptance test, and it is what install.sh gates on too.
+HASH="$(identity_hash)"
+if [ -z "$HASH" ]; then
+  die "import reported success but no '$NAME' identity is in $KEYCHAIN."
+fi
+if proves_it_can_sign "$HASH"; then
+  ok "signed a test binary with $NAME"
+  info "SHA-1: $HASH"
+  info "requirement: $PROVEN_REQUIREMENT"
+  printf "\n"
+  info "That requirement names the certificate and the bundle id, and nothing"
+  info "about the build — so it is identical for every future rebuild, which is"
+  info "exactly why the grants stick. Keychain Access will show this certificate"
+  info "as untrusted; that is expected and changes nothing here."
 else
-  warn "imported, but not yet usable — it is not trusted."
-  info "1. Open Keychain Access (⌘-space, 'Keychain Access')."
-  info "2. Find '$NAME'. Double-click it, open Trust, and set"
-  info "   'When using this certificate' to Always Trust. Close the window;"
-  info "   macOS will ask for your login password."
-  info "3. Re-check with: ./scripts/make-signing-cert.sh --show"
-  info "   It must print '1 valid identities found' before install.sh will run."
+  bad "imported, but codesign cannot sign with it."
+  print_identity
+  info "Not a trust problem. Most likely the private key did not come across."
+  info "Delete the certificate in Keychain Access and run this script again."
+  exit 1
 fi
 
 hdr "4. And copy the archive to the other Mac"
