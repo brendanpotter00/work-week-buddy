@@ -230,25 +230,39 @@ export function Onboarding(): React.ReactElement {
                 </div>
 
                 <p className="mt-1.5 text-xs text-muted-foreground">{pane.why}</p>
-                {/* What you lose by not granting it. Once it IS granted the
-                    sentence is stale — and the space it frees is space this
-                    window does not have to spare in the state that matters. */}
+                {/* ONE sentence here, never two — see the pane-height note below.
+                    Which one depends on whether anything can still be asked:
+
+                    - not asked yet → what you LOSE by not granting it, which is
+                      the argument for pressing the button.
+                    - dead end → what to DO. The argument is moot once the button
+                      is gone, and someone who is not told to tick the box waits
+                      forever for a dialog that is never coming. The consequence
+                      is not lost: the dashboard banner and the tray item both
+                      still say the jiggler is off and tracking is unaffected.
+
+                    Once it IS granted, neither is true and both are dropped —
+                    that space is space this window does not have to spare in the
+                    state that matters. */}
                 {state === "granted" ? null : (
-                  <p className="mt-1 text-xs text-muted-foreground">{pane.without}</p>
+                  <p
+                    data-slot={deadEnd ? "dead-end" : "without"}
+                    className="mt-1 text-xs text-muted-foreground"
+                  >
+                    {deadEnd
+                      ? "macOS will not ask again — tick the box in System Settings."
+                      : pane.without}
+                  </p>
                 )}
 
                 {state === "granted" ? null : (
                   <>
-                    {/* Say it, do not merely imply it by hiding a button. A
-                        denied row shows the checkbox UNTICKED in System
-                        Settings and no prompt ever comes back, so someone who
-                        is not told to tick it waits forever for a dialog. */}
-                    {deadEnd ? (
-                      <p data-slot="dead-end" className="mt-1 text-xs text-muted-foreground">
-                        macOS will not ask again — it only ever asks once. Open System
-                        Settings and tick <strong>{pane.title}</strong> yourself.
-                      </p>
-                    ) : null}
+                    {/* The degraded onboarding screen is the TALLEST there is and
+                        it lives in a 560 x 640 window nobody can resize, with a
+                        16px minimum spare enforced by src/main/smoke.ts. An
+                        earlier draft rendered the sentence above IN ADDITION to
+                        pane.without and overflowed the pane region by 3px. Adding
+                        a line here is not free; measure with `npm run smoke`. */}
                     <div className="mt-2.5 flex flex-wrap items-center gap-2">
                       {/* The system prompt is ONE SHOT per app identity (§4.1).
                           Once it is spent the only route left is the Settings
