@@ -463,6 +463,131 @@ export interface SyncTestResult {
   error: string | null;
 }
 
+// ── in-app cloud setup ──────────────────────────────────────────────────────
+
+/**
+ * Which of the Worker's two token slots a Mac holds.
+ *
+ * Mirrors `MachineSlot` in `src/cloud/slot.ts`, restated here because this file
+ * imports nothing — that is what makes "the renderer never touches the machine"
+ * structural. `test/cloud/slot.test.ts` asserts the two stay in step.
+ */
+export type CloudSlot = "personal" | "work";
+
+export type CloudStepId =
+  | "token"
+  | "account"
+  | "database"
+  | "schema"
+  | "deploy"
+  | "url"
+  | "verify"
+  | "save";
+
+export interface CloudStep {
+  id: CloudStepId;
+  label: string;
+  state: "pending" | "running" | "done" | "failed";
+  /** One short line for the row. Plain words — never a token, never a body. */
+  detail: string | null;
+}
+
+/**
+ * How far setup has got. A COMPLETE snapshot every time, like every other push
+ * in this contract: a wizard that missed one delta would show a step stuck on
+ * "running" for the rest of the session.
+ */
+export interface CloudSetupProgress {
+  steps: CloudStep[];
+  done: boolean;
+  error: string | null;
+}
+
+/** Certain enough to act on, safe enough to assume, or genuinely ambiguous. */
+export type CloudSlotVerdict =
+  | { kind: "certain"; slot: CloudSlot; because: string }
+  | { kind: "assumed"; slot: CloudSlot; because: string }
+  | { kind: "ask"; suggested: CloudSlot | null; because: string };
+
+/**
+ * What is already on the account, read before anything is changed.
+ *
+ * `accountSubdomain: null` is the one thing here the owner has to answer: a
+ * workers.dev subdomain is account-wide and shows up in the address of
+ * everything they deploy, so setup will not invent one.
+ */
+export interface CloudDeployment {
+  accountId: string;
+  databaseExists: boolean;
+  workerExists: boolean;
+  verdict: CloudSlotVerdict;
+  /**
+   * Which slots already hold a token that a re-run must not disturb.
+   *
+   * Both slots rather than "does the other one have one", because when the
+   * verdict is `ask` there is no "other one" yet — and a screen that promised
+   * to mint a token before the slot was chosen would be describing something
+   * that then does not happen.
+   */
+  slotsWithToken: CloudSlot[];
+  accountSubdomain: string | null;
+  rowsInCloud: number | null;
+}
+
+/**
+ * The answer to "what would setup be working with", before it does anything.
+ *
+ * `accounts` is empty when the token is fine but may not enumerate accounts —
+ * Cloudflare documents `GET /accounts` for API keys rather than tokens — and
+ * then the pane asks for the account id instead of reporting a failure.
+ */
+export interface CloudProbeResult {
+  tokenValid: boolean;
+  tokenStatus: string;
+  accounts: Array<{ id: string; name: string }>;
+  deployment: CloudDeployment | null;
+  error: string | null;
+}
+
+export interface CloudSetupResult extends CloudSetupProgress {
+  ok: boolean;
+  workerUrl: string | null;
+  slot: CloudSlot;
+  otherSlot: CloudSlot;
+  /**
+   * The OTHER Mac's token, minted by this run and shown exactly once.
+   *
+   * This is the only secret that ever crosses this boundary outwards, and it
+   * has to: the whole point is that a person copies it to the other laptop. It
+   * is never stored, never logged, and cannot be read back out of Cloudflare.
+   * Null when that Mac already had one and it was left alone.
+   */
+  otherMachineToken: string | null;
+  /** This Mac's token, surfaced ONLY when the keychain refused to store it. */
+  unstoredToken: string | null;
+}
+
+/**
+ * The two halves of a setup run. The API token rides in and is never persisted,
+ * never logged, and never comes back — `CloudProbeResult` and
+ * `CloudSetupResult` have no field one could return on.
+ */
+export interface CloudProbeRequest {
+  apiToken: string;
+  /** Omitted on the first probe; supplied once an account has been chosen. */
+  accountId?: string;
+}
+
+export interface CloudSetupRunRequest {
+  apiToken: string;
+  accountId: string;
+  slot: CloudSlot;
+  /** Replace the other Mac's token too. Off unless explicitly asked for. */
+  rotateOtherToken?: boolean;
+  /** Only used when the account has no workers.dev subdomain at all. */
+  subdomain?: string;
+}
+
 // ── the contract ────────────────────────────────────────────────────────────
 
 export interface InvokeContract {
@@ -500,6 +625,20 @@ export interface InvokeContract {
    * the common case, since the token cannot be read back to retype.
    */
   "wwb:sync:test": { req: { workerUrl?: string; token?: string }; res: SyncTestResult };
+  /**
+   * Look at a Cloudflare account and change NOTHING.
+   *
+   * Runs before the wizard offers to do anything, so the confirmation screen
+   * describes what is really there — an existing `wwb` database, an existing
+   * Worker, the other Mac's token — instead of what setup intends. A probe that
+   * created something would make "Cancel" a lie.
+   */
+  "wwb:cloud:probe": { req: CloudProbeRequest; res: CloudProbeResult };
+  /**
+   * Do it. Resolves with the finished run; progress arrives meanwhile on
+   * `wwb:push:cloud-setup`, so nothing about this waits on the UI or vice versa.
+   */
+  "wwb:cloud:run": { req: CloudSetupRunRequest; res: CloudSetupResult };
   "wwb:machine:rename": { req: { label: string }; res: AppInfo };
   "wwb:settings:get": { req: void; res: UiSettings };
   "wwb:settings:set": { req: Partial<UiSettings>; res: UiSettings };
@@ -526,6 +665,8 @@ export interface InvokeContract {
 
 export interface PushContract {
   "wwb:push:status": LiveStatus;
+  /** Cloud setup progress, a complete snapshot per step. See `CloudSetupProgress`. */
+  "wwb:push:cloud-setup": CloudSetupProgress;
   "wwb:push:toggles": Toggles;
   "wwb:push:permissions": PermissionSnapshot;
   "wwb:push:metrics-stale": { reason: "interval-close" | "rows-pulled" };
@@ -553,6 +694,8 @@ export const INVOKE_CHANNELS = [
   "wwb:sync:config",
   "wwb:sync:setConfig",
   "wwb:sync:test",
+  "wwb:cloud:probe",
+  "wwb:cloud:run",
   "wwb:machine:rename",
   "wwb:settings:get",
   "wwb:settings:set",
@@ -567,6 +710,7 @@ export const PUSH_CHANNELS = [
   "wwb:push:permissions",
   "wwb:push:metrics-stale",
   "wwb:push:doctor",
+  "wwb:push:cloud-setup",
 ] as const satisfies readonly PushChannel[];
 
 export const DEFAULT_METRICS_POLICY: MetricsPolicy = {

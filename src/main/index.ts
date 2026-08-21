@@ -37,6 +37,7 @@ import {
   wireWindowLifecycle,
 } from "./bootstrap";
 import { readCliMode } from "./cli";
+import { createCloudSetupGateway } from "./cloud-setup";
 import { disposeIpc, pushAll, pushToAllWindows, registerIpcHandlers } from "./ipc";
 import { log, logToDirectory } from "./log";
 import { watchMainThread, type StallWatch } from "./stall";
@@ -222,6 +223,20 @@ app.whenReady().then(async () => {
     tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
     openPrivacyPane: (which) => void shell.openExternal(privacyPaneUrl(which)),
     syncConfig: services.syncConfig,
+    // Everything `npm run bringup:cloud` does, over the Cloudflare REST API and
+    // from the Settings window. It reuses `services.syncConfig.write` for the
+    // last step, so finishing setup is the same event as pasting a URL and a
+    // token by hand — including reconfiguring the flusher with no relaunch.
+    cloudSetup: createCloudSetupGateway({
+      machineId: services.machineId,
+      syncConfig: services.syncConfig,
+      onProgress: (progress) =>
+        pushAll("wwb:push:cloud-setup", {
+          steps: progress.steps.map((s) => ({ ...s })),
+          done: progress.done,
+          error: progress.error,
+        }),
+    }),
     renameMachine: async (raw) => (await services.naming.rename(raw)).label,
     relaunch: () => {
       app.relaunch({ args: process.argv.slice(1) });

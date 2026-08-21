@@ -66,6 +66,32 @@ export default ts.config(
     },
   },
 
+  // ── src/cloud/ talks to Cloudflare and to nothing else in this app.
+  //    It is layered like src/sync/: no electron, no keychain, no database, so
+  //    the whole bring-up runs in plain Node against a fake Cloudflare and the
+  //    tests never need a real account. src/main/cloud-setup.ts owns the three
+  //    impure parts — this Mac's UUID, the randomness, and safeStorage.
+  {
+    files: ["src/cloud/**/*.ts"],
+    ignores: ["src/cloud/**/*.test.ts"],
+    rules: {
+      "no-restricted-imports": ["error", {
+        paths: [
+          { name: "electron", message: "src/cloud/ must stay testable in plain Node. Pass what you need in as a parameter." },
+          { name: "koffi", message: "src/cloud/ has no native dependency." },
+        ],
+        patterns: [
+          { group: ["../main/*", "../store/*", "../native/*", "@/main/*", "@/store/*", "@/native/*"],
+            message: "src/cloud/ may not depend on the app's impure layers." },
+        ],
+      }],
+      // A logger in here is a logger that eventually prints a Cloudflare API
+      // token. Failures are thrown as values and the caller decides — see
+      // src/cloud/errors.ts.
+      "no-console": "error",
+    },
+  },
+
   // ── The renderer may not reach the machine.
   {
     files: ["src/renderer/**/*.{ts,tsx}"],

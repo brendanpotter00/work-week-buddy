@@ -20,6 +20,10 @@ import { BrowserWindow, ipcMain, type IpcMainInvokeEvent } from "electron";
 
 import type {
   AppInfo,
+  CloudProbeRequest,
+  CloudProbeResult,
+  CloudSetupResult,
+  CloudSetupRunRequest,
   InvokeChannel,
   InvokeContract,
   PushChannel,
@@ -167,6 +171,16 @@ export interface IpcDeps {
    * write and no cloud to tell.
    */
   readonly renameMachine?: (raw: string) => Promise<string>;
+  /**
+   * In-app cloud setup — everything `scripts/bringup-cloud.sh` does, without a
+   * terminal. Absent in tests and in the smoke run, which do not exercise it,
+   * and then both channels answer with a refusal rather than throwing: a build
+   * that cannot set the cloud up is a build whose wizard should say so.
+   */
+  readonly cloudSetup?: {
+    probe(req: CloudProbeRequest): Promise<CloudProbeResult>;
+    run(req: CloudSetupRunRequest): Promise<CloudSetupResult>;
+  };
   /** Test seam so the 30 s keepalive can be driven by fake timers. */
   readonly setRepeating?: (fn: () => void, ms: number) => NodeJS.Timeout;
 }
@@ -287,6 +301,26 @@ export function registerIpcHandlers(runtime: AppRuntime, deps: IpcDeps): void {
   // jiggler toggle, and from `--selftest` — just not from the renderer.
   handle("wwb:sync:flush", () => runtime.flushNow());
 
+  const noCloudProbe = (): CloudProbeResult => ({
+    tokenValid: false,
+    tokenStatus: "unknown",
+    accounts: [],
+    deployment: null,
+    error: "this build cannot set up cloud sync",
+  });
+
+  const noCloudRun = (req: CloudSetupRunRequest): CloudSetupResult => ({
+    steps: [],
+    done: false,
+    error: "this build cannot set up cloud sync",
+    ok: false,
+    workerUrl: null,
+    slot: req.slot,
+    otherSlot: req.slot === "personal" ? "work" : "personal",
+    otherMachineToken: null,
+    unstoredToken: null,
+  });
+
   const noSyncConfig = (): SyncConfigState => ({
     workerUrl: deps.settings.get("syncWorkerUrl"),
     tokenPresent: false,
@@ -315,6 +349,27 @@ export function registerIpcHandlers(runtime: AppRuntime, deps: IpcDeps): void {
     // Nothing is written here, on purpose: the whole value of the button is
     // that a wrong answer costs nothing and leaves the stored config alone.
     return await deps.syncConfig.test(patch);
+  });
+
+  /**
+   * Set the cloud half up from inside the app.
+   *
+   * TWO CHANNELS, AND THE SPLIT IS THE SAFETY. `probe` reads and changes
+   * nothing, so the screen that asks for confirmation can describe the real
+   * account — an existing `wwb` database, an existing Worker, whether the other
+   * Mac already has a token — before anything is created. `run` is the only one
+   * that writes, and it is idempotent: re-running adopts rather than duplicates.
+   *
+   * The Cloudflare API token arrives on both and goes no further than the
+   * request. It is not stored, not logged, and has no field to come back on.
+   */
+  handle("wwb:cloud:probe", async (req) => {
+    if (deps.cloudSetup === undefined) return noCloudProbe();
+    return await deps.cloudSetup.probe(req);
+  });
+  handle("wwb:cloud:run", async (req) => {
+    if (deps.cloudSetup === undefined) return noCloudRun(req);
+    return await deps.cloudSetup.run(req);
   });
 
   /**

@@ -18,7 +18,7 @@ No timers to start. No projects to tag. No categories. It watches the same signa
 > |---|---|
 > | **Run `./spike/run-m0.sh` on the work Mac** | If device management blocks Input Monitoring for self-signed apps, keyboard tracking is impossible on the machine that generates most of the hours. Nothing else should start until this passes. |
 > | **Grant Input Monitoring and Accessibility** | A permission prompt needs a human. Note the app already catches the case where macOS reports "granted" while the event mask it actually handed over is empty. |
-> | **`npx wrangler login`** | A browser flow against an account that can be billed. Everything after it is `npm run bringup:cloud`. |
+> | **Make a Cloudflare API token** | Choosing which account gets billed is a decision, not a step. Everything after it is **Settings → Cloud sync → *Set up cloud sync…*** — no terminal. `docs/CLOUDFLARE.md` lists the three permissions the token needs. |
 >
 > Once the Worker is deployed, the URL and the token go into **Settings** —
 > reachable from the menu-bar icon, from the gear on the dashboard, or with ⌘,.
@@ -134,19 +134,31 @@ contents. It runs in CI's macOS job. `docs/IMPL_UI.md` §7.3 has the full list.
 
 ## The cloud half
 
-One `npx wrangler login` — a browser flow against your own account, which is why
-no script does it for you. Everything after it is one command:
+**Settings → Cloud sync → *Set up cloud sync…***, and paste one Cloudflare API
+token. That is the whole of it: no terminal, no `wrangler login`, no Node
+toolchain on the Mac being set up. `docs/CLOUDFLARE.md` has the three
+permissions the token needs and how to make one.
+
+It creates or **adopts** the D1 database, applies `worker/schema.sql`, deploys
+the Worker, turns on the workers.dev address, mints the two per-machine tokens,
+sets this Mac's machine id, stores this Mac's token in the Keychain, and shows
+the other Mac's token once. Pasting the token starts nothing — a read-only probe
+runs first and the next screen says what is already on the account. Safe to run
+again: an existing database is adopted rather than recreated, and the other Mac's
+token is left alone unless you ask for it to be replaced. Cloudflare cannot read
+a secret back, so a silent reset would take the other Mac offline with no error
+anywhere.
+
+The API token is used for that one run and discarded — never written to a file,
+never logged. You can delete it in the dashboard as soon as setup finishes.
+
+The shell version still exists, for a Mac where you would rather not create a
+token at all:
 
 ```bash
 npx wrangler login
 npm run bringup:cloud -- --this personal    # or --this work
 ```
-
-It creates the D1 database, applies `worker/schema.sql`, deploys the Worker,
-mints the two per-machine tokens, sets this Mac's machine id, and prints what to
-paste. Safe to run again: an existing database is adopted rather than recreated,
-and a secret that is already set is left alone — Cloudflare cannot read a secret
-back, so a silent reset would take the other Mac offline with no error anywhere.
 
 **Each token's machine id must be that Mac's `IOPlatformUUID`.** The Worker
 stamps `machine_id` from the token and never from the request body, which is what
