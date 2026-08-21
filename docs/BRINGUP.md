@@ -205,6 +205,14 @@ open "/Applications/Work Week Buddy.app"
 **You should see** a menu-bar icon and **no Dock icon**. Onboarding asks for
 **Input Monitoring** and **Accessibility**. Both need a human, once each.
 
+**Once each is the literal truth.** macOS raises each prompt exactly once per
+permission per code identity. Dismiss one, or click Deny, and the row is written
+as denied and **no prompt ever appears again** — the app cannot summon one, and
+the button that appears to offer it would do nothing. The app knows this
+(`IOHIDCheckAccess` reports denied, not merely "not granted"), hides the button,
+and tells you to tick the box yourself. To get the prompt back instead, see
+*Starting the grants over* below.
+
 **If there is no menu-bar icon**, check `~/Library/Logs/WorkWeekBuddy/`.
 
 **Do not run it from `release/`.** A TCC grant binds to bundle id + designated
@@ -227,6 +235,42 @@ full speed, and the rows are safe in the local mirror.
 **If Input Monitoring says granted but the mask is empty**, that is trap #2 in
 `AGENTS.md` and the app catches it deliberately. Toggle the app off and on in
 System Settings → Privacy & Security → Input Monitoring, then relaunch.
+
+If toggling does not fix it, the grant is recorded against a **different build**.
+Check what the app is signed with:
+
+```bash
+codesign -dvvv "/Applications/Work Week Buddy.app" 2>&1 | grep -E 'Authority|Signature'
+```
+
+`Authority=WWB Local Signing` is right. `Signature=adhoc` means the bundle was
+never re-signed, its designated requirement is the cdhash of one build, and the
+stored grant belongs to a build that no longer exists. System Settings will
+still show the checkbox ticked, because that row is keyed on the bundle id — but
+the running app fails the stored requirement and is handed an empty event mask.
+Re-run `./scripts/install.sh`, then start the grants over.
+
+### Starting the grants over
+
+Needed when a permission was denied, or when a grant was recorded against an
+ad-hoc build. **Order matters** — the requirement is written at grant time from
+whatever the app is signed with then, so signing has to come first:
+
+```bash
+./scripts/install.sh                                   # 1. sign with the real leaf
+tccutil reset ListenEvent    com.bpotter.workweekbuddy  # 2. drop the stale rows
+tccutil reset Accessibility  com.bpotter.workweekbuddy
+open "/Applications/Work Week Buddy.app"                # 3. grant once more
+```
+
+`tccutil` needs no password, and it removes the row rather than denying it —
+which is what makes the prompt available again. It resolves the bundle id
+through LaunchServices, so the app has to be installed for it to work. Do this
+**after** step 1, never before: reset first and you re-grant against the old
+identity and are back where you started on the next rebuild.
+
+Done in that order it is the last time: every later `install.sh` produces the
+same designated requirement, so the grant survives.
 
 ---
 
