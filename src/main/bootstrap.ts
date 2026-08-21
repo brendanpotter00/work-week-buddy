@@ -397,7 +397,15 @@ export async function createCoreServices(opts: {
     runtime.notifySync(kind);
   };
 
-  const watchdog = createWatchdog({ source, target: runtime });
+  // The log sink is wired here and not defaulted inside the watchdog so that a
+  // tap that quietly went down and came back leaves a line in `wwb.log`. The
+  // owner's diagnosis for this bug was five database rows and one stall
+  // message; a recovery that happens silently is a recovery nobody can count.
+  const watchdog = createWatchdog({
+    source,
+    target: runtime,
+    log: (message) => log.info(message),
+  });
   const syncConfig = createSyncConfigGateway({ settings: opts.settings, tokens, sync });
 
   /** The keychain read, moved off the boot path. See `CoreServices.unlockSync`. */

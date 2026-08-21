@@ -131,6 +131,17 @@ function accessibility(r: DoctorReport): Invariant {
 function tapAlive(r: DoctorReport, nowMs: number): Invariant {
   const t = r.tap;
   const seen = `${count(t.eventsSinceLaunch)} events since launch`;
+  if (!t.probed) {
+    // `--doctor` runs in its own process and never installs a tap. Reporting
+    // that as "not created" reads as a broken app, and reporting the mask as
+    // 0x0 reads as a denied permission; both sent real debugging the wrong way.
+    return {
+      id: "tap",
+      label: "Event tap",
+      level: "warn",
+      detail: "not probed in this process — run the app itself, or --selftest",
+    };
+  }
   if (!t.created) {
     return { id: "tap", label: "Event tap", level: "fail", detail: "not created" };
   }
@@ -151,6 +162,20 @@ function tapAlive(r: DoctorReport, nowMs: number): Invariant {
     };
   }
   const last = t.lastEventMs === null ? "no events yet" : `last ${ago(nowMs - t.lastEventMs)}`;
+  if (t.revivedCount > 0) {
+    // A revival is a SUCCESS — the tap went down and came back before anything
+    // was lost — but a machine knocking the tap over repeatedly is still worth
+    // seeing, because it is what the callback budget is spent against.
+    return {
+      id: "tap",
+      label: "Event tap",
+      level: "warn",
+      detail:
+        `alive, ${seen}, ${last} — recovered ${count(t.revivedCount)} time(s) ` +
+        `(last: ${t.lastRevivalOutcome ?? "?"}), ` +
+        `worst drain lag ${String(t.worstDrainLagMs)} ms`,
+    };
+  }
   return { id: "tap", label: "Event tap", level: "ok", detail: `alive, ${seen}, ${last}` };
 }
 

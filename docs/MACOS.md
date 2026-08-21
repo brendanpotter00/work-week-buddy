@@ -38,9 +38,29 @@ Add it to **both**: Default so events flow, Common so it survives menu-tracking 
 
 **2. Mask stripping.** A tap created without the keyboard permission returns non-NULL with the keyboard bits silently removed. Verify with `CGGetEventTapList` at boot and assert the keyboard bits survived. Do not trust the create call.
 
-### The self-reporting mode
+### The mode that is NOT self-reporting, whatever this section used to say
 
-A slow callback triggers `kCGEventTapDisabledByTimeout` — measured, a 1.6 s block disabled the tap. It arrives as a callback with type `0xFFFFFFFE`. Handle it **before any field read**, then `CGEventTapEnable(tap, true)`.
+This section used to read: *"A slow callback triggers `kCGEventTapDisabledByTimeout` — measured, a 1.6 s block disabled the tap. It arrives as a callback with type `0xFFFFFFFE`. Handle it before any field read, then `CGEventTapEnable(tap, true)`."*
+
+The first sentence is right. **The second is not reliable, and the app shipped believing it was.** Only the *disable* was ever measured. The notice arriving, and the re-enable working, were prescribed and never observed — `setDebugStallMs` sat in `native.ts` from M1 onwards and nothing ever called it, so M1 gate (d) never ran.
+
+Measured 2026-08-21, arm64, macOS 26.5.1, twice, inside the real Electron main process (`--selftest`, M1 gate d):
+
+```
+a 2500 ms block in the callback disables the tap  →  yes — notices 0, enabled=false
+how the app found out the tap was down           →  NO disable notice
+the tap comes back with no user interaction      →  reenabled: CGEventTapEnable took
+events resume after the recovery                 →  seen
+```
+
+**`notices 0`.** macOS disabled the tap and said nothing, and was still saying nothing 600 ms later. In a standalone harness the notice did eventually arrive — but only when the *next event* was posted, after three full seconds of pumping the run loop produced none. The notice rides along with traffic.
+
+Two consequences, and they are the whole reason the app was measuring nothing:
+
+1. **The disable-notice callback cannot be the recovery mechanism.** The one channel that could tell us we have gone deaf is the channel we have gone deaf on. Something has to ASK, on a clock — `reviveTap()` plus the watchdog's 2-second liveness beat.
+2. **A block does not kill the tap on its own.** It takes a block *with traffic queued behind it*. A lone 5-second block with nothing waiting left the tap enabled; the same block with 60 events queued killed it. That is why the gate posts a burst.
+
+Still true and still load-bearing: on types `0xFFFFFFFE` / `0xFFFFFFFF` the event carries no meaningful fields, so handle the notice **before any field read**. And still issue the `CGEventTapEnable(tap, true)` — it is free and it sometimes works. Just verify it, and never rely on it.
 
 ### Inside Electron it is genuinely push
 
@@ -190,3 +210,12 @@ These are **independent** TCC rows. Having one does not imply the others.
 - The camera property listener actually firing (§4).
 - The denied-permission path and the first-run prompt flow (§6).
 - Sleep and wake behavior end to end. This machine had not slept in 10+ days of retained power logs, so nobody has watched a real lid-close cycle. **This is the most likely source of a post-ship bug.**
+- `kCGEventTapDisabledByUserInput` (`0xFFFFFFFF`) has never been observed at all. The recovery path treats it identically to `ByTimeout` and there is a unit test for that, but no real one has ever been produced on this hardware.
+- **What actually blocked the main thread for 4718 ms** in the owner's `wwb.log` on 2026-08-20. Ruled OUT by measurement: App Nap / Chromium background throttling of the main process (70 s at 25 events/s, dock hidden, no window, nothing focused → worst 1-second-timer gap 8 ms, `setImmediate` never late, zero disable notices), and the camera/mic HAL walk in `probe()` (timed in `--selftest`: 0 ms, 1 ms, 0 ms). The one main-thread block that WAS on the tap path — the inline `drain()` in the callback, which ran a synchronous SQLite write — has been removed. The rest is now instrumented rather than guessed: `worstDrainLagMs` records how long the Node loop was held, and the watchdog names the probe if it takes more than 750 ms.
+
+### 8.1 Ruled out, so nobody spends the afternoon on it again
+
+- **App Nap does not throttle the Electron main process here.** Measured as above. "It only counts when the window is focused" is not the OS backgrounding us.
+- **The `uint32_t` in the `CGEventTapCallBack` prototype is correct.** `0xFFFFFFFE` arrives as `4294967294`, `typeof number`, and `=== 0xfffffffe` is true. A signed prototype would have made the comparison silently false; it is not signed.
+- **`event` is non-NULL on a disable notice** in every observation so far, so the `if (event === null) return 0n` guard at the top of the callback is not eating it.
+- **`--doctor` reporting `grantedMaskHex: 0x0` and `keyboardBitsGranted: false` means nothing.** That process never installs a tap. It now says "not probed in this process" instead, because the old output reads exactly like a denied permission and cost two rounds of debugging.

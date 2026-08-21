@@ -20,6 +20,7 @@ import type {
   SelfTestReport,
   SignalSink,
   SignalSource,
+  TapRevival,
 } from "./types";
 
 export class FakeSignalSource implements SignalSource {
@@ -38,6 +39,16 @@ export class FakeSignalSource implements SignalSource {
   readonly jiggles: number[] = [];
   keepAwake = false;
   restarts = 0;
+  /** True → `CGEventTapEnable(true)` is refused and only a full rebuild works. */
+  reviveRefusesEnable = false;
+  /** True → nothing brings the tap back. This, and only this, is a tap loss. */
+  tapUnrecoverable = false;
+  reviveCalls = 0;
+  disableNotices = 0;
+  disableNoticesByUserInput = 0;
+  lastDisableType = 0;
+  lastDisableAtMs = 0;
+  reEnables = 0;
 
   constructor(private readonly now: () => number = Date.now) {}
 
@@ -72,15 +83,45 @@ export class FakeSignalSource implements SignalSource {
         realEvents: this.realEvents,
         ourEvents: this.jiggles.length,
         foreignNullEvents: 0,
-        disableNotices: 0,
-        lastDisableType: 0,
+        disableNotices: this.disableNotices,
+        disableNoticesByUserInput: this.disableNoticesByUserInput,
+        lastDisableType: this.lastDisableType,
+        lastDisableAtMs: this.lastDisableAtMs,
+        reEnables: this.reEnables,
+        reEnableFailures: 0,
         callbackErrors: 0,
         lastCallbackError: "",
-        inlineDrains: 0,
+        drainsOverdue: 0,
+        worstDrainLagMs: 0,
         numberContractViolations: 0,
         lastRealSignalMs: this.lastRealSignalMs,
       },
     };
+  }
+
+  tapAlive(): boolean {
+    return this.started && this.tapEnabled;
+  }
+
+  /**
+   * Parity with the real thing: the cheap re-enable first, a rebuild if that is
+   * refused, and `dead` when the machine will not give the tap back at all.
+   * `reviveRefusesEnable` and `tapUnrecoverable` are what a test turns to walk
+   * the app down each of those branches without a Mac.
+   */
+  reviveTap(): TapRevival {
+    this.reviveCalls++;
+    if (!this.started) return { outcome: "dead", detail: "source not started" };
+    if (this.tapEnabled) return { outcome: "healthy", detail: "" };
+    if (this.tapUnrecoverable) return { outcome: "dead", detail: "fake: unrecoverable" };
+    this.reEnables++;
+    if (!this.reviveRefusesEnable) {
+      this.tapEnabled = true;
+      return { outcome: "reenabled", detail: "fake: re-enable took" };
+    }
+    this.restarts++;
+    this.tapEnabled = true;
+    return { outcome: "rebuilt", detail: "fake: rebuilt" };
   }
 
   restart(): NativeStatus {
@@ -136,9 +177,19 @@ export class FakeSignalSource implements SignalSource {
     this.sink(s);
   }
 
-  /** macOS killed the tap. Nothing is emitted — that is the whole point. */
-  killTap(): void {
+  /**
+   * macOS killed the tap. Nothing is emitted — that is the whole point.
+   *
+   * `type` mirrors what the real disable notice carries, so a test can tell the
+   * two documented causes apart. Both must recover the same way, and the app
+   * must not need the owner to touch anything for either.
+   */
+  killTap(type: "timeout" | "userInput" = "timeout"): void {
     this.tapEnabled = false;
+    this.disableNotices++;
+    this.lastDisableType = type === "timeout" ? 0xfffffffe : 0xffffffff;
+    this.lastDisableAtMs = this.now();
+    if (type === "userInput") this.disableNoticesByUserInput++;
   }
 
   /** Input Monitoring revoked: the tap lives, the keyboard bits are gone. */

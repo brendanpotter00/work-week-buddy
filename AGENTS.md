@@ -27,6 +27,13 @@ These throw nothing and look fine. Each has a required mitigation.
 | 11 | `CGEventSourceSecondsSinceLastEventType(kCGEventSourceStatePrivate, …)` | **Blocks forever** | Never call it |
 | 12 | Enabling App Sandbox | CMIO device list returns zero devices; camera detection dies silently | Never sandbox |
 | 13 | Reading a field before handling the tap-disabled callback | Garbage read on type `0xFFFFFFFE` | Handle the disable notice first, then re-enable |
+| 14 | **Treating the tap-disabled callback as the recovery mechanism** | Measured: macOS disabled the tap and delivered **no notice at all**. The notice rides along with the next event — and the app has just gone blind to events. Every stored interval comes out 2–6 minutes long and ends `tap_lost` | Something must ASK, on a clock: `tapAlive()` every 2 s, `reviveTap()` when it says no. Issue the callback re-enable too, but **verify** it — `reEnableFailures` |
+| 15 | Doing work in the tap callback "only when the loop is starved" | The starved loop is exactly when a long callback is most likely, so the guard causes the disable it was meant to survive — and re-arms on the next event after every recovery. A tap that dies forever, out of one hiccup | The callback coalesces and returns. **No `drain()`, no SQLite, no IPC, no reducer.** Enforced by a source-text test |
+| 16 | Reporting a mask of `0x0` from a process that never installed a tap | Reads exactly like "Input Monitoring denied". `--doctor` does this on every healthy machine | `TapHealth.probed`; the mask is `"-"`, never `"0x0"` |
+
+## The other rule that outranks almost everything
+
+> **A recovery is not a loss.** If the tap goes down and comes back inside one liveness beat, nothing is closed. The tap goes down *because events were arriving faster than the callback returned* — which means the owner was at the keyboard. Closing his interval over two seconds of blindness is what turned a real working day into a pile of two-minute fragments. Only a tap that cannot be revived is a `tap_lost`, and it is reported once per outage, not once per beat.
 
 ## Structural rules
 
