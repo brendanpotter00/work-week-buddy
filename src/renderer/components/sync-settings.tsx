@@ -36,6 +36,7 @@
 import * as React from "react";
 
 import { AlertBanner } from "@/renderer/components/alert-banner";
+import { CloudSetupWizard } from "@/renderer/components/cloud-setup-wizard";
 import { Field, ReadRow, SettingsCard, inputClass } from "@/renderer/components/settings-ui";
 import { Badge } from "@/renderer/components/ui/badge";
 import { Button } from "@/renderer/components/ui/button";
@@ -324,6 +325,21 @@ export function SyncSettings({
           {savedNote}
         </p>
       )}
+
+      {/* Everything below the fields is for a setup that already exists. This is
+          how one comes into being — and it is placed after them, not before,
+          because the fields are what a returning owner is here for. */}
+      <CloudSetupWizard
+        onFinished={() => {
+          // Setup finishing IS a config change: main has already stored the
+          // token and reconfigured the flusher, so the card has to re-read both
+          // rather than keep showing "not set up" for the rest of the session.
+          setUrlDraft(null);
+          clearTokenField();
+          config.reload();
+          reloadDoctor();
+        }}
+      />
 
       <div className="mt-4 flex flex-wrap items-center gap-2">
         <Button

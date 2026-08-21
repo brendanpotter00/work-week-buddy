@@ -27,6 +27,11 @@ import * as React from "react";
 import {
   DEFAULT_METRICS_POLICY,
   type AppInfo,
+  type CloudProbeRequest,
+  type CloudProbeResult,
+  type CloudSetupProgress,
+  type CloudSetupResult,
+  type CloudSetupRunRequest,
   type DoctorReport,
   type FlushResult,
   type LiveStatus,
@@ -93,6 +98,18 @@ export const ipc = {
   /** Same one-way rule, and it stores nothing. Omitted halves use the stored ones. */
   testSyncConfig: (patch: { workerUrl?: string; token?: string }): Promise<SyncTestResult> =>
     bridge().invoke("wwb:sync:test", patch),
+  /**
+   * Look at a Cloudflare account, change nothing.
+   *
+   * The API token goes IN and has no way back: `CloudProbeResult` has no field
+   * that could carry one. Nothing in the renderer may hold the typed value past
+   * this call except the DOM node it was typed into.
+   */
+  probeCloud: (req: CloudProbeRequest): Promise<CloudProbeResult> =>
+    bridge().invoke("wwb:cloud:probe", req),
+  /** The whole bring-up. Progress arrives on `wwb:push:cloud-setup` meanwhile. */
+  runCloudSetup: (req: CloudSetupRunRequest): Promise<CloudSetupResult> =>
+    bridge().invoke("wwb:cloud:run", req),
   renameMachine: (label: string): Promise<AppInfo> =>
     bridge().invoke("wwb:machine:rename", { label }),
   settings: (): Promise<UiSettings> => bridge().invoke("wwb:settings:get", undefined),
@@ -220,6 +237,23 @@ export function useSyncConfig(): Query<SyncConfigState> {
  */
 export function useDoctor(): Query<DoctorReport> {
   return useSnapshot<DoctorReport>(() => ipc.doctor(), null, []);
+}
+
+/**
+ * Cloud-setup progress, pushed a whole snapshot at a time.
+ *
+ * The setter comes back so the wizard can clear the list when a new run
+ * starts — otherwise the previous run's ticks would still be on screen while
+ * the first step of the next one is still in flight, which reads as progress
+ * that has already happened.
+ */
+export function useCloudSetupProgress(): [
+  CloudSetupProgress | null,
+  (p: CloudSetupProgress | null) => void,
+] {
+  const [progress, setProgress] = React.useState<CloudSetupProgress | null>(null);
+  usePush("wwb:push:cloud-setup", setProgress);
+  return [progress, setProgress];
 }
 
 export interface TogglesQuery extends Query<Toggles> {
