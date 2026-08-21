@@ -354,6 +354,37 @@ describe("the watchdog wired to the runtime", () => {
     wd.stop();
   });
 
+  it("an hour of work is ONE interval even if the machine kills the tap every two minutes", async () => {
+    // The owner's database, as it actually looked: five rows, every one of them
+    // between 117 and 358 seconds long, the two most recent ending `tap_lost`.
+    // Nothing about his day was two minutes long. This is that day, replayed.
+    h = await makeHarness();
+    const wd = createWatchdog({ source: h.source, target: h.runtime });
+    wd.start();
+
+    const started = Date.now();
+    for (let minute = 0; minute < 60; minute++) {
+      // Working: a signal every ten seconds, all hour.
+      for (let i = 0; i < 6; i++) {
+        vi.advanceTimersByTime(10_000);
+        h.source.key(Date.now());
+      }
+      // ...and every other minute macOS knocks the tap over. Nobody notices,
+      // nobody clicks anything, no window is open.
+      if (minute % 2 === 0) h.source.killTap();
+    }
+    const lastSignal = Date.now();
+
+    expect(wd.tapRevivals).toBe(30);
+    // ONE session, still open, still growing.
+    expect(rows(h.db)).toHaveLength(0);
+    const live = h.runtime.liveStatus();
+    expect(live.state).toBe("working");
+    expect(live.openedAtMs).toBe(started + 10_000);
+    expect(live.lastSignalMs).toBe(lastSignal);
+    wd.stop();
+  });
+
   it("a tap that will NOT come back still closes at the last signal, not at the tick", async () => {
     h = await makeHarness();
     const wd = createWatchdog({ source: h.source, target: h.runtime });

@@ -803,6 +803,19 @@ function tapCallback(_proxy: bigint | null, type: number, event: bigint | null):
     //     recorded in `drainsOverdue` / `worstDrainLagMs` instead, which is
     //     the diagnosis the inline drain was really there to provide.
 
+    // 2b ─ M1 gate (d), and NOTHING ELSE. Zero in production, armed only by the
+    //      self-test, which blocks the callback on purpose to prove that macOS
+    //      really does disable the tap here and that the app really does get it
+    //      back unaided. It sits above the `isOurs` branch so the gate can be
+    //      driven by our own posted events and needs no foreign input.
+    if (debugStallMs > 0) {
+      const until = Date.now() + debugStallMs;
+      debugStallMs = 0;
+      while (Date.now() < until) {
+        /* deliberate block → kCGEventTapDisabledByTimeout */
+      }
+    }
+
     // 3 ─ Our own jiggle: never a signal, ever. (Traps #4, #5, #6 all land here.)
     if (isOurs(ev)) {
       counters.ourEvents++;
@@ -843,16 +856,6 @@ function tapCallback(_proxy: bigint | null, type: number, event: bigint | null):
       drainScheduled = true;
       drainScheduledAtMs = Date.now();
       setImmediate(scheduledDrain);
-    }
-
-    if (debugStallMs > 0) {
-      // M1 gate (d): deliberately block long enough for the OS to disable the
-      // tap, so the recovery path is exercised for real.
-      const until = Date.now() + debugStallMs;
-      debugStallMs = 0;
-      while (Date.now() < until) {
-        /* deliberate block → kCGEventTapDisabledByTimeout */
-      }
     }
   } catch (err) {
     counters.callbackErrors++;
@@ -1403,6 +1406,112 @@ interface SeenJiggle {
  * declarations this does not call — they prompt. Their NAMES are still
  * validated: lib.func() threw at import if either symbol were misspelled.
  */
+/** Long enough to be well past any plausible tap timeout. */
+const GATE_STALL_MS = 2_500;
+/**
+ * Events queued behind the blocked callback. Measured: a block on its own does
+ * NOT get the tap disabled — macOS only kills a tap that is holding up traffic.
+ * Sixty of our own null posts is plenty and moves no cursor.
+ */
+const GATE_BURST = 60;
+
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+function timed<T>(fn: () => T): { value: T; ms: number } {
+  const at = Date.now();
+  const value = fn();
+  return { value, ms: Date.now() - at };
+}
+
+/**
+ * Block the tap callback until macOS disables the tap, then prove the app gets
+ * it back on its own.
+ *
+ * The first check is INFORMATIONAL. Whether a given macOS version kills the tap
+ * at this exact block length is not ours to guarantee, and gating an install on
+ * it would fail the install for the wrong reason. The check that matters is the
+ * second one, and it is conditional in exactly the honest way: if the tap did
+ * go down, it must have come back.
+ */
+async function tapRecoveryChecks(): Promise<SelfTestCheck[]> {
+  const out: SelfTestCheck[] = [];
+  if (!isTapEnabled()) {
+    return [{ name: "tap recovery (M1 gate d)", ok: false, detail: "no live tap to test" }];
+  }
+  if (!AXIsProcessTrusted() && !CGPreflightPostEventAccess()) {
+    return [
+      {
+        name: "tap recovery (M1 gate d)",
+        ok: true,
+        detail: "skipped — needs Accessibility to generate the traffic",
+      },
+    ];
+  }
+
+  const noticesBefore = counters.disableNotices;
+  const failuresBefore = counters.reEnableFailures;
+  setDebugStallMs(GATE_STALL_MS);
+  for (let i = 0; i < GATE_BURST; i++) postJiggle();
+  await sleep(GATE_STALL_MS + 600);
+
+  const notices = counters.disableNotices - noticesBefore;
+  const wentDown = notices > 0 || !isTapEnabled();
+  out.push({
+    name: `a ${String(GATE_STALL_MS)} ms block in the callback disables the tap (informational)`,
+    ok: true,
+    detail: wentDown
+      ? `yes — notices ${String(notices)}, enabled=${String(isTapEnabled())}`
+      : "no — this macOS tolerated the block",
+  });
+  // THE NUMBER THIS WHOLE FILE TURNS ON. Measured here on 2026-08-21: the tap
+  // went down and `notices` was ZERO — macOS disabled it and said nothing, and
+  // was still saying nothing 600 ms later. The disable-notice callback is not a
+  // recovery mechanism; it is a courtesy that may never arrive. Everything the
+  // app does to stay alive has to come from asking on a clock instead.
+  out.push({
+    name: "how the app found out the tap was down (informational)",
+    ok: true,
+    detail: wentDown
+      ? notices > 0
+        ? `a disable notice arrived (${String(notices)})`
+        : "NO disable notice — only the liveness beat would have caught this"
+      : "n/a",
+  });
+
+  // The recovery, with no window focused and nobody touching the app. This is
+  // the watchdog's liveness beat, called by hand.
+  const revival = reviveTap(sink);
+  const alive = isTapEnabled();
+  out.push({
+    name: "the tap comes back with no user interaction (M1 gate d)",
+    ok: alive,
+    detail: `${revival.outcome}${revival.detail === "" ? "" : `: ${revival.detail}`}`,
+  });
+
+  // And it is not enough to be "enabled" — events have to actually arrive.
+  let resumed = false;
+  if (alive) {
+    const seenAgain = new Promise<boolean>((resolve) => {
+      selfTestSaw = () => resolve(true);
+    });
+    postJiggle();
+    resumed = await Promise.race([seenAgain, sleep(2000).then(() => false)]);
+    selfTestSaw = null;
+  }
+  out.push({
+    name: "events resume after the recovery",
+    ok: resumed,
+    detail: resumed ? "seen" : "nothing arrived within 2000 ms",
+  });
+
+  out.push({
+    name: "re-enables from the callback all took",
+    ok: counters.reEnableFailures === failuresBefore,
+    detail: String(counters.reEnableFailures - failuresBefore),
+  });
+  return out;
+}
+
 export async function selfTest(): Promise<SelfTestReport> {
   const checks: SelfTestCheck[] = [];
   const add = (name: string, ok: boolean, detail = ""): void => {
@@ -1494,10 +1603,36 @@ export async function selfTest(): Promise<SelfTestReport> {
     `${before.x},${before.y} → ${after.x},${after.y}`,
   );
 
+  // 5b ─ M1 GATE (d). THE ONE THAT WAS NEVER RUN.
+  //
+  // `setDebugStallMs` has been in this file since M1 and nothing has ever
+  // called it. docs/MACOS.md records that a 1.6 s block disables the tap and
+  // prescribes `CGEventTapEnable(tap, true)` — but it never records a re-enable
+  // being observed to work, because nobody ever made one happen. The app then
+  // shipped, the tap started dying every few minutes, and the recovery path
+  // that was supposed to catch it had never executed once.
+  //
+  // So: block the callback on purpose, with a burst of our own events queued
+  // behind it, and then check that the tap comes back WITHOUT anybody clicking
+  // anything. Measured — a lone blocked callback is not enough; macOS only
+  // disables the tap when there is traffic waiting on it.
+  for (const check of await tapRecoveryChecks()) checks.push(check);
+
   // 6 ─ Every remaining declaration, called once, harmlessly.
   add("CGEventTapIsEnabled", isTapEnabled(), "");
-  add("anyCameraInUse callable", typeof anyCameraInUse() === "boolean", "");
-  add("anyMicInUse callable", typeof anyMicInUse() === "boolean", "");
+  // TIMED, not just called. These two walk the CoreMediaIO and CoreAudio device
+  // lists, which are synchronous round trips to `coreaudiod` and the camera
+  // daemon — the most plausible remaining source of a multi-second main-thread
+  // block, and the reason the full probe stays on the five-minute cadence while
+  // the tap check runs every two seconds. A number here is worth more than a
+  // "callable", because the day one of them blocks is the day this line proves
+  // it.
+  const camMs = timed(() => anyCameraInUse());
+  add("anyCameraInUse callable", typeof camMs.value === "boolean", `${String(camMs.ms)} ms`);
+  const micMs = timed(() => anyMicInUse());
+  add("anyMicInUse callable", typeof micMs.value === "boolean", `${String(micMs.ms)} ms`);
+  const maskMs = timed(() => grantedMask());
+  add("grantedMask callable", true, `${String(maskMs.ms)} ms`);
   setKeepAwake(true);
   const held = keepAwakeActive();
   setKeepAwake(false);

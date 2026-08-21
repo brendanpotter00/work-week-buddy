@@ -114,6 +114,12 @@ export interface Watchdog {
   readonly tapDown: boolean;
 }
 
+/**
+ * A probe slower than this is a finding. It is well under the block that was
+ * measured to get the tap disabled, so it fires before the damage, not after.
+ */
+const SLOW_PROBE_MS = 750;
+
 export function createWatchdog(o: WatchdogOptions): Watchdog {
   const now = o.now ?? Date.now;
   const setRepeating = o.setRepeating ?? setInterval;
@@ -133,9 +139,26 @@ export function createWatchdog(o: WatchdogOptions): Watchdog {
 
   function fullProbe(): NativeStatus {
     fullProbes++;
-    lastFullMs = now();
+    const at = now();
+    lastFullMs = at;
     const status = o.source.probe();
-    o.target.onWatchdogTick(status, lastFullMs);
+    // NAME THE STEP THAT BLOCKED.
+    //
+    // The stall watcher can only say "the main thread was blocked for 4718 ms
+    // during 'running'", which is true and useless. `probe()` walks the
+    // CoreMediaIO and CoreAudio device lists — synchronous round trips to
+    // daemons that can stop answering — and it is the largest single piece of
+    // main-thread work the app does on a schedule. If it is what is holding the
+    // thread, this line says so, with a number, at the moment it happens.
+    const took = now() - at;
+    if (took >= SLOW_PROBE_MS) {
+      log(
+        `watchdog: the probe held the main thread for ${String(took)}ms — ` +
+          `that is the camera/mic HAL walk, and long enough for macOS to ` +
+          `disable the event tap`,
+      );
+    }
+    o.target.onWatchdogTick(status, at);
     return status;
   }
 

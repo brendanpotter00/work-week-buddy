@@ -263,6 +263,8 @@ class Runtime implements AppRuntime {
   private tapLostCount = 0;
   private tapRestarts = 0;
   private tapRevivals = 0;
+  /** Set by the liveness beat, not by the five-minute probe. See `degraded()`. */
+  private tapDown = false;
   private lastTapRevivalMs: number | null = null;
   private lastTapRevivalOutcome: string | null = null;
   private lastWatchdogTickMs: number | null = null;
@@ -676,6 +678,7 @@ class Runtime implements AppRuntime {
 
   onTapLost(atMs: number): void {
     this.tapRestarts++;
+    this.tapDown = true;
     // We may have silently missed input. Closing at the last signal we actually
     // trust is the honest thing; the alternative is inventing time.
     this.dispatch({ kind: "tapLost", atMs });
@@ -683,7 +686,7 @@ class Runtime implements AppRuntime {
   }
 
   onTapRevived(atMs: number, revival: TapRevival): void {
-    void atMs;
+    this.tapDown = false;
     this.tapRevivals++;
     this.lastTapRevivalMs = atMs;
     this.lastTapRevivalOutcome = revival.outcome;
@@ -811,7 +814,11 @@ class Runtime implements AppRuntime {
     const p = this.permSnapshot;
     if (!p.keyboardBitsGranted) out.push("keyboard_permission_missing");
     if (p.relaunchRequired) out.push("relaunch_required");
-    if (this.status !== null && !this.status.tapEnabled) out.push("tap_lost");
+    // `tapDown` and not `status.tapEnabled`: the status only refreshes on the
+    // FIVE-MINUTE probe, so a tap that died would have shown a green banner for
+    // up to five minutes after the interval was already filed as `tap_lost`.
+    // The liveness beat knows within two seconds and says so here.
+    if (this.tapDown || (this.status !== null && !this.status.tapEnabled)) out.push("tap_lost");
     if (!this.dbWritable) out.push("db_unwritable");
     if (p.accessibility !== "granted" && (this.state.jiggler || p.promptConsumed.accessibility)) {
       out.push("accessibility_missing");
