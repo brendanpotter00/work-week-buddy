@@ -98,6 +98,25 @@ function describePermission(state: PermissionState): string {
   }
 }
 
+/**
+ * What to DO about a permission that is not granted.
+ *
+ * "denied" is not "undetermined with feeling" — it is a TCC row with
+ * `auth_value = 0`, and macOS raises its prompt exactly once per (service, code
+ * identity). Once denied, no prompt is ever coming, the app cannot summon one,
+ * and the checkbox in System Settings is the only route. A doctor that prints
+ * "DENIED" without saying that leaves the reader waiting for a dialog.
+ */
+function remedy(state: PermissionState, pane: string): string {
+  if (state !== "denied") return "";
+  return (
+    ` — macOS will NOT prompt again. Tick it in System Settings ›` +
+    ` Privacy & Security › ${pane}, or run` +
+    ` \`tccutil reset ${pane === "Input Monitoring" ? "ListenEvent" : "Accessibility"}` +
+    ` com.bpotter.workweekbuddy\` to make the prompt available again.`
+  );
+}
+
 function inputMonitoring(r: DoctorReport): Invariant {
   const state = r.permissions.inputMonitoring;
   const level: Level = state === "granted" ? "ok" : state === "unknown" ? "warn" : "fail";
@@ -109,7 +128,7 @@ function inputMonitoring(r: DoctorReport): Invariant {
     id: "input-monitoring",
     label: "Input Monitoring",
     level,
-    detail: `${describePermission(state)}${why}`,
+    detail: `${describePermission(state)}${why}${remedy(state, "Input Monitoring")}`,
   };
 }
 
@@ -124,7 +143,8 @@ function accessibility(r: DoctorReport): Invariant {
     detail:
       state === "granted"
         ? "granted (jiggler can post)"
-        : `${describePermission(state)} — jiggler disabled; tracking unaffected`,
+        : `${describePermission(state)} — jiggler disabled; tracking unaffected` +
+          remedy(state, "Accessibility"),
   };
 }
 

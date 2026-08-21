@@ -353,7 +353,13 @@ describe("degraded state — a missing permission is never a silent zero", () =>
 
   it("missing Accessibility disables the jiggler with a reason rather than lying about it", async () => {
     h = await makeHarness({ start: false });
-    h.source.perms = { listenEvent: true, postEvent: false, axTrusted: false };
+    h.source.perms = {
+      listenEvent: true,
+      postEvent: false,
+      axTrusted: false,
+      listenEventAccess: "granted",
+      postEventAccess: "unknown",
+    };
     await h.runtime.start();
 
     const t = h.runtime.toggles();

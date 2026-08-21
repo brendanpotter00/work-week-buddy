@@ -204,7 +204,13 @@ export function Onboarding(): React.ReactElement {
         <div className="flex flex-col gap-2.5 pb-3">
           {PANES.map((pane) => {
             const state = snapshot ? pane.state(snapshot) : "unknown";
-            const promptSpent = snapshot?.promptConsumed[pane.id] ?? false;
+            // A dead end is any state macOS will not raise a prompt for again.
+            // `promptConsumed` only remembers THIS process asking; a denied TCC
+            // row outlives every relaunch, and reading it is the difference
+            // between "we will ask you" and the truth. Both routes end at the
+            // Settings pane, so both must hide the button that does nothing.
+            const deadEnd =
+              (snapshot?.promptConsumed[pane.id] ?? false) || snapshot?.[pane.id] === "denied";
             return (
               <section
                 key={pane.id}
@@ -232,24 +238,36 @@ export function Onboarding(): React.ReactElement {
                 )}
 
                 {state === "granted" ? null : (
-                  <div className="mt-2.5 flex flex-wrap items-center gap-2">
-                    {/* The system prompt is ONE SHOT per app identity (§4.1).
-                        Once it is spent the only route left is the Settings
-                        pane, so stop offering a button that does nothing. */}
-                    {promptSpent ? null : (
-                      <Button size="sm" onClick={() => run(ipc.requestPermission(pane.id))}>
-                        Grant access
+                  <>
+                    {/* Say it, do not merely imply it by hiding a button. A
+                        denied row shows the checkbox UNTICKED in System
+                        Settings and no prompt ever comes back, so someone who
+                        is not told to tick it waits forever for a dialog. */}
+                    {deadEnd ? (
+                      <p data-slot="dead-end" className="mt-1 text-xs text-muted-foreground">
+                        macOS will not ask again — it only ever asks once. Open System
+                        Settings and tick <strong>{pane.title}</strong> yourself.
+                      </p>
+                    ) : null}
+                    <div className="mt-2.5 flex flex-wrap items-center gap-2">
+                      {/* The system prompt is ONE SHOT per app identity (§4.1).
+                          Once it is spent the only route left is the Settings
+                          pane, so stop offering a button that does nothing. */}
+                      {deadEnd ? null : (
+                        <Button size="sm" onClick={() => run(ipc.requestPermission(pane.id))}>
+                          Grant access
+                        </Button>
+                      )}
+                      <Button
+                        size="sm"
+                        variant={deadEnd ? "default" : "outline"}
+                        onClick={() => run(ipc.openPrivacyPane(pane.id))}
+                      >
+                        <ExternalLink className="size-3.5" />
+                        Open System Settings
                       </Button>
-                    )}
-                    <Button
-                      size="sm"
-                      variant={promptSpent ? "default" : "outline"}
-                      onClick={() => run(ipc.openPrivacyPane(pane.id))}
-                    >
-                      <ExternalLink className="size-3.5" />
-                      Open System Settings
-                    </Button>
-                  </div>
+                    </div>
+                  </>
                 )}
 
                 {pane.id === "accessibility" ? (

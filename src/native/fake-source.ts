@@ -34,7 +34,13 @@ export class FakeSignalSource implements SignalSource {
   micOn = false;
   tapEnabled = true;
   keyboardBits = true;
-  perms: Permissions = { listenEvent: true, postEvent: true, axTrusted: true };
+  perms: Permissions = {
+    listenEvent: true,
+    postEvent: true,
+    axTrusted: true,
+    listenEventAccess: "granted",
+    postEventAccess: "granted",
+  };
   /** Every jiggle that was posted, as epoch ms. Assert on length, not on side effects. */
   readonly jiggles: number[] = [];
   keepAwake = false;

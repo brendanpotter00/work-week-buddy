@@ -27,6 +27,7 @@
 import koffi, { type LibraryHandle } from "koffi";
 import { WWB_MAGIC } from "../shared/constants";
 import type {
+  AccessState,
   Permissions,
   RawSignal,
   SelfTestCheck,
@@ -516,6 +517,27 @@ const IOPMAssertionRelease = fn<(id: number) => number>(
   IOKIT,
   "int32_t IOPMAssertionRelease(uint32_t AssertionID)",
 );
+
+// IOHIDAccessType IOHIDCheckAccess(IOHIDRequestType)
+//
+// The ONLY public API on this surface that distinguishes "denied" from "never
+// asked". CGPreflightListenEventAccess / CGPreflightPostEventAccess return a
+// bare bool and collapse the two, which is why a stale DENY used to look
+// identical to a fresh install — and why the app offered a "Grant" button that
+// could not possibly work, because macOS never prompts twice.
+//
+// From <IOKit/hidsystem/IOHIDLib.h>:
+//   typedef enum { kIOHIDRequestTypePostEvent, kIOHIDRequestTypeListenEvent }
+//   typedef enum { kIOHIDAccessTypeGranted, kIOHIDAccessTypeDenied, kIOHIDAccessTypeUnknown }
+// Both enums are plain C enums, so: PostEvent=0, ListenEvent=1; Granted=0,
+// Denied=1, Unknown=2. Denied IS `auth_value = 0` in TCC.db.
+const IOHIDCheckAccess = fn<(requestType: number) => number>(
+  IOKIT,
+  "uint32_t IOHIDCheckAccess(uint32_t requestType)",
+);
+
+const kIOHIDRequestTypePostEvent = 0;
+const kIOHIDRequestTypeListenEvent = 1;
 
 // ═══ libSystem ═══════════════════════════════════════════════════════════════
 
@@ -1288,12 +1310,31 @@ export function keepAwakeActive(): boolean {
 // 11. Permissions
 // ─────────────────────────────────────────────────────────────────────────────
 
+/**
+ * Maps `IOHIDAccessType` onto something with names. Anything unexpected becomes
+ * "unknown", which is the state that still offers a prompt — erring towards
+ * asking is safe, whereas a wrong "denied" would send the user to System
+ * Settings for no reason.
+ */
+function accessState(raw: number): AccessState {
+  switch (raw) {
+    case 0:
+      return "granted";
+    case 1:
+      return "denied";
+    default:
+      return "unknown";
+  }
+}
+
 /** Preflight only. Never prompts. Safe to call from the watchdog. */
 export function permissions(): Permissions {
   return {
     listenEvent: CGPreflightListenEventAccess(),
     postEvent: CGPreflightPostEventAccess(),
     axTrusted: AXIsProcessTrusted(),
+    listenEventAccess: accessState(IOHIDCheckAccess(kIOHIDRequestTypeListenEvent)),
+    postEventAccess: accessState(IOHIDCheckAccess(kIOHIDRequestTypePostEvent)),
   };
 }
 

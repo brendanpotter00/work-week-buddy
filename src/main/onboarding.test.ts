@@ -22,7 +22,14 @@ const T0 = 1_700_000_000_000;
 
 function sourceWith(perms: Partial<Permissions> = {}): FakeSignalSource {
   const s = new FakeSignalSource();
-  s.perms = { listenEvent: true, postEvent: true, axTrusted: true, ...perms };
+  s.perms = {
+    listenEvent: true,
+    postEvent: true,
+    axTrusted: true,
+    listenEventAccess: "granted",
+    postEventAccess: "granted",
+    ...perms,
+  };
   return s;
 }
 
@@ -59,7 +66,14 @@ describe("PermissionTracker.read", () => {
   });
 
   it("is 'undetermined' before a prompt and 'denied' after one was consumed", async () => {
-    const source = sourceWith({ postEvent: false, axTrusted: false });
+    // "unknown" is the honest reading for a service with no TCC row yet:
+    // IOHIDCheckAccess reports neither granted nor denied, so this process's
+    // own memory of having burnt the prompt is all there is to go on.
+    const source = sourceWith({
+      postEvent: false,
+      axTrusted: false,
+      postEventAccess: "unknown",
+    });
     const status = await statusOf(source);
     const t = new PermissionTracker();
 
@@ -70,6 +84,78 @@ describe("PermissionTracker.read", () => {
     const after = t.read(source, status);
     expect(after.accessibility).toBe("denied");
     expect(after.promptConsumed.accessibility).toBe(true);
+  });
+
+  it("reads 'denied' straight from TCC, without this process having asked", async () => {
+    // The bug this exists for. `promptConsumed` lives in memory, so every
+    // relaunch used to forget the denial and report "never prompted" — which
+    // drew a Grant button for a prompt macOS will never show again. A denied
+    // row outlives the process, and IOHIDCheckAccess reports it directly.
+    const source = sourceWith({
+      postEvent: false,
+      axTrusted: false,
+      postEventAccess: "denied",
+    });
+    const status = await statusOf(source);
+    const t = new PermissionTracker();
+
+    const snap = t.read(source, status);
+    expect(snap.accessibility).toBe("denied");
+    // Nothing in THIS process asked, and the state is still denied.
+    expect(snap.promptConsumed.accessibility).toBe(false);
+  });
+
+  it("does not spend a prompt on a denied row, and says a prompt is not coming", async () => {
+    // TCC answers CGRequestPostEventAccess from the stored row without drawing
+    // anything, so requesting would look like a no-op and leave the user
+    // waiting for a dialog. Report that no prompt is possible instead.
+    const source = sourceWith({
+      postEvent: false,
+      axTrusted: false,
+      postEventAccess: "denied",
+    });
+    let requests = 0;
+    source.requestPermissions = () => {
+      requests++;
+      return source.perms;
+    };
+    const t = new PermissionTracker();
+
+    expect(t.request(source, "accessibility")).toBe(false);
+    expect(requests).toBe(0);
+  });
+
+  it("still raises a real prompt when the row is merely absent", async () => {
+    const source = sourceWith({
+      postEvent: false,
+      axTrusted: false,
+      postEventAccess: "unknown",
+    });
+    let requests = 0;
+    source.requestPermissions = () => {
+      requests++;
+      return source.perms;
+    };
+    const t = new PermissionTracker();
+
+    expect(t.request(source, "accessibility")).toBe(true);
+    expect(requests).toBe(1);
+  });
+
+  it("prefers the capability check over the TCC row for 'granted'", async () => {
+    // Accessibility is TWO facts and IOHIDCheckAccess only knows one of them.
+    // A kTCCServicePostEvent row can read granted while AXIsProcessTrusted is
+    // false; calling that "granted" would re-introduce the silent failure the
+    // whole permission story exists to catch.
+    const source = sourceWith({
+      postEvent: true,
+      axTrusted: false,
+      postEventAccess: "granted",
+    });
+    const status = await statusOf(source);
+    const t = new PermissionTracker();
+
+    expect(t.read(source, status).accessibility).not.toBe("granted");
   });
 
   it("has no mask to believe before the tap exists, and says so", () => {

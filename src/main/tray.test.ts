@@ -240,7 +240,13 @@ describe("the jiggler menu item", () => {
 
   it("renders DISABLED with a reason when Accessibility is missing, never merely unchecked", async () => {
     h = await makeHarness({ start: false });
-    h.source.perms = { listenEvent: true, postEvent: false, axTrusted: false };
+    h.source.perms = {
+      listenEvent: true,
+      postEvent: false,
+      axTrusted: false,
+      listenEventAccess: "granted",
+      postEventAccess: "unknown",
+    };
     await h.runtime.start();
     tray = makeTray();
 
