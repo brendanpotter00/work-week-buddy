@@ -13,7 +13,7 @@
  * a plain Node process with no grant and no window: the caller supplies the
  * `SignalSource` and does the opening.
  */
-import type { NativeStatus, SignalSource } from "../native";
+import type { AccessState, NativeStatus, SignalSource } from "../native";
 import type {
   PermissionKey,
   PermissionSnapshot,
@@ -50,6 +50,43 @@ function hasBits(hex: string, bits: number): boolean {
 }
 
 /**
+ * One permission's state, preferring what TCC actually stores.
+ *
+ * The order is deliberate. `granted` is decided by the capability check, not by
+ * `IOHIDCheckAccess`, because Accessibility needs BOTH kTCCServicePostEvent and
+ * AXIsProcessTrusted and the HID call only knows about the first — a row can
+ * say granted while `AXIsProcessTrusted` is false, and calling that "granted"
+ * would re-introduce the silent failure this class exists to catch.
+ *
+ * `denied` then comes from TCC directly — that is the new part, and the part
+ * that survives a relaunch. `promptConsumed` stays underneath it unconditionally
+ * rather than only for "unknown": Accessibility is two facts, so
+ * kTCCServicePostEvent can read "granted" while AXIsProcessTrusted is false and
+ * the app still cannot post. In that shape the HID call is not evidence of
+ * anything, and if we have already spent the prompt the honest answer is still
+ * "denied" — offering to ask again would be the old lie in a new place.
+ */
+/**
+ * What `PermissionTracker.request` actually did.
+ *
+ * `"already-granted"` and `"no-prompt-possible"` both mean "no dialog appeared",
+ * and that is exactly why they must not share a value: the first wants the
+ * caller to do nothing, the second wants it to send the user to System Settings.
+ */
+export type RequestOutcome = "prompted" | "already-granted" | "no-prompt-possible";
+
+export function resolveState(
+  capable: boolean,
+  access: AccessState,
+  promptConsumed: boolean,
+): PermissionState {
+  if (capable) return "granted";
+  if (access === "denied") return "denied";
+  if (promptConsumed) return "denied";
+  return "undetermined";
+}
+
+/**
  * Reads the two TCC states and, crucially, the GRANTED MASK.
  *
  * `docs/MACOS.md` §6: which TCC bucket governs the keyboard bits is genuinely
@@ -72,18 +109,27 @@ export class PermissionTracker {
     // source's own reading of the same fact and agrees with it by construction.
     const keyboardBitsGranted = status === null ? false : status.keyboardBitsGranted;
 
-    const inputMonitoring: PermissionState = p.listenEvent
-      ? "granted"
-      : this.consumed.inputMonitoring
-        ? "denied"
-        : "undetermined";
+    // "denied" is read off TCC, not inferred from what this process happens to
+    // remember asking. `consumed` lives in memory only, so before this the app
+    // forgot every denial the moment it relaunched and went back to reporting
+    // "never prompted" — which drew a Grant button that could not work, because
+    // macOS prompts once per (service, code identity) and never again.
+    // `IOHIDCheckAccess` reports the stored row directly, so a denial survives
+    // a relaunch exactly as it does in TCC.db. `consumed` stays as the fallback
+    // for the case IOHIDCheckAccess cannot speak to ("unknown").
+    const inputMonitoring: PermissionState = resolveState(
+      p.listenEvent,
+      p.listenEventAccess,
+      this.consumed.inputMonitoring,
+    );
 
-    const accessibility: PermissionState =
-      p.postEvent && p.axTrusted
-        ? "granted"
-        : this.consumed.accessibility
-          ? "denied"
-          : "undetermined";
+    // Accessibility is two facts — posting events (kTCCServicePostEvent) and
+    // AXIsProcessTrusted — and only the first has a three-state reading.
+    const accessibility: PermissionState = resolveState(
+      p.postEvent && p.axTrusted,
+      p.postEventAccess,
+      this.consumed.accessibility,
+    );
 
     return {
       checkedAtMs: Date.now(),
@@ -104,16 +150,30 @@ export class PermissionTracker {
   /**
    * Preflight, THEN request. Never prompts twice — the OS would ignore it
    * anyway, and a consumed prompt is the reason "Open System Settings…" exists.
+   *
+   * Three outcomes, not two. A boolean here would fuse "nothing to do, it is
+   * already granted" with "nothing CAN be done, send them to System Settings",
+   * and those want opposite things from the caller.
    */
-  request(source: SignalSource, which: PermissionKey): void {
+  request(source: SignalSource, which: PermissionKey): RequestOutcome {
     const before = source.permissions();
     if (which === "inputMonitoring") {
-      if (before.listenEvent) return;
+      if (before.listenEvent) return "already-granted";
     } else if (before.postEvent && before.axTrusted) {
-      return;
+      return "already-granted";
+    }
+    // A denied row is a dead end: TCC answers `CGRequest…Access` from the
+    // stored row without drawing anything, so calling it would look like a
+    // no-op and leave the user staring at a screen waiting for a dialog.
+    const access =
+      which === "inputMonitoring" ? before.listenEventAccess : before.postEventAccess;
+    if (access === "denied") {
+      this.consumed[which] = true;
+      return "no-prompt-possible";
     }
     source.requestPermissions({ prompt: true });
     this.consumed[which] = true;
+    return "prompted";
   }
 
   /** Test seam: replay a prior session's one-shot state. */

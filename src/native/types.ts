@@ -107,6 +107,19 @@ export interface TapRevival {
   readonly detail: string;
 }
 
+/**
+ * The three states a TCC row can actually be in — `IOHIDCheckAccess`, not a
+ * preflight bool.
+ *
+ * `"denied"` is the one that matters and the one no boolean API can express:
+ * it is `auth_value = 0` in TCC.db, and it is a DEAD END. macOS shows a
+ * permission prompt exactly once per (service, code identity); once a row says
+ * denied, every later `CGRequest…Access` call returns false without drawing
+ * anything. The only ways out are the checkbox in System Settings or
+ * `tccutil reset`, so a UI that keeps offering to "grant" is lying.
+ */
+export type AccessState = "granted" | "denied" | "unknown";
+
 export interface Permissions {
   /** kTCCServiceListenEvent — Input Monitoring. The keyboard bits in the tap. */
   readonly listenEvent: boolean;
@@ -114,6 +127,10 @@ export interface Permissions {
   readonly postEvent: boolean;
   /** AXIsProcessTrusted — the other half of the Accessibility story. */
   readonly axTrusted: boolean;
+  /** `IOHIDCheckAccess(kIOHIDRequestTypeListenEvent)` — distinguishes denied from never-asked. */
+  readonly listenEventAccess: AccessState;
+  /** `IOHIDCheckAccess(kIOHIDRequestTypePostEvent)` — distinguishes denied from never-asked. */
+  readonly postEventAccess: AccessState;
 }
 
 export interface SelfTestCheck {

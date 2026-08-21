@@ -76,7 +76,13 @@ describe("FakeSignalSource — the jiggler must never look like a human", () => 
     const src = new FakeSignalSource(() => 1_000);
     const { sink, signals } = collect();
     await src.start(sink);
-    src.perms = { listenEvent: true, postEvent: false, axTrusted: false };
+    src.perms = {
+      listenEvent: true,
+      postEvent: false,
+      axTrusted: false,
+      listenEventAccess: "granted",
+      postEventAccess: "unknown",
+    };
 
     // CGEventPost fails SILENTLY without the grant: no error, no exception,
     // cursor delta 0. The caller gets a boolean it has to act on instead.

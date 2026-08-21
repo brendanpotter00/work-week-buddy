@@ -113,7 +113,19 @@ describe("make-signing-cert.sh", () => {
   it("creates nothing in --dry-run", () => {
     const dir = mkdtempSync(join(tmpdir(), "wwb-cert-"));
     const target = join(dir, "signing");
-    const { code, out } = sh([join(SCRIPTS, "make-signing-cert.sh"), "--dir", target, "--dry-run"]);
+    // A keychain path that does not exist stands in for "no certificate yet",
+    // which is the state this dry run is describing. It USED to be safe to omit
+    // this and let the script look at the real login keychain, because the
+    // presence check was `find-identity -v` and -v hides an untrusted
+    // self-signed leaf — so a developer who had actually run this script still
+    // got the "no identity" path here. The check no longer lies, so the test
+    // has to say which keychain it means.
+    const { code, out } = sh([
+      join(SCRIPTS, "make-signing-cert.sh"),
+      "--dir", target,
+      "--keychain", join(dir, "no-such.keychain"),
+      "--dry-run",
+    ]);
     expect(code).toBe(0);
     // -legacy is present or absent depending on which openssl this host has;
     // asserting it unconditionally would fail on a Mac with only LibreSSL.
@@ -123,8 +135,68 @@ describe("make-signing-cert.sh", () => {
   });
 });
 
+describe("neither script gates on `find-identity -v`", () => {
+  // THE regression test for the whole "Always Trust" saga. `-v` means "the
+  // certificate chain validates", which a self-signed leaf's never does unless
+  // a human opens Keychain Access and marks it Always Trust. codesign does not
+  // care — it signs with an untrusted leaf, and the requirement it produces
+  // (`certificate leaf = H"…"`, no anchor clause) is never chain-validated
+  // either, by codesign or by TCC. So gating on -v added a GUI step, a login
+  // password, and a second-Mac repeat, all to satisfy a check that was asking
+  // the wrong question. If `security find-identity -v` comes back, so does all
+  // of that.
+  it.each(["install.sh", "make-signing-cert.sh"])("%s", (name) => {
+    const src = readFileSync(join(SCRIPTS, name), "utf8");
+    // Comments stripped: both scripts explain -v at length, and the explanation
+    // is the point. What must not come back is the CALL.
+    const code = src
+      .split("\n")
+      .filter((line) => !/^\s*#/.test(line))
+      .join("\n");
+    expect(code).not.toMatch(/security find-identity -v/);
+    // …and the honest check is still there: resolve, then actually sign.
+    expect(code).toMatch(/security find-identity -p codesigning/);
+    expect(code).toContain("codesign");
+  });
+
+  it("resolves the hash identically in both, and refuses to guess between duplicates", () => {
+    // The two scripts carry their own copies on purpose: install.sh must not be
+    // taken down by a broken or missing make-signing-cert.sh. Copies drift, and
+    // this one must not, because the bug it guards is silent — two certificates
+    // CAN share the common name (someone re-mints on the second Mac instead of
+    // importing wwb.p12), and picking whichever `security` lists first signs
+    // with a coin flip and drops every grant on one of the machines.
+    const awks = ["install.sh", "make-signing-cert.sh"].map((name) => {
+      const src = readFileSync(join(SCRIPTS, name), "utf8");
+      return /awk -v want="\$[A-Z_]+" '([\s\S]*?)'\n/.exec(src)?.[1]?.replace(/\s+/g, " ").trim();
+    });
+    expect(awks[0], "install.sh has no identity awk").toBeTruthy();
+    expect(awks[1]).toBe(awks[0]);
+
+    // `break`, never `exit`: exit stops at the first match and hides the second.
+    for (const a of awks) {
+      expect(a).toContain("break");
+      expect(a).not.toContain("exit");
+    }
+    // And each script must actually count them rather than trusting the first.
+    for (const name of ["install.sh", "make-signing-cert.sh"]) {
+      expect(readFileSync(join(SCRIPTS, name), "utf8")).toContain("identity_count()");
+    }
+  });
+});
+
 describe("install.sh", () => {
   const src = readFileSync(join(SCRIPTS, "install.sh"), "utf8");
+
+  it("signs by SHA-1, not by common name", () => {
+    // Two certificates can share a CN — which is exactly what happens when
+    // someone re-mints instead of importing the shared wwb.p12 — and the wrong
+    // one produces a different designated requirement and silently drops every
+    // grant. The hash is unambiguous. `man codesign`: "If identity consists of
+    // exactly forty hexadecimal digits, it is instead interpreted as the SHA-1
+    // hash of the certificate part of the desired identity."
+    expect(src).toMatch(/--sign "\$\{IDENTITY_HASH:-\$IDENTITY\}"/);
+  });
 
   it("installs to exactly /Applications/Work Week Buddy.app", () => {
     // The TCC grant binds to the on-disk path. Any other destination is an

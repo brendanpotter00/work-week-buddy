@@ -11,7 +11,7 @@ Read [`AGENTS.md`](../AGENTS.md) first if you are going to change anything.
 | Part | Where | Roughly |
 |---|---|---|
 | A. Go/no-go | the **work** Mac | 5 min |
-| B. Certificate | the **personal** Mac, once ever | 10 min |
+| B. Certificate | the **personal** Mac, once ever | 2 min |
 | C. Install | each Mac | 10 min each |
 | D. Cloud | either Mac, once | 10 min |
 | E. Second Mac | the **work** Mac | 15 min |
@@ -51,8 +51,11 @@ this Mac. Do Parts B, C and E and skip Part D.
 
 This is what makes your permission grants survive a rebuild. Skip it and every
 `./scripts/install.sh` re-prompts for Input Monitoring and Accessibility,
-because an ad-hoc signature has no stable identity and macOS sees a different
-app each time.
+because an ad-hoc signature's designated requirement is literally the cdhash of
+that one build — so macOS genuinely sees a different app each time.
+
+The whole part is two commands and **no GUI**. If you remember it as involving
+Keychain Access and a password prompt, that was the old version; see step 5.
 
 ### 2. Node
 
@@ -73,7 +76,7 @@ npm run lint && npm run typecheck && npm test
 npm run smoke
 ```
 
-**You should see** three clean runs and 830-odd passing tests, then `smoke: OK`
+**You should see** three clean runs and 1000-odd passing tests, then `smoke: OK`
 after two windows flash open and closed. The smoke run is the only thing here
 that opens a real window and measures it; the unit tests mount into a jsdom that
 has no window, no size and no URL.
@@ -88,7 +91,12 @@ with `package.json` — regenerate with `npm install` and commit it.
 ```
 
 **You should see** `created ~/.wwb-signing/wwb.p12`, then `1 identity imported.`,
-then a section headed **3. Trust it — this is a REQUIRED step**.
+then a section headed **3. Prove it can sign** that ends with `signed a test
+binary with WWB Local Signing` and prints the SHA-1 and the designated
+requirement.
+
+There is **no trust step and no password prompt.** Keychain Access will list
+this certificate as untrusted forever, and that is correct — see step 5.
 
 **If it says `MAC verification failed during PKCS12 import (wrong password?)`**,
 you are on an old copy of the script. The `.p12` used to be exported with an
@@ -98,32 +106,49 @@ empty password and macOS rejects those outright. Pull.
 LibreSSL and does not take that flag. The current script branches on
 `openssl version`.
 
-### 5. Trust it — the step that cannot be scripted
-
-Open **Keychain Access**, find **WWB Local Signing**, double-click it, open
-**Trust**, and set *When using this certificate* to **Always Trust**. Close the
-window; macOS asks for your login password.
-
-Then:
+### 5. Check it — and do NOT trust it
 
 ```bash
 ./scripts/make-signing-cert.sh --show
 ```
 
-**You should see** `1 valid identities found` and a SHA-1 fingerprint.
+**You should see** `identity present and able to sign`, a SHA-1, and the
+designated requirement it signed with. Write the SHA-1 down; step 15 compares
+against it.
 
-**If you see `0 valid identities found`**, the trust setting did not take. This
-is the single most confusing failure in the whole procedure, because nothing
-mentions trust:
+**Keychain Access shows this certificate as untrusted. Leave it that way.**
+Earlier versions of this document told you to set it to *Always Trust*, said the
+step was required, and made `install.sh` refuse to run without it. That was
+wrong, and it was the most confusing thing in the whole bring-up — the
+certificate is hard to even find in Keychain Access, and the failure message
+never says the word "trust".
 
-```
-security find-identity -v -p codesigning   →  0 valid identities found
-security find-identity    -p codesigning   →  "WWB Local Signing" (CSSMERR_TP_NOT_TRUSTED)
-codesign --sign "WWB Local Signing" …      →  "no identity found"
-```
+Trust governs **chain validation**: Gatekeeper, `spctl`, and the `-v` flag of
+`security find-identity`. None of them are involved here.
 
-`install.sh` checks the first of those, so it refuses to start rather than dying
-three minutes in at `codesign`.
+* `codesign` signs happily with an untrusted leaf — measured, both by SHA-1 and
+  by common name.
+* The requirement it produces is
+  `identifier "com.bpotter.workweekbuddy" and certificate leaf = H"<sha1>"`.
+  It pins the certificate by hash and names **no anchor**, so no chain is ever
+  built and trust is never consulted.
+* `SecCodeCheckValidity` against that requirement — the exact call `tccd` makes
+  on a client process — returns `errSecSuccess` for a live, rebuilt, untrusted-
+  cert-signed process.
+* Gatekeeper never engages either: a locally built bundle carries no
+  `com.apple.quarantine` attribute. `spctl` "rejects" the ad-hoc bundle that has
+  been running fine all along, which is the proof that `spctl` is not the thing
+  deciding anything here.
+
+What actually depended on trust was this repo's own precondition check.
+`security find-identity -v` hides any identity whose chain does not validate, so
+a perfectly usable certificate was reported as `0 valid identities found`. The
+check no longer uses `-v`; it resolves the identity and then signs a throwaway
+binary with it.
+
+**If you see `is in the keychain but codesign cannot sign with it`**, that is a
+missing private key, not a trust problem. Delete the certificate in Keychain
+Access and re-run step 4.
 
 ### 6. Back up `wwb.p12` **now**
 
@@ -180,6 +205,14 @@ open "/Applications/Work Week Buddy.app"
 **You should see** a menu-bar icon and **no Dock icon**. Onboarding asks for
 **Input Monitoring** and **Accessibility**. Both need a human, once each.
 
+**Once each is the literal truth.** macOS raises each prompt exactly once per
+permission per code identity. Dismiss one, or click Deny, and the row is written
+as denied and **no prompt ever appears again** — the app cannot summon one, and
+the button that appears to offer it would do nothing. The app knows this
+(`IOHIDCheckAccess` reports denied, not merely "not granted"), hides the button,
+and tells you to tick the box yourself. To get the prompt back instead, see
+*Starting the grants over* below.
+
 **If there is no menu-bar icon**, check `~/Library/Logs/WorkWeekBuddy/`.
 
 **Do not run it from `release/`.** A TCC grant binds to bundle id + designated
@@ -202,6 +235,51 @@ full speed, and the rows are safe in the local mirror.
 **If Input Monitoring says granted but the mask is empty**, that is trap #2 in
 `AGENTS.md` and the app catches it deliberately. Toggle the app off and on in
 System Settings → Privacy & Security → Input Monitoring, then relaunch.
+
+If toggling does not fix it, the grant is recorded against a **different build**.
+Check what the app is signed with:
+
+```bash
+codesign -dvvv "/Applications/Work Week Buddy.app" 2>&1 | grep -E 'Authority|Signature'
+```
+
+`Authority=WWB Local Signing` is right. `Signature=adhoc` means the bundle was
+never re-signed, its designated requirement is the cdhash of one build, and the
+stored grant belongs to a build that no longer exists. System Settings will
+still show the checkbox ticked, because that row is keyed on the bundle id — but
+the running app fails the stored requirement and is handed an empty event mask.
+Re-run `./scripts/install.sh`, then start the grants over.
+
+### Starting the grants over
+
+Needed when a permission was denied, or when a grant was recorded against an
+ad-hoc build. **Order matters** — the requirement is written at grant time from
+whatever the app is signed with then, so signing has to come first:
+
+```bash
+./scripts/install.sh                                    # 1. sign with the real leaf
+tccutil reset ListenEvent    com.bpotter.workweekbuddy  # 2. drop the stale rows
+tccutil reset Accessibility  com.bpotter.workweekbuddy
+tccutil reset PostEvent      com.bpotter.workweekbuddy
+open "/Applications/Work Week Buddy.app"                # 3. grant once more
+```
+
+**Three resets, not two.** `tccutil reset X` is a literal string prefix — it
+resets `kTCCServiceX` and validates nothing, so a typo is accepted and silently
+matches no rows. This app's *Accessibility* is two services:
+`kTCCServiceAccessibility` (`AXIsProcessTrusted`) and `kTCCServicePostEvent`
+(`CGEventPost`, the jiggler). Reset only the first and a denied `PostEvent` row
+survives, along with the dead end. `tccutil reset All com.bpotter.workweekbuddy`
+does all three if you would rather not remember which.
+
+`tccutil` needs no password, and it removes the row rather than denying it —
+which is what makes the prompt available again. It resolves the bundle id
+through LaunchServices, so the app has to be installed for it to work. Do this
+**after** step 1, never before: reset first and you re-grant against the old
+identity and are back where you started on the next rebuild.
+
+Done in that order it is the last time: every later `install.sh` produces the
+same designated requirement, so the grant survives.
 
 ---
 
@@ -308,9 +386,7 @@ what it just made.** It did not find the file, and a second certificate is the
 most expensive mistake available here: the two Macs get different designated
 requirements and their grants never transfer.
 
-### 15. Trust it
-
-Same as step 5, on this Mac. Then:
+### 15. Check it
 
 ```bash
 ./scripts/make-signing-cert.sh --show
@@ -318,6 +394,9 @@ Same as step 5, on this Mac. Then:
 
 **The SHA-1 must match the personal Mac's**, byte for byte. If it does not, the
 two Macs are running different certificates — go back to step 14.
+
+Nothing to trust here either. Untrusted in Keychain Access is the expected and
+correct state on both machines; step 5 says why.
 
 ### 16. Install
 
@@ -423,7 +502,9 @@ and at launch; `pull()` runs after every successful flush.
 
 | Symptom | First thing to check |
 |---|---|
-| Permissions re-prompt after every rebuild | Are both Macs on the same `wwb.p12`? `./scripts/make-signing-cert.sh --show` on each; the SHA-1s must match. |
+| Permissions re-prompt after every rebuild | Are both Macs on the same `wwb.p12`? `./scripts/make-signing-cert.sh --show` on each; the SHA-1s must match. Then check the app is actually signed with it: `codesign -dvvv "/Applications/Work Week Buddy.app"` must say `Authority=WWB Local Signing`, **not** `Signature=adhoc`. |
+| System Settings says granted, the app disagrees | The stored grant is against a *different* build. `codesign -d -r- "/Applications/Work Week Buddy.app"` — if it prints `cdhash H"…"` the app is ad-hoc signed and every rebuild broke the grant. Re-run `./scripts/install.sh`, then `tccutil reset ListenEvent com.bpotter.workweekbuddy` and grant it once more. From then on it sticks. |
+| A permission prompt never appears | The row is **denied** (`auth_value = 0`), and macOS asks exactly once per permission per code identity. Nothing the app can do brings the prompt back. Either tick the box in System Settings › Privacy & Security, or `tccutil reset All com.bpotter.workweekbuddy` to make the prompts available again. `npm run doctor` names this explicitly, with the per-service commands. |
 | Hours look too high | `"/Applications/Work Week Buddy.app/Contents/MacOS/Work Week Buddy" --selftest`. A failed jiggle discriminator is the one way this happens silently. |
 | Nothing at login | `npm run launch-agent status`. A plist pointing at a missing app is a login that does nothing. |
 | Sync silent | `npm run doctor`. Over 72 h silent is a hard red, not a warning. |

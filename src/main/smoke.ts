@@ -321,7 +321,17 @@ export async function runSmoke(): Promise<number> {
     // Input Monitoring granted in System Settings, but the RUNNING TAP has no
     // keyboard bits until the app is restarted. That gap is `relaunchRequired`,
     // and it is the state the owner's install was in.
-    source.perms = { listenEvent: true, postEvent: granted, axTrusted: granted };
+    source.perms = {
+      listenEvent: true,
+      postEvent: granted,
+      axTrusted: granted,
+      listenEventAccess: "granted",
+      // DENIED, not merely absent: the degraded scenario is modelled on the
+      // owner's actual install, whose Accessibility row was auth_value = 0. It
+      // is the state that must never render as "we will ask you" — there is no
+      // prompt left to draw.
+      postEventAccess: granted ? "granted" : "denied",
+    };
     source.keyboardBits = granted;
   };
 

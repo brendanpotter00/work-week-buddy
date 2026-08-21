@@ -97,6 +97,43 @@ describe("permissions", () => {
     expect(levels(inv)["accessibility"]).toBe("warn");
     expect(exitCodeFor(inv)).toBe(0);
   });
+
+  it("says what to DO about a denial, because no prompt is ever coming", () => {
+    // "DENIED" on its own is a dead end dressed up as a status. macOS raises
+    // each prompt once per permission per code identity; after a denial the app
+    // cannot summon one, so the doctor has to name the two ways out or the
+    // reader sits waiting for a dialog.
+    const inv = evaluate(
+      report({ permissions: { inputMonitoring: "denied", accessibility: "denied" } }),
+      NOW,
+    );
+    const detail = (id: string): string => inv.find((i) => i.id === id)?.detail ?? "";
+
+    for (const [id, pane, services] of [
+      ["input-monitoring", "Input Monitoring", ["ListenEvent"]],
+      // BOTH. This app's "Accessibility" is kTCCServiceAccessibility
+      // (AXIsProcessTrusted) plus kTCCServicePostEvent (CGEventPost), and
+      // `tccutil reset` is a literal kTCCService%s prefix that validates
+      // nothing — so resetting only the first leaves the dead end in place.
+      ["accessibility", "Accessibility", ["Accessibility", "PostEvent"]],
+    ] as const) {
+      expect(detail(id)).toContain("will NOT prompt again");
+      expect(detail(id)).toContain(`Privacy & Security › ${pane}`);
+      for (const service of services) {
+        expect(detail(id)).toContain(`tccutil reset ${service} com.bpotter.workweekbuddy`);
+      }
+    }
+  });
+
+  it("does not offer the remedy when nothing was denied", () => {
+    // An "undetermined" permission still has its prompt, so telling the reader
+    // to go to System Settings would send them the long way round.
+    const inv = evaluate(
+      report({ permissions: { inputMonitoring: "undetermined", accessibility: "undetermined" } }),
+      NOW,
+    );
+    for (const i of inv) expect(i.detail).not.toContain("tccutil");
+  });
 });
 
 describe("event tap", () => {
