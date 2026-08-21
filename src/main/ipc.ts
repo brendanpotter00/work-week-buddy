@@ -282,7 +282,9 @@ export function registerIpcHandlers(runtime: AppRuntime, deps: IpcDeps): void {
   });
 
   handle("wwb:doctor:get", () => runtime.doctor());
-  handle("wwb:doctor:selftest", () => runtime.selfTest());
+  // No `wwb:doctor:selftest` handler: the channel went with the Settings card
+  // that was its only caller (#29). `runtime.selfTest()` still runs — from the
+  // jiggler toggle, and from `--selftest` — just not from the renderer.
   handle("wwb:sync:flush", () => runtime.flushNow());
 
   const noSyncConfig = (): SyncConfigState => ({

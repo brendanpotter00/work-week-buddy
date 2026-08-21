@@ -13,7 +13,7 @@ import { FakeSignalSource } from "../../src/native";
 import { DEFAULT_POLICY, openDb, type Policy } from "../../src/store";
 import { createRuntime, type AppRuntime, type RuntimeChange } from "../../src/main/runtime";
 import type { SyncSeam } from "../../src/main/sync-seam";
-import type { SelfTestResult } from "../../src/shared/ipc-types";
+import type { AutostartState, CodesignState, SelfTestResult } from "../../src/shared/ipc-types";
 import type { MainSettings } from "../../src/main/settings";
 import { SETTINGS_DEFAULTS } from "../../src/main/settings";
 
@@ -44,6 +44,15 @@ export async function makeHarness(
      * harness's own database, which does not exist until this call.
      */
     sync?: SyncSeam | ((db: DatabaseSync) => SyncSeam) | null;
+    /**
+     * The doctor's identity reads. Omitted, `doctor()` reports `probed: false`
+     * for both — which is what a report from a process that never asked must
+     * say, and is the whole reason these are seams rather than literals.
+     */
+    autostart?: AutostartState;
+    codesign?: CodesignState;
+    isPackaged?: boolean;
+    osVersion?: string;
   } = {},
 ): Promise<Harness> {
   const policy: Policy = { ...DEFAULT_POLICY, ...over.policy };
@@ -77,6 +86,14 @@ export async function makeHarness(
       ? {}
       : { sync: typeof over.sync === "function" ? over.sync(db) : over.sync }),
     ...(over.idleTimeoutMs === undefined ? {} : { config: { idleTimeoutMs: over.idleTimeoutMs } }),
+    ...(over.isPackaged === undefined ? {} : { isPackaged: over.isPackaged }),
+    ...(over.osVersion === undefined ? {} : { osVersion: over.osVersion }),
+    ...(over.autostart === undefined
+      ? {}
+      : { autostart: (): Promise<AutostartState> => Promise.resolve(over.autostart as AutostartState) }),
+    ...(over.codesign === undefined
+      ? {}
+      : { codesign: (): Promise<CodesignState> => Promise.resolve(over.codesign as CodesignState) }),
   });
   const changes: RuntimeChange[] = [];
   runtime.on("change", (k) => changes.push(k));

@@ -158,7 +158,23 @@ app.whenReady().then(async () => {
     });
     const report = await services.runtime.doctor();
     process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
-    app.exit(report.allGreen ? 0 : 1);
+    // ── THE EXIT-CODE CONTRACT ───────────────────────────────────────────────
+    // `--doctor` is a DUMP, not a verdict. It exits 0 whenever it managed to
+    // produce a report, however red that report is; only a failure to produce
+    // one is non-zero, and that path leaves nothing on stdout.
+    //
+    // It used to exit `allGreen ? 0 : 1`, which made a perfectly good report
+    // indistinguishable from a missing app: `scripts/doctor.ts` saw a non-zero
+    // exec, threw the report away, and printed "could not obtain a report — is
+    // the app installed?" on every single install. Two processes were encoding
+    // the same verdict and only one of them had the thresholds.
+    //
+    // So the thresholds live in exactly one place. `scripts/doctor.ts` owns
+    // fail-vs-warn (exit 1 when an invariant is red, 2 when no report could be
+    // obtained at all); this process owns "here is what I know". The script
+    // also reads stdout even on a non-zero exit, so an older bundle installed
+    // beside a newer checkout still reports rather than lying.
+    app.exit(0);
     return;
   }
 
@@ -304,10 +320,18 @@ app.whenReady().then(async () => {
   // says nothing. Say something, then exit non-zero so a LaunchAgent restart
   // is a restart rather than a zombie.
   log.error("boot failed", err);
-  dialog.showErrorBox(
-    APP_NAME,
-    `Work Week Buddy could not start:\n${String(err)}\n\nFull log: ${join(app.getPath("userData"), "wwb.log")}`,
-  );
+  // NO MODAL IN A CLI MODE. `showErrorBox` holds the main thread until somebody
+  // dismisses it, and `--doctor`/`--selftest`/`--smoke` are run by scripts —
+  // `install.sh` runs both — with nobody watching the screen. A box here turns
+  // "the doctor failed" into "the install hung", which is the same class of
+  // freeze this file's `afterBoot()` exists to prevent. The log line above and
+  // the non-zero exit below are what a script can actually act on.
+  if (mode.kind === "normal") {
+    dialog.showErrorBox(
+      APP_NAME,
+      `Work Week Buddy could not start:\n${String(err)}\n\nFull log: ${join(app.getPath("userData"), "wwb.log")}`,
+    );
+  }
   app.exit(1);
 });
 

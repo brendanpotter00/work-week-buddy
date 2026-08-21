@@ -36,7 +36,6 @@ import {
   type PermissionSnapshot,
   type PushChannel,
   type PushContract,
-  type SelfTestResult,
   type SyncConfigState,
   type SyncTestResult,
   type ToggleChange,
@@ -82,7 +81,6 @@ export const ipc = {
   relaunch: (): Promise<void> => bridge().invoke("wwb:permissions:relaunch", undefined),
   dismissOnboarding: (): Promise<void> => bridge().invoke("wwb:onboarding:dismiss", undefined),
   doctor: (): Promise<DoctorReport> => bridge().invoke("wwb:doctor:get", undefined),
-  selfTest: (): Promise<SelfTestResult> => bridge().invoke("wwb:doctor:selftest", undefined),
   flush: (): Promise<FlushResult> => bridge().invoke("wwb:sync:flush", undefined),
   syncConfig: (): Promise<SyncConfigState> => bridge().invoke("wwb:sync:config", undefined),
   /**

@@ -211,6 +211,20 @@ function tapAlive(r: DoctorReport, nowMs: number): Invariant {
 function grantedMask(r: DoctorReport): Invariant {
   const p = r.permissions;
   const hex = p.grantedMaskHex || "(unread)";
+  // SAME PROCESS, SAME MASK. The permission snapshot reads its mask off the
+  // very `NativeStatus` that `tap.probed` describes, so a process that never
+  // installed a tap has not read a mask either — and `--doctor` is exactly that
+  // process on every healthy machine. Scoring it red here is what made
+  // `npm run doctor` exit 1 at the end of every install, under the heading
+  // "RELAUNCH required". AGENTS.md silent-failure #16, one section along.
+  if (!r.tap.probed) {
+    return {
+      id: "granted-mask",
+      label: "Granted mask",
+      level: "warn",
+      detail: "not probed in this process — run the app itself, or --selftest",
+    };
+  }
   // MACOS.md §6: the preflights are not trusted. The mask read back off the
   // live tap is the authority, and it is the only thing that can prove the
   // keyboard bits actually arrived.
@@ -462,9 +476,41 @@ export function extractJson(stdout: string): DoctorReport {
   return JSON.parse(stdout.slice(start, end + 1)) as DoctorReport;
 }
 
+/**
+ * A REPORT ON STDOUT IS A REPORT, WHATEVER THE EXIT CODE SAID.
+ *
+ * The app's `--doctor` now always exits 0 once it has printed something (see
+ * `src/main/index.ts`), but this side does not depend on that, and must not:
+ * the bundle in `/Applications` is installed independently of this checkout, so
+ * an older one that still exits `allGreen ? 0 : 1` will be sitting there for as
+ * long as somebody has not re-run `install.sh`. That is exactly the machine
+ * whose doctor you most want to work.
+ *
+ * So the exec failure is not the answer — the stream is. `execFile` attaches
+ * whatever the child wrote to the rejection, so a red-but-valid report is
+ * recovered and scored, and only a bundle that produced NO JSON at all — a
+ * missing app, a bad signature, a dyld failure — reaches the caller as a throw
+ * and becomes exit 2. That is the distinction the old code collapsed.
+ */
 export async function collectReport(bin: string): Promise<DoctorReport> {
-  const { stdout } = await run(bin, ["--doctor"], { maxBuffer: 32 * 1024 * 1024, timeout: 120_000 });
-  return extractJson(stdout);
+  try {
+    const { stdout } = await run(bin, ["--doctor"], {
+      maxBuffer: 32 * 1024 * 1024,
+      timeout: 120_000,
+    });
+    return extractJson(stdout);
+  } catch (err) {
+    const stdout = (err as { stdout?: unknown }).stdout;
+    if (typeof stdout === "string" && stdout !== "") {
+      try {
+        return extractJson(stdout);
+      } catch {
+        // No JSON in what it did print. The original failure is the better
+        // story — "no such file" beats "no JSON object in --doctor output".
+      }
+    }
+    throw err;
+  }
 }
 
 async function readStdin(): Promise<string> {
@@ -504,6 +550,9 @@ export const USAGE = `usage: npm run doctor -- [--report FILE|-] [--app /path/to
   --no-color      plain output
 
 exit: 0 all invariants hold (warnings allowed) · 1 at least one is red · 2 no report
+
+The app's own '--doctor' exits 0 whenever it printed a report, red or not; the
+thresholds and the verdict live here and only here.
 `;
 
 export async function main(argv: readonly string[]): Promise<number> {

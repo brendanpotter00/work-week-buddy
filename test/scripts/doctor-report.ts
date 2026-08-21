@@ -60,8 +60,8 @@ export const GREEN: DoctorReport = {
     tapLostRows: 0,
     lastWatchdogTickMs: NOW - 2 * MINUTE,
   },
-  camera: { deviceCount: 1, inUse: false, listenerRegistered: true, lastReadMs: NOW - MINUTE },
-  mic: { inUse: false, needsPermission: false },
+  camera: { probed: true, deviceCount: 2, inUse: false, lastReadMs: NOW - MINUTE },
+  mic: { inUse: false },
   sync: {
     configured: true,
     pendingRows: 0,
@@ -105,12 +105,15 @@ export const GREEN: DoctorReport = {
     integrityOk: true,
   },
   autostart: {
+    probed: true,
     installed: true,
     loaded: true,
     plistPath: "/Users/x/Library/LaunchAgents/com.bpotter.workweekbuddy.plist",
+    execPath: "/Applications/Work Week Buddy.app/Contents/MacOS/Work Week Buddy",
+    execExists: true,
     execMatchesRunningApp: true,
   },
-  codesign: { designatedRequirementSha256: "deadbeef", valid: true },
+  codesign: { probed: true, designatedRequirementSha256: "deadbeef", valid: true },
 };
 
 type Section<T> = { [K in keyof T]?: T[K] };

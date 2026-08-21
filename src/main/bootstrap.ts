@@ -18,6 +18,8 @@ import { DEFAULT_POLICY, defaultDbPath, openDb, type Policy } from "../store";
 import type { SyncConfigState, SyncTestResult } from "../shared/ipc-types";
 import { log } from "./log";
 import { createMachineNaming, type MachineNaming } from "./device-name";
+import { verifyLaunchAgent } from "./autostart";
+import { readCodesign } from "./codesign";
 import { createRuntime, type AppRuntime } from "./runtime";
 import { readPlatformUuid } from "./machine-id";
 import type { SettingsStore } from "./settings";
@@ -379,6 +381,8 @@ export async function createCoreServices(opts: {
     machineId,
     machineLabel: currentLabel,
     appVersion: opts.appVersion,
+    isPackaged: opts.isPackaged,
+    ...(opts.osVersion === undefined ? {} : { osVersion: opts.osVersion }),
     tz,
     policy,
     dbPath,
@@ -392,6 +396,14 @@ export async function createCoreServices(opts: {
         await opts.settings.set("lastSelfTest", result);
       },
     },
+    // ── THE TWO IDENTITY READS ────────────────────────────────────────────
+    // Passed as thunks, so nothing here runs until `doctor()` is called — and
+    // `doctor()` is never on the boot path. Both shell out; neither can raise
+    // a dialog; both are `execFile`, never `execFileSync`. See the headers of
+    // `autostart.ts` and `codesign.ts`, and `afterBoot()` in `index.ts` for
+    // the two freezes that made this paragraph necessary.
+    autostart: () => verifyLaunchAgent(),
+    codesign: () => readCodesign(),
   });
   emitChange = (kind) => {
     runtime.notifySync(kind);

@@ -41,6 +41,7 @@ import {
 import type { RawSignal, NativeStatus, SignalSource, TapRevival } from "../native";
 import {
   countIntervals,
+  databaseSizeBytes,
   insertClosed,
   openFromSnapshot,
   readJournal,
@@ -55,6 +56,8 @@ import {
 import { DEFAULTS } from "../shared/constants";
 import { localDateOf } from "../store/dates";
 import type {
+  AutostartState,
+  CodesignState,
   DegradedReason,
   DoctorReport,
   EndReason,
@@ -71,6 +74,8 @@ import type {
   ToggleChange,
   Toggles,
 } from "../shared/ipc-types";
+import { UNPROBED as AUTOSTART_UNPROBED } from "./autostart";
+import { UNPROBED as CODESIGN_UNPROBED } from "./codesign";
 import { createDeadline, type Deadline } from "./deadline";
 import { unconfiguredSync, type SyncSeam } from "./sync-seam";
 import { buildMetrics } from "./metrics";
@@ -185,6 +190,15 @@ export interface RuntimeOptions {
    */
   readonly machineLabel?: () => string;
   readonly appVersion: string;
+  /**
+   * `app.isPackaged`. The doctor reported a hardcoded `false` here while the
+   * boot log two lines above it said `packaged=true`, which is the single most
+   * confusing thing a report can do: dev and prod are different TCC subjects,
+   * so this field decides whether the permissions below it mean anything.
+   */
+  readonly isPackaged?: boolean;
+  /** `process.getSystemVersion()` — "15.3.1", not "darwin". */
+  readonly osVersion?: string;
   /** IANA zone. Read once at boot; rows carry the zone they happened in. */
   readonly tz: string;
   readonly policy: Policy;
@@ -216,6 +230,22 @@ export interface RuntimeOptions {
     read(): SelfTestResult | null;
     write(result: SelfTestResult): void | Promise<void>;
   };
+  /**
+   * The two identity reads the doctor makes — "will this Mac start the app at
+   * login, and is this bundle still the one the grants belong to".
+   *
+   * Injected for the same reason `selfTestStore` is: both shell out, and this
+   * file must not know that `launchctl` or `codesign` exist. It is also what
+   * makes them testable — a plist fixture and a stubbed `launchctl` prove the
+   * installed case AND the moved-bundle case with no LaunchAgent anywhere near
+   * the machine running the suite.
+   *
+   * Omitted, `doctor()` reports `probed: false`. That is not the same as
+   * "false", and the whole point of this change is that it must not be written
+   * as one.
+   */
+  readonly autostart?: () => Promise<AutostartState>;
+  readonly codesign?: () => Promise<CodesignState>;
 }
 
 const KEY_BITS = (1 << 10) | (1 << 11);
@@ -241,7 +271,16 @@ class Runtime implements AppRuntime {
   private readonly deadline: Deadline;
 
   private cameraInUse = false;
+  /** Null until something has actually walked the CoreMediaIO device list. */
+  private cameraDeviceCount: number | null = null;
   private micInUse = false;
+  /**
+   * When the camera/mic LEVELS were last read. Deliberately separate from
+   * `this.status`, which is the TAP's status: `--doctor` reads the levels
+   * without installing a tap, and conflating the two would report a healthy
+   * machine's tap as "not created". See `readLevelsForDoctor()`.
+   */
+  private levelsReadAtMs: number | null = null;
   private lastSignalMsEver: number | null = null;
   private lastSignalKind: SignalKind | null = null;
 
@@ -668,7 +707,9 @@ class Runtime implements AppRuntime {
     const prevEnabled = this.status?.tapEnabled;
     this.status = status;
     this.cameraInUse = status.cameraInUse;
+    this.cameraDeviceCount = status.cameraDeviceCount;
     this.micInUse = status.micInUse;
+    this.levelsReadAtMs = status.probedAtMs;
     // The mask read is here, not only at boot, because a permission REVOKED in
     // System Settings while the app runs must produce the same loud degraded
     // state within one watchdog tick. M5 gate (c).
@@ -814,7 +855,14 @@ class Runtime implements AppRuntime {
   private degraded(): DegradedReason[] {
     const out: DegradedReason[] = [];
     const p = this.permSnapshot;
-    if (!p.keyboardBitsGranted) out.push("keyboard_permission_missing");
+    // `this.status !== null` — A MASK NOBODY READ IS NOT A MASK WITHOUT THE
+    // BITS. `keyboardBitsGranted` comes off the live tap's granted mask, and
+    // before a tap exists there is no mask to be missing anything. Without this
+    // guard the reason is raised in two places it must not be: for the few
+    // milliseconds between the constructor and `start()`, and for the entire
+    // life of a `--doctor` process, which installs no tap at all and so
+    // reported a healthy Mac as degraded. AGENTS.md silent-failure #16.
+    if (this.status !== null && !p.keyboardBitsGranted) out.push("keyboard_permission_missing");
     if (p.relaunchRequired) out.push("relaunch_required");
     // `tapDown` and not `status.tapEnabled`: the status only refreshes on the
     // FIVE-MINUTE probe, so a tap that died would have shown a green banner for
@@ -974,8 +1022,46 @@ class Runtime implements AppRuntime {
     };
   }
 
+  /**
+   * A FRESH CAMERA/MIC READ WHEN NOBODY HAS TAKEN ONE.
+   *
+   * `--doctor` boots the runtime read-only and never calls `start()`, so
+   * `applyStatus()` never runs and every level stays at its initial value. The
+   * report came out saying `camera: { deviceCount: 0, inUse: false }` on a Mac
+   * with two cameras attached — which reads exactly like the App Sandbox
+   * failure that empties the CoreMediaIO device list (AGENTS.md #12), and
+   * "camera on = working" is a headline requirement, so it sent real debugging
+   * after a bug that was not there.
+   *
+   * IT DELIBERATELY DOES NOT TOUCH `this.status`. That field is the TAP's
+   * status, and `tapHealth().probed` is derived from it. A `--doctor` process
+   * installs no tap, so folding this reading in would report `created: false`
+   * on every healthy machine — re-introducing, from the other end, the exact
+   * misdiagnosis `probed` was added to prevent (AGENTS.md #16). The tap is
+   * unprobed here and stays unprobed here. Only the levels are read.
+   *
+   * `probe()` is passive by contract — it reads levels and posts nothing — and
+   * it is the same call the five-minute watchdog already makes. In the RUNNING
+   * app this is a no-op: `start()` has already taken a reading.
+   */
+  private readLevelsForDoctor(): void {
+    if (this.levelsReadAtMs !== null) return;
+    try {
+      const status = this.o.source.probe();
+      this.cameraInUse = status.cameraInUse;
+      this.cameraDeviceCount = status.cameraDeviceCount;
+      this.micInUse = status.micInUse;
+      this.levelsReadAtMs = status.probedAtMs;
+    } catch (err) {
+      // A doctor that dies while diagnosing is not a doctor. `probed: false`
+      // stays, which is the honest answer to "we could not look".
+      console.error("[runtime] doctor could not read the camera/mic levels", err);
+    }
+  }
+
   async doctor(): Promise<DoctorReport> {
     const nowMs = this.now();
+    this.readLevelsForDoctor();
     const tap = this.tapHealth();
     // Real numbers from the real sync layer: pending rows, last flush, last
     // pull, watermark, fingerprint match, backup age, silence duration.
@@ -983,32 +1069,44 @@ class Runtime implements AppRuntime {
     const degraded = this.degraded();
     return {
       generatedAtMs: nowMs,
-      allGreen: degraded.length === 0 && tap.enabled && tap.keyboardBitsPresent,
+      // "Nothing is known to be wrong", and an UNPROBED tap is not known to be
+      // wrong. It used to require `tap.enabled`, which a `--doctor` process can
+      // never have — it installs no tap — so `allGreen` was false on every
+      // healthy machine and `scripts/doctor.ts` printed "every invariant above
+      // holds, but the app reports allGreen=false" at the end of every install.
+      // A disagreement note that always fires stops being a disagreement note.
+      //
+      // Nothing gates on this field; the verdict lives in `scripts/doctor.ts`,
+      // which applies its own thresholds and reports the tap separately.
+      allGreen:
+        degraded.length === 0 && (!tap.probed || (tap.enabled && tap.keyboardBitsPresent)),
       app: {
         version: this.o.appVersion,
         electron: process.versions.electron ?? "",
         bundleId: "com.bpotter.workweekbuddy",
         execPath: process.execPath,
-        isPackaged: false,
+        isPackaged: this.o.isPackaged ?? false,
         launchedAtMs: this.launchedAtMs,
       },
       machine: {
         machineId: this.machineId,
         label: this.o.machineLabel?.() ?? "",
-        osVersion: process.platform,
+        // `process.getSystemVersion()` from `index.ts`, not `process.platform`:
+        // the field is called osVersion and it used to answer "darwin", which
+        // is a platform and is the same string on every Mac ever made.
+        osVersion: this.o.osVersion ?? process.platform,
         tz: this.o.tz,
       },
       permissions: this.permSnapshot,
       tap,
       camera: {
-        deviceCount: 0,
+        probed: this.levelsReadAtMs !== null,
+        deviceCount: this.cameraDeviceCount,
         inUse: this.cameraInUse,
-        listenerRegistered: this.status !== null,
-        lastReadMs: this.status?.probedAtMs ?? null,
+        lastReadMs: this.levelsReadAtMs,
       },
       mic: {
         inUse: this.micInUse,
-        needsPermission: null,
       },
       sync: sync.sync,
       fingerprint: sync.fingerprint,
@@ -1019,14 +1117,36 @@ class Runtime implements AppRuntime {
       selfTest: this.o.selfTestStore?.read() ?? null,
       db: {
         path: this.o.dbPath ?? ":memory:",
-        sizeBytes: 0,
+        sizeBytes: databaseSizeBytes(this.o.db),
         rows: countIntervals(this.o.db),
         openIntervalPresent: readJournal(this.o.db) !== null,
         integrityOk: this.dbWritable,
       },
-      autostart: { installed: false, loaded: false, plistPath: "", execMatchesRunningApp: false },
-      codesign: { designatedRequirementSha256: null, valid: null },
+      // ── THE TWO SUBPROCESS READS ─────────────────────────────────────────
+      // Injected, not reached for, so this file keeps knowing nothing about
+      // `launchctl` or `codesign` and the tests can prove both answers against
+      // a fixture. Omitted, they report `probed: false` — "nobody looked" —
+      // rather than the hardcoded `installed: false` / `valid: null` that used
+      // to say "not installed" while launchd had the agent loaded and running.
+      //
+      // AWAITED IN PARALLEL, and each one is bounded and cannot prompt (see
+      // both files' headers). `doctor()` is already async and is never on the
+      // boot path: it is reached from `--doctor` and from `wwb:doctor:get`.
+      ...(await this.probeIdentity()),
     };
+  }
+
+  /**
+   * `launchctl` and `codesign`, together, so one slow answer does not wait on
+   * the other. Neither may ever throw out of here — a doctor that dies while
+   * diagnosing is not a doctor.
+   */
+  private async probeIdentity(): Promise<Pick<DoctorReport, "autostart" | "codesign">> {
+    const [autostart, codesign] = await Promise.all([
+      this.o.autostart?.().catch(() => AUTOSTART_UNPROBED) ?? Promise.resolve(AUTOSTART_UNPROBED),
+      this.o.codesign?.().catch(() => CODESIGN_UNPROBED) ?? Promise.resolve(CODESIGN_UNPROBED),
+    ]);
+    return { autostart, codesign };
   }
 
   // ── change fan-out ───────────────────────────────────────────────────────

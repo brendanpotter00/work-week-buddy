@@ -1173,14 +1173,40 @@ function cmioDeviceIds(): number[] {
   }
 }
 
-/** OR'd across every device: a machine can have a built-in camera AND an external one. */
-export function anyCameraInUse(): boolean {
+export interface CameraStatus {
+  /**
+   * How many video devices CoreMediaIO can see.
+   *
+   * Reported because ZERO IS A DIAGNOSIS. An App Sandbox entitlement empties
+   * this list while every call still returns OSStatus 0, so `inUse` becomes
+   * permanently false and the camera half of the product dies without an error
+   * anywhere (AGENTS.md silent-failure #12). A machine with cameras attached
+   * and `deviceCount: 0` is that bug and nothing else; `inUse: false` on its
+   * own cannot tell it apart from a quiet afternoon.
+   */
+  readonly deviceCount: number;
+  /** OR'd across every device: a Mac can have a built-in camera AND an external one. */
+  readonly inUse: boolean;
+}
+
+/**
+ * ONE enumeration, both answers.
+ *
+ * `cmioDeviceIds()` is a synchronous round trip to the camera daemon — the
+ * `--selftest` gate times it for exactly that reason — so asking for the count
+ * and the in-use flag separately would double the cost of the five-minute
+ * probe to learn nothing new.
+ */
+export function cameraStatus(): CameraStatus {
   const addr: PropAddr = {
     mSelector: kCMIODevicePropertyDeviceIsRunningSomewhere,
     mScope: kCMIOObjectPropertyScopeGlobal,
     mElement: kElementMain,
   };
-  for (const id of cmioDeviceIds()) {
+  const ids = cmioDeviceIds();
+  let inUse = false;
+  for (const id of ids) {
+    if (inUse) break;
     if (!CMIOObjectHasProperty(id, addr)) continue;
     const buf = koffi.alloc("uint32_t", 1) as CBuf;
     try {
@@ -1189,13 +1215,18 @@ export function anyCameraInUse(): boolean {
         CMIOObjectGetPropertyData(id, addr, 0, null, 4, used, buf) === 0 &&
         (koffi.decode(buf, "uint32_t") as number) !== 0
       ) {
-        return true;
+        inUse = true;
       }
     } finally {
       koffi.free(buf);
     }
   }
-  return false;
+  return { deviceCount: ids.length, inUse };
+}
+
+/** OR'd across every device: a machine can have a built-in camera AND an external one. */
+export function anyCameraInUse(): boolean {
+  return cameraStatus().inUse;
 }
 
 function audioDeviceIds(): number[] {

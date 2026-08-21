@@ -19,6 +19,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 
 import { Settings } from "@/renderer/Settings";
+import { INVOKE_CHANNELS } from "@/shared/ipc-types";
 import type {
   InvokeChannel,
   SyncConfigState,
@@ -78,7 +79,6 @@ function mount(
       return stored;
     },
     "wwb:doctor:get": () => doctorReport(over.doctor),
-    "wwb:doctor:selftest": () => selfTestResult(),
     "wwb:sync:config": () => config,
     // Main's behaviour: the URL is stored, the token goes to the vault, and
     // what comes back is a state object with no field a token could ride on.
@@ -475,12 +475,16 @@ describe("the settings window after the safety-check card was removed", () => {
     expect(screen.queryByRole("button", { name: /self-?test/i })).toBeNull();
   });
 
-  it("never calls wwb:doctor:selftest just by being opened", async () => {
-    // The check posts synthetic events and deliberately blocks the tap. Opening
-    // a settings window must not be a reason for any of that to happen.
+  it("cannot start a self-test at all — the channel no longer exists", async () => {
+    // This used to assert the channel was not CALLED on open. It is now
+    // stronger and simpler: the renderer has no way to reach the self-test
+    // from anywhere, because `wwb:doctor:selftest` was removed with the card.
+    // The check posts synthetic events and deliberately blocks the tap for
+    // 2.5 s; opening a window must never be a reason for that to happen.
     const f = mount();
     await screen.findByText("About");
-    expect(f.bridge.calls.filter((c) => c.channel === "wwb:doctor:selftest")).toHaveLength(0);
+    expect(f.bridge.calls.map((c) => c.channel as string)).not.toContain("wwb:doctor:selftest");
+    expect([...INVOKE_CHANNELS]).not.toContain("wwb:doctor:selftest");
   });
 
   it("renders clean when the doctor reports a FAILED self-test", async () => {

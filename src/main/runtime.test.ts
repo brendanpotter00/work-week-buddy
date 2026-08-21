@@ -664,3 +664,159 @@ describe("flush", () => {
     expect(h.runtime.liveStatus().degraded).toEqual([]);
   });
 });
+
+// ───────────────────────────────────────────────── the doctor tells the truth
+
+/**
+ * WHY THIS BLOCK EXISTS.
+ *
+ * `doctor()` shipped with SIX fields written as literals: `autostart` (all
+ * four), `codesign` (both), `camera.deviceCount: 0`, `db.sizeBytes: 0`,
+ * `app.isPackaged: false` and `machine.osVersion: process.platform`. Every one
+ * of them looked like a measurement. On the machine that found this, launchd
+ * had the agent loaded and running while the report said "not installed", two
+ * cameras were attached while it said "0 devices", and the boot log two lines
+ * above the JSON said `packaged=true` while the JSON said `false`.
+ *
+ * A field that cannot change is worse than a missing one: it reads as a
+ * diagnosis. So the test is not "the values are right" — it is "the values
+ * MOVE". Drive the same code twice with different inputs and require every one
+ * of these fields to differ.
+ */
+describe("no doctor field is a hardcoded constant", () => {
+  const AUTOSTART_A = {
+    probed: true,
+    installed: true,
+    loaded: true,
+    plistPath: "/Users/a/Library/LaunchAgents/com.bpotter.workweekbuddy.plist",
+    execPath: "/Applications/Work Week Buddy.app/Contents/MacOS/Work Week Buddy",
+    execExists: true,
+    execMatchesRunningApp: true,
+  };
+  const AUTOSTART_B = {
+    probed: true,
+    installed: false,
+    loaded: false,
+    plistPath: "/Users/b/Library/LaunchAgents/com.bpotter.workweekbuddy.plist",
+    execPath: null,
+    execExists: false,
+    execMatchesRunningApp: false,
+  };
+
+  it("moves every field that used to be frozen", async () => {
+    const a = await makeHarness({
+      autostart: AUTOSTART_A,
+      codesign: { probed: true, designatedRequirementSha256: "aaaa", valid: true },
+      isPackaged: true,
+      osVersion: "15.3.1",
+    });
+    // Rows on disk, so `sizeBytes` has something to be non-zero about.
+    a.source.key(T0);
+    vi.advanceTimersByTime(16 * MIN);
+    // The RUNNING app's path: a camera comes up, and the five-minute watchdog
+    // is what notices. `doctor()` reports what that tick recorded — it does not
+    // take a reading of its own once one exists.
+    a.source.cameraDeviceCount = 2;
+    a.source.cameraOn = true;
+    a.runtime.onWatchdogTick(a.source.probe(), Date.now());
+    const ra = await a.runtime.doctor();
+
+    // `start: false` is the `--doctor` shape: the runtime is booted read-only,
+    // no tap is installed, and the camera reading is the one `doctor()` takes
+    // for itself. Setting the knobs before that read is the only way to change
+    // what it sees — which is the proof that it IS a read.
+    const b = await makeHarness({
+      start: false,
+      autostart: AUTOSTART_B,
+      codesign: { probed: true, designatedRequirementSha256: "bbbb", valid: false },
+      isPackaged: false,
+      osVersion: "26.0",
+    });
+    b.source.cameraDeviceCount = 0;
+    b.source.cameraOn = false;
+    const rb = await b.runtime.doctor();
+
+    try {
+      expect(ra.autostart).toEqual(AUTOSTART_A);
+      expect(rb.autostart).toEqual(AUTOSTART_B);
+      expect(ra.codesign.designatedRequirementSha256).toBe("aaaa");
+      expect(rb.codesign.valid).toBe(false);
+      expect(ra.app.isPackaged).toBe(true);
+      expect(rb.app.isPackaged).toBe(false);
+      expect(ra.machine.osVersion).toBe("15.3.1");
+      expect(rb.machine.osVersion).toBe("26.0");
+      // "darwin" is a platform, not a version, and is the same string on every
+      // Mac ever made. It was the old answer.
+      expect(ra.machine.osVersion).not.toBe("darwin");
+      expect(ra.camera.deviceCount).toBe(2);
+      expect(rb.camera.deviceCount).toBe(0);
+      expect(ra.camera.inUse).toBe(true);
+      expect(rb.camera.inUse).toBe(false);
+      expect(ra.db.sizeBytes).toBeGreaterThan(0);
+      // Same code, different machine: the numbers must not be the same number.
+      expect(ra.db.sizeBytes).not.toBe(0);
+    } finally {
+      a.close();
+      b.close();
+    }
+  });
+
+  it("says 'nobody looked' rather than 'no' when the seams are absent", async () => {
+    // The other half of the rule. A doctor with no way to run `launchctl` must
+    // not report `installed: false` — that is the sentence that sent this whole
+    // change's debugging in the wrong direction. `probed: false` is the answer.
+    h = await makeHarness();
+    const report = await h.runtime.doctor();
+    expect(report.autostart.probed).toBe(false);
+    expect(report.codesign.probed).toBe(false);
+    expect(report.codesign.valid).toBeNull();
+  });
+
+  it("reads the camera even though --doctor never starts the tap", async () => {
+    // THE BUG THIS BLOCK IS NAMED AFTER. `--doctor` boots the runtime read-only
+    // and never calls `start()`, so nothing had ever taken a level reading and
+    // the report said `deviceCount: 0, inUse: false` on a Mac with two cameras
+    // — which is indistinguishable from the App Sandbox failure that empties
+    // the CoreMediaIO device list (AGENTS.md #12).
+    h = await makeHarness({ start: false });
+    h.source.cameraDeviceCount = 2;
+    h.source.cameraOn = true;
+    const report = await h.runtime.doctor();
+    expect(report.camera.probed).toBe(true);
+    expect(report.camera.deviceCount).toBe(2);
+    expect(report.camera.inUse).toBe(true);
+    expect(report.camera.lastReadMs).not.toBeNull();
+  });
+
+  it("does not call itself not-green over a tap it never looked at", async () => {
+    // `--doctor` installs no tap, so requiring `tap.enabled` made `allGreen`
+    // false on every healthy machine, and the doctor script closed every
+    // install with "every invariant above holds, but the app reports
+    // allGreen=false". A disagreement note that always fires is not one.
+    h = await makeHarness({ start: false });
+    const report = await h.runtime.doctor();
+    expect(report.tap.probed).toBe(false);
+    expect(report.allGreen).toBe(true);
+  });
+
+  it("still calls itself not-green when a tap it DID look at is dead", async () => {
+    h = await makeHarness();
+    h.source.tapEnabled = false;
+    h.runtime.onWatchdogTick(h.source.probe(), Date.now());
+    const report = await h.runtime.doctor();
+    expect(report.tap.probed).toBe(true);
+    expect(report.allGreen).toBe(false);
+  });
+
+  it("does NOT report the tap as probed just because the camera was read", async () => {
+    // The other direction, and the one that would have been a regression. A
+    // `--doctor` process installs no tap; folding the level read into the tap's
+    // status would report `created: false` on every healthy machine and turn
+    // `scripts/doctor.ts` red — re-introducing AGENTS.md #16 from the far end.
+    h = await makeHarness({ start: false });
+    const report = await h.runtime.doctor();
+    expect(report.camera.probed).toBe(true);
+    expect(report.tap.probed).toBe(false);
+    expect(report.tap.grantedMaskHex).toBe("-");
+  });
+});

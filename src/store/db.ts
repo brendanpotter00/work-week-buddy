@@ -73,6 +73,23 @@ export function openDb(path: string, policy: Policy = DEFAULT_POLICY): DatabaseS
   return db;
 }
 
+/**
+ * How big the database is, in bytes — `page_count * page_size`.
+ *
+ * SQLite's own arithmetic rather than `statSync(path)`, for three reasons that
+ * all point the same way. It is the LOGICAL size, so it is correct in WAL mode
+ * (where a 4 MB `-wal` sitting next to a 45 KB main file describes neither the
+ * data nor the disk); it works for `:memory:`, which is what every test opens;
+ * and it is a read this process is already allowed to make, so the doctor never
+ * touches the filesystem to answer it. `doctor()` reported a literal `0` here
+ * before this existed.
+ */
+export function databaseSizeBytes(db: DatabaseSync): number {
+  const pages = db.prepare("PRAGMA page_count").get() as { page_count?: number } | undefined;
+  const size = db.prepare("PRAGMA page_size").get() as { page_size?: number } | undefined;
+  return (pages?.page_count ?? 0) * (size?.page_size ?? 0);
+}
+
 /** `~/Library/Application Support/WorkWeekBuddy/db/local.db` in production. */
 export function defaultDbPath(userDataDir: string): string {
   const dir = join(userDataDir, "db");

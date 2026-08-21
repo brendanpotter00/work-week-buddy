@@ -178,7 +178,35 @@ describe("PermissionTracker.read", () => {
     const t = new PermissionTracker();
     const snap = t.read(sourceWith(), null);
     expect(snap.keyboardBitsGranted).toBe(false);
-    expect(snap.grantedMaskHex).toBe("0x0");
+    // "-", NOT "0x0", which is what this used to assert. A mask of zero is
+    // byte-for-byte what a REFUSED Input Monitoring grant reads as, so "0x0"
+    // did not say "no mask" — it said "denied", which is the opposite of what
+    // this test is named after. `tapHealth()` already uses "-" for exactly
+    // this; the permission snapshot reads the same `NativeStatus` and had been
+    // left behind. AGENTS.md silent-failure #16.
+    expect(snap.grantedMaskHex).toBe("-");
+  });
+
+  it("does not demand a relaunch off a mask nobody read", () => {
+    // `--doctor` installs no tap, so before this it reported
+    // `relaunchRequired: true` on a healthy Mac with Input Monitoring granted,
+    // and `npm run doctor` ended every install red with "RELAUNCH required".
+    const t = new PermissionTracker();
+    const snap = t.read(sourceWith(), null);
+    expect(snap.inputMonitoring).toBe("granted");
+    expect(snap.relaunchRequired).toBe(false);
+  });
+
+  it("still demands a relaunch when a LIVE tap is missing the bits", async () => {
+    // The real case must survive: a grant that landed after the tap was built
+    // does not retroactively add the keyboard bits, and only a relaunch fixes
+    // it. Losing this would be losing the whole point of the field.
+    const source = sourceWith();
+    source.keyboardBits = false;
+    const status = await statusOf(source);
+    const snap = new PermissionTracker().read(source, status);
+    expect(snap.keyboardBitsGranted).toBe(false);
+    expect(snap.relaunchRequired).toBe(true);
   });
 
   it("never requests a permission that is already granted", () => {

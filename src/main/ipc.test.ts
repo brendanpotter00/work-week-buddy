@@ -585,6 +585,15 @@ describe("double-click on the title bar", () => {
 });
 
 describe("the self-test", () => {
+  it("has no IPC channel of its own — nothing in the renderer may start one", async () => {
+    // `wwb:doctor:selftest` outlived the Settings card that was its only caller
+    // (#29). The check posts synthetic events and deliberately blocks the tap
+    // for 2.5 s, so a channel that can start one and that nobody reviews is a
+    // real hazard, not tidiness. The M12 test above proves main registers
+    // exactly the contract; this proves the contract no longer has it.
+    expect([...INVOKE_CHANNELS]).not.toContain("wwb:doctor:selftest");
+  });
+
   it("runs, and the result outlives the run so the pane can say when it passed", async () => {
     h = await makeHarness();
     await register();
@@ -592,7 +601,9 @@ describe("the self-test", () => {
     const before = (await invoke("wwb:doctor:get")) as { selfTest: unknown };
     expect(before.selfTest).toBeNull();
 
-    const result = (await invoke("wwb:doctor:selftest")) as { passed: boolean; ranAtMs: number };
+    // Straight at the runtime now: this is the path the jiggler toggle takes,
+    // and `--selftest` is the other one. Neither goes through IPC.
+    const result = await h.runtime.selfTest();
     expect(result.passed).toBe(true);
 
     // The doctor reports the STORED result rather than running a fresh one:

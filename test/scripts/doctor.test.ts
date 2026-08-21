@@ -13,8 +13,10 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { chmodSync } from "node:fs";
 import {
   APP_PATH,
+  collectReport,
   evaluate,
   exitCodeFor,
   extractJson,
@@ -169,6 +171,37 @@ describe("granted mask", () => {
 
   it("prints the mask itself, so it can be compared with docs/MACOS.md", () => {
     expect(detail({}, "granted-mask")).toContain("0x2000000000ca");
+  });
+
+  it("only WARNS from a process that never installed a tap", () => {
+    // `--doctor` is that process on every healthy machine: no tap, so no mask
+    // read, so `keyboardBitsGranted: false` and `relaunchRequired: true` — and
+    // the doctor ended every install red, under "RELAUNCH required", on a Mac
+    // where nothing was wrong. Same shape as the tap invariant above; the
+    // permission snapshot reads its mask off the same `NativeStatus`.
+    const unprobed = {
+      tap: { probed: false, created: false, enabled: false, grantedMaskHex: "-" },
+      permissions: {
+        grantedMaskHex: "-",
+        keyboardBitsGranted: false,
+        flagsChangedBitGranted: false,
+        relaunchRequired: true,
+      },
+    };
+    expect(level(unprobed, "granted-mask")).toBe("warn");
+    expect(detail(unprobed, "granted-mask")).toContain("not probed");
+    // And the whole run must not fail for it.
+    expect(exitCodeFor(evaluate(report(unprobed), NOW))).toBe(0);
+  });
+
+  it("still goes red for a real missing bit once a tap HAS been probed", () => {
+    // The warning above must not become a way to never fail. With a tap in the
+    // process, a missing keyboard bit is the silent failure it always was:
+    // mouse still flows, hours still accrue, a whole day of typing never
+    // registers.
+    const patch = { permissions: { keyboardBitsGranted: false } };
+    expect(report(patch).tap.probed).toBe(true);
+    expect(level(patch, "granted-mask")).toBe("fail");
   });
 });
 
@@ -380,6 +413,94 @@ describe("collection plumbing", () => {
 
   it("throws rather than guessing when there is no JSON at all", () => {
     expect(() => extractJson("dyld: library not loaded\n")).toThrow(/no JSON object/);
+  });
+
+  // ── THE FOUR-BUG REGRESSION ─────────────────────────────────────────────
+  // Every install ended on "doctor: could not obtain a report — is the app
+  // installed at /Applications/Work Week Buddy.app?" out of an app that was
+  // installed, running, and printing a perfectly good report. Two causes, and
+  // both are covered here: the boot log was landing on stdout in front of the
+  // JSON, and `--doctor` was exiting 1 for a red report so `execFile` rejected
+  // and the report was thrown away unread.
+  describe("collectReport, against a fake bundle", () => {
+    const binDir = mkdtempSync(join(tmpdir(), "wwb-bin-"));
+
+    /** A stand-in for the app: some noise, a report, and a chosen exit code. */
+    function fakeApp(
+      name: string,
+      opts: { stderr?: string; stdout?: string; body?: string; exit: number },
+    ): string {
+      const path = join(binDir, name);
+      const body = opts.body ?? JSON.stringify(GREEN);
+      writeFileSync(
+        path,
+        [
+          "#!/bin/sh",
+          opts.stderr === undefined ? "" : `printf '%s\\n' ${JSON.stringify(opts.stderr)} >&2`,
+          opts.stdout === undefined ? "" : `printf '%s\\n' ${JSON.stringify(opts.stdout)}`,
+          body === "" ? "" : `cat <<'WWBEOF'\n${body}\nWWBEOF`,
+          `exit ${String(opts.exit)}`,
+          "",
+        ].join("\n"),
+        "utf8",
+      );
+      chmodSync(path, 0o755);
+      return path;
+    }
+
+    it("parses a report printed alongside boot logging", async () => {
+      // The fix: the log goes to stderr, so stdout is the document and nothing
+      // else. This is what the app does now.
+      const bin = fakeApp("with-logs", {
+        stderr: "[wwb] boot: ready · mode=doctor · packaged=true · v0.1.0",
+        exit: 0,
+      });
+      const got = await collectReport(bin);
+      expect(got.machine.machineId).toBe(GREEN.machine.machineId);
+    });
+
+    it("still parses if boot logging lands on stdout anyway", async () => {
+      // Belt and braces. Electron writes its own noise to stdout regardless of
+      // what this repo does, and an older bundle may still log there.
+      const bin = fakeApp("noisy-stdout", {
+        stdout: "[wwb] boot: settings loaded",
+        exit: 0,
+      });
+      expect((await collectReport(bin)).machine.machineId).toBe(GREEN.machine.machineId);
+    });
+
+    it("gets the report even when the app exits NON-ZERO", async () => {
+      // The bundle in /Applications is installed independently of this
+      // checkout, so an older one that still exits `allGreen ? 0 : 1` will be
+      // sitting there until somebody re-runs install.sh. That machine's doctor
+      // is the one you most want to work.
+      const bin = fakeApp("exit-one", {
+        stderr: "[wwb] boot: ready",
+        body: JSON.stringify(report({ tap: { enabled: false } })),
+        exit: 1,
+      });
+      const got = await collectReport(bin);
+      expect(got.tap.enabled).toBe(false);
+      // And the verdict comes from HERE, which is the point of the contract.
+      expect(exitCodeFor(evaluate(got, NOW))).toBe(1);
+    });
+
+    it("still throws when the app is genuinely missing", async () => {
+      // The distinction the old code collapsed: "the report says fail" and
+      // "there is no app" both became exit 2 with an "is it installed?" hint.
+      await expect(collectReport(join(binDir, "no-such-app"))).rejects.toThrow();
+    });
+
+    it("throws when a non-zero exit produced no JSON at all", async () => {
+      // A dyld failure, a bad signature, a bundle that dies before it prints.
+      // Nothing to score, so this must NOT be reported as a red report.
+      const bin = fakeApp("dyld-death", {
+        stderr: "dyld: Library not loaded: @rpath/Electron Framework",
+        body: "",
+        exit: 133,
+      });
+      await expect(collectReport(bin)).rejects.toThrow();
+    });
   });
 
   it("defaults to the frozen /Applications path", () => {

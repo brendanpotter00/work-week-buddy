@@ -31,6 +31,12 @@ export class FakeSignalSource implements SignalSource {
 
   // ── knobs a test turns ──────────────────────────────────────────────────
   cameraOn = false;
+  /**
+   * How many cameras this fake Mac has. Two by default — a built-in and an
+   * external — because a fixture that ships one device cannot tell a test that
+   * lost the device list apart from a test that never had one.
+   */
+  cameraDeviceCount = 2;
   micOn = false;
   tapEnabled = true;
   keyboardBits = true;
@@ -83,6 +89,7 @@ export class FakeSignalSource implements SignalSource {
       keyboardBitsGranted: this.keyboardBits,
       grantedMask: this.keyboardBits ? "0xfc01cfe" : "0xfc000fe",
       cameraInUse: this.cameraOn,
+      cameraDeviceCount: this.cameraDeviceCount,
       micInUse: this.micOn,
       probedAtMs: at,
       counters: {
