@@ -107,21 +107,42 @@ export const Menu = {
 export interface FakeWindow {
   destroyed: boolean;
   sent: Recorded[];
+  /** Zoom state, for `wwb:window:zoom` (double-click on the title bar). */
+  maximized: boolean;
+  maximizable: boolean;
+  zoomCalls: string[];
   isDestroyed(): boolean;
   webContents: { isDestroyed(): boolean; send(channel: string, payload: unknown): void };
+  isMaximizable(): boolean;
+  isMaximized(): boolean;
+  maximize(): void;
+  unmaximize(): void;
   destroy(): void;
 }
 
 const windows: FakeWindow[] = [];
 
-export function addFakeWindow(): FakeWindow {
+export function addFakeWindow(over: { maximizable?: boolean } = {}): FakeWindow {
   const win: FakeWindow = {
     destroyed: false,
     sent: [],
+    maximized: false,
+    maximizable: over.maximizable ?? true,
+    zoomCalls: [],
     isDestroyed: () => win.destroyed,
     webContents: {
       isDestroyed: () => win.destroyed,
       send: (channel, payload) => win.sent.push({ channel, payload }),
+    },
+    isMaximizable: () => win.maximizable,
+    isMaximized: () => win.maximized,
+    maximize: () => {
+      win.maximized = true;
+      win.zoomCalls.push("maximize");
+    },
+    unmaximize: () => {
+      win.maximized = false;
+      win.zoomCalls.push("unmaximize");
     },
     destroy: () => {
       win.destroyed = true;
@@ -135,6 +156,13 @@ export function addFakeWindow(): FakeWindow {
 
 export const BrowserWindow = {
   getAllWindows: (): FakeWindow[] => windows.filter((w) => !w.destroyed),
+  /**
+   * `wwb:window:zoom` scopes itself to the window that asked, so the fake has
+   * to be able to answer "which window is this sender in?" too. `senderEvent`
+   * carries the `webContents` object identity; this looks it up.
+   */
+  fromWebContents: (wc: unknown): FakeWindow | null =>
+    windows.find((w) => w.webContents === wc) ?? null,
 };
 
 export type InvokeHandler = (e: unknown, payload: unknown) => unknown;
@@ -149,9 +177,16 @@ export const ipcMain = {
   },
 };
 
-/** An `IpcMainInvokeEvent` with only the field the sender guard reads. */
-export function senderEvent(url: string): { senderFrame: { url: string } } {
-  return { senderFrame: { url } };
+/**
+ * An `IpcMainInvokeEvent` with the two things main reads off it: the frame URL
+ * the sender guard checks, and the `sender` that `BrowserWindow.fromWebContents`
+ * resolves back to a window.
+ */
+export function senderEvent(
+  url: string,
+  from?: FakeWindow,
+): { senderFrame: { url: string }; sender: unknown } {
+  return { senderFrame: { url }, sender: from?.webContents ?? null };
 }
 
 export const appEvents = new Emitter();

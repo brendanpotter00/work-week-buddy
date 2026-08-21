@@ -43,6 +43,7 @@ import {
 import { AlertBanner } from "@/renderer/components/alert-banner";
 import { DeviceName } from "@/renderer/components/device-name";
 import { LiveStopwatch } from "@/renderer/components/live-stopwatch";
+import { TitleBar } from "@/renderer/components/title-bar";
 import { Badge } from "@/renderer/components/ui/badge";
 import { Button } from "@/renderer/components/ui/button";
 import {
@@ -200,10 +201,14 @@ export function App(): React.ReactElement {
 
   return (
     <div data-view="dashboard" className="min-h-svh bg-background">
-      <div className="mx-auto w-full max-w-[1100px] px-8 py-10">
-        {/* Header. `titleBarStyle: "hiddenInset"` leaves no draggable chrome,
-            so the header is the drag region — and the buttons opt back out. */}
-        <header className="flex items-start justify-between [-webkit-app-region:drag]">
+      {/* THE TITLE BAR, and it is a direct child of the view root on purpose:
+          full window width, above the content column rather than inside it.
+          It used to be the `<header>` down in that column, which is why the
+          top 40 px and both 32-px gutters — the whole strip a hand reaches for
+          — were not draggable. `components/title-bar.tsx` has the story.
+          `sticky`, so scrolling the dashboard never takes it away. */}
+      <TitleBar window="dashboard">
+        <div className="mx-auto flex w-full max-w-[1100px] items-start justify-between px-8 pb-2">
           <div>
             <h1 className="font-heading text-[22px] leading-tight font-semibold tracking-tight">
               Work Week Buddy
@@ -226,8 +231,13 @@ export function App(): React.ReactElement {
             </Button>
             <ThemeToggle />
           </div>
-        </header>
+        </div>
+      </TitleBar>
 
+      {/* pb-10 only: the title bar above owns the top inset now, and its own
+          pb-2 plus this first section's mt-4 come to the 24 px the stopwatch's
+          mt-6 used to put under the header. Nothing moved. */}
+      <div className="mx-auto w-full max-w-[1100px] px-8 pb-10">
         {errors.length > 0 ? (
           <AlertBanner
             variant="error"
@@ -270,7 +280,10 @@ export function App(): React.ReactElement {
             at the last real signal — while the stopwatch's digits are a wall
             clock. They are allowed to differ by up to the idle timeout, and
             naming this one is what stops that reading as a bug. */}
-        <section className="mt-4 flex items-center gap-3 rounded-lg border border-border bg-card px-4 py-3">
+        <section
+          data-slot="status-strip"
+          className="mt-4 flex items-center gap-3 rounded-lg border border-border bg-card px-4 py-3"
+        >
           <span className="flex items-center gap-1.5 text-sm text-muted-foreground">
             <Laptop className="size-3.5" />
             {status?.machineLabel || "this Mac"}
@@ -369,7 +382,10 @@ export function App(): React.ReactElement {
         </section>
 
         {/* Heatmap */}
-        <section className="mt-4 rounded-lg border border-border bg-card px-5 py-5">
+        <section
+          data-slot="heatmap"
+          className="mt-4 rounded-lg border border-border bg-card px-5 py-5"
+        >
           <div className="flex items-baseline justify-between">
             <h2 className="font-heading text-sm font-medium">Daily hours</h2>
             <span className="text-xs text-muted-foreground tabular-nums">

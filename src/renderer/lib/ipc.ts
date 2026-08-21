@@ -102,6 +102,8 @@ export const ipc = {
     bridge().invoke("wwb:settings:set", p),
   openDashboard: (): Promise<void> => bridge().invoke("wwb:window:openDashboard", undefined),
   openSettings: (): Promise<void> => bridge().invoke("wwb:window:openSettings", undefined),
+  /** Double-click on the title bar. See the channel's note in `ipc-types.ts`. */
+  zoomWindow: (): Promise<void> => bridge().invoke("wwb:window:zoom", undefined),
 } as const;
 
 export function messageOf(e: unknown): string {

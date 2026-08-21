@@ -8,7 +8,7 @@
  */
 import { BrowserWindow, app, shell } from "electron";
 import { join } from "node:path";
-import { ROUTE, WINDOW_SIZE } from "../shared/constants";
+import { ROUTE, TRAFFIC_LIGHT, WINDOW_SIZE } from "../shared/constants";
 import { log } from "./log";
 import { APP_ORIGIN } from "./protocol";
 
@@ -171,7 +171,7 @@ export async function showDashboard(backgroundColor = "#FFFFFF"): Promise<Browse
     show: false,
     title: "Work Week Buddy",
     titleBarStyle: "hiddenInset",
-    trafficLightPosition: { x: 18, y: 18 },
+    trafficLightPosition: TRAFFIC_LIGHT.dashboard,
     // Painted before the renderer's first frame. Main cannot read the
     // renderer's localStorage, so the theme is mirrored into main-side settings.
     backgroundColor,
@@ -205,7 +205,7 @@ export async function showOnboarding(backgroundColor = "#FFFFFF"): Promise<Brows
     show: false,
     title: "Permissions",
     titleBarStyle: "hiddenInset",
-    trafficLightPosition: { x: 14, y: 14 },
+    trafficLightPosition: TRAFFIC_LIGHT.onboarding,
     backgroundColor,
     webPreferences: baseWebPreferences(),
   });
@@ -243,7 +243,7 @@ export async function showSettings(backgroundColor = "#FFFFFF"): Promise<Browser
     show: false,
     title: "Settings",
     titleBarStyle: "hiddenInset",
-    trafficLightPosition: { x: 14, y: 14 },
+    trafficLightPosition: TRAFFIC_LIGHT.settings,
     backgroundColor,
     webPreferences: baseWebPreferences(),
   });

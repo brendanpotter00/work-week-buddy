@@ -522,6 +522,54 @@ describe("the settings window", () => {
   });
 });
 
+describe("double-click on the title bar", () => {
+  /** `invoke`, but from a specific window rather than from nowhere. */
+  function invokeFrom(win: ReturnType<typeof addFakeWindow>, channel: string) {
+    const handler = fakeIpcMain.handlers.get(channel);
+    if (!handler) throw new Error(`no handler for ${channel}`);
+    return handler(senderEvent(`${APP_ORIGIN}/index.html`, win), undefined);
+  }
+
+  it("zooms the window that was double-clicked, and un-zooms on the next one", async () => {
+    // A `-webkit-app-region: drag` region gets NO double-click behaviour from
+    // macOS — measured on Electron 43 — so the one thing a real title bar does
+    // that a drag region does not is wired here.
+    h = await makeHarness();
+    await register();
+    const dashboard = addFakeWindow();
+    const other = addFakeWindow();
+
+    await invokeFrom(dashboard, "wwb:window:zoom");
+    expect(dashboard.isMaximized()).toBe(true);
+    // Scoped to the sender: the settings window's title bar must not zoom the
+    // dashboard.
+    expect(other.isMaximized()).toBe(false);
+
+    await invokeFrom(dashboard, "wwb:window:zoom");
+    expect(dashboard.isMaximized()).toBe(false);
+    expect(dashboard.zoomCalls).toEqual(["maximize", "unmaximize"]);
+  });
+
+  it("does nothing to a window that cannot be maximized", async () => {
+    // Onboarding is `maximizable: false` — a fixed 560 × 640 whose whole layout
+    // is sized for that rectangle. A double-click there is a no-op, not a
+    // resize into a shape nothing was measured against.
+    h = await makeHarness();
+    await register();
+    const onboarding = addFakeWindow({ maximizable: false });
+
+    await invokeFrom(onboarding, "wwb:window:zoom");
+    expect(onboarding.zoomCalls).toEqual([]);
+    expect(onboarding.isMaximized()).toBe(false);
+  });
+
+  it("does not throw when the sender has no window at all", async () => {
+    h = await makeHarness();
+    await register();
+    await expect(invoke("wwb:window:zoom")).resolves.toBeUndefined();
+  });
+});
+
 describe("the self-test", () => {
   it("runs, and the result outlives the run so the pane can say when it passed", async () => {
     h = await makeHarness();

@@ -40,6 +40,7 @@ import * as React from "react";
 import { Check, ExternalLink, KeyRound, MousePointer2, RotateCw } from "lucide-react";
 
 import { AlertBanner } from "@/renderer/components/alert-banner";
+import { TitleBar } from "@/renderer/components/title-bar";
 import { Badge } from "@/renderer/components/ui/badge";
 import { Button } from "@/renderer/components/ui/button";
 import { Switch } from "@/renderer/components/ui/switch";
@@ -147,12 +148,15 @@ export function Onboarding(): React.ReactElement {
 
   return (
     <div data-view="onboarding" className="flex h-svh flex-col overflow-hidden bg-background">
-      {/* `titleBarStyle: "hiddenInset"` leaves no chrome to drag, so the header
-          IS the drag region and its buttons opt back out. pt-8 clears the
-          traffic lights, which occupy roughly x 14–74 / y 14–27 at
-          trafficLightPosition { x: 14, y: 14 } — the title starts below them
-          because at px-7 it would otherwise start underneath them. */}
-      <header className="shrink-0 px-7 pt-8 [-webkit-app-region:drag]">
+      {/* `titleBarStyle: "hiddenInset"` leaves no chrome to drag, so this IS
+          the title bar — full window width, from the very top edge. The 32 px
+          above the title is `TITLE_BAR_INSET.onboarding`, which is the `pt-8`
+          this header already had: the traffic lights occupy roughly x 14–74 /
+          y 14–28 at `TRAFFIC_LIGHT.onboarding`, and at px-7 the title would
+          otherwise start underneath them. NOT ONE PIXEL TALLER than before —
+          this window is a fixed 560 × 640 nobody can resize and `npm run
+          smoke` requires 16 px of spare height inside it. */}
+      <TitleBar window="onboarding" className="px-7">
         <h1 className="font-heading text-[19px] leading-tight font-semibold tracking-tight">
           Two permissions
         </h1>
@@ -161,7 +165,7 @@ export function Onboarding(): React.ReactElement {
         <p className="mt-1 text-xs text-muted-foreground">
           One keeps your hours honest. The other is only the jiggler.
         </p>
-      </header>
+      </TitleBar>
 
       {/* If the copy ever outgrows the window, THIS scrolls — the page body
           never does, and nothing is clipped. Same rule as the heatmap's

@@ -393,6 +393,18 @@ export function registerIpcHandlers(runtime: AppRuntime, deps: IpcDeps): void {
     }
     await deps.showSettings();
   });
+  /**
+   * The one title-bar behaviour a drag region does not come with. Scoped to the
+   * window that asked, so the settings window's title bar zooms the settings
+   * window; `maximizable: false` (onboarding, a fixed box) makes it a no-op
+   * rather than a resize of a window whose whole layout is sized for 560 × 640.
+   */
+  handle("wwb:window:zoom", (_payload, e) => {
+    const win = BrowserWindow.fromWebContents(e.sender);
+    if (win === null || win.isDestroyed() || !win.isMaximizable()) return;
+    if (win.isMaximized()) win.unmaximize();
+    else win.maximize();
+  });
 
   // 30 s keepalive so a window created mid-change converges even if it missed
   // the push that carried the change.
