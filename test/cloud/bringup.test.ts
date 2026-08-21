@@ -51,7 +51,9 @@ function mintCounter(): () => string {
   };
 }
 
-function setup(over: { thisMachineId?: string; healthFailures?: number } = {}) {
+function setup(
+  over: { thisMachineId?: string; healthFailures?: number; authFailures?: number } = {},
+) {
   return {
     api: createCloudflareApi({
       apiToken: FAKE_API_TOKEN,
@@ -62,6 +64,7 @@ function setup(over: { thisMachineId?: string; healthFailures?: number } = {}) {
     mintToken: mintCounter(),
     fetchImpl: workerFetchFor(cloud, {
       ...(over.healthFailures === undefined ? {} : { healthFailures: over.healthFailures }),
+      ...(over.authFailures === undefined ? {} : { authFailures: over.authFailures }),
     }),
     // The TLS wait is real time in production and no time here.
     sleep: async () => undefined,
@@ -457,6 +460,26 @@ describe("failures", () => {
     const out = await run({ healthFailures: 3 });
     expect(out.ok).toBe(true);
     expect(out.steps.find((s) => s.id === "verify")?.state).toBe("done");
+  });
+
+  it("waits out a redeploy that has not reached every colo yet", async () => {
+    // On a redeploy the hostname is months old, so /health answers instantly —
+    // from whichever version is live at that instant. A brand-new token can
+    // legitimately 401 for a second or two. Calling that "the Worker rejected
+    // the token this setup just created" would send someone to re-run a
+    // deployment that is already correct.
+    const out = await run({ authFailures: 2 });
+    expect(out.error, out.error ?? "").toBeNull();
+    expect(out.ok).toBe(true);
+  });
+
+  it("gives up on a token that is still refused after the wait", async () => {
+    const out = await run({ authFailures: 99 });
+    expect(out.ok).toBe(false);
+    expect(out.error).toContain("kept rejecting the token");
+    // Everything in the cloud is real; only this Mac's half did not land.
+    expect(out.steps.find((s) => s.id === "deploy")?.state).toBe("done");
+    expect(committed).toEqual([]);
   });
 
   it("does not store anything when the Worker never answers", async () => {

@@ -717,23 +717,47 @@ async function verifyWorker(o: {
   );
 }
 
+/**
+ * Does the token this run just uploaded actually work?
+ *
+ * RETRIED, and not for the same reason `/health` is. On a REDEPLOY the hostname
+ * has existed for months, so `/health` answers instantly — from whichever
+ * version is live at that instant. A new version reaches every colo in seconds
+ * rather than atomically, so the first authenticated read can legitimately hit
+ * the previous one and 401 on a token that is completely correct. Reporting
+ * that as "the Worker rejected the token this setup just created" would send
+ * someone to re-run a deployment that is already right.
+ *
+ * A few seconds of patience, then it is a real failure and says so.
+ */
 async function assertAuthorized(o: {
   baseUrl: string;
   token: string;
   fetchImpl: typeof fetch;
+  sleep: (ms: number) => Promise<void>;
 }): Promise<void> {
-  const res = await o.fetchImpl(`${o.baseUrl}/machines`, {
-    headers: { authorization: `Bearer ${o.token}` },
-  });
-  if (res.ok) return;
-  if (res.status === 401 || res.status === 403) {
+  const waits = [0, 1000, 2000, 4000, 8000];
+  let status = 0;
+  for (const wait of waits) {
+    if (wait > 0) await o.sleep(wait);
+    const res = await o.fetchImpl(`${o.baseUrl}/machines`, {
+      headers: { authorization: `Bearer ${o.token}` },
+    });
+    if (res.ok) return;
+    status = res.status;
+    // Only an auth failure is worth waiting on — it is the one a not-yet-live
+    // version produces. Anything else is a real answer from a real Worker.
+    if (status !== 401 && status !== 403) break;
+  }
+  if (status === 401 || status === 403) {
     throw new Error(
-      `the Worker is reachable but rejected the token this setup just created. ` +
-        `That should be impossible — the same run uploaded it. Run setup again.`,
+      `the Worker is reachable but kept rejecting the token this setup just ` +
+        `uploaded. Everything in the cloud is in place — run setup again, which ` +
+        `will mint a fresh token for this Mac.`,
     );
   }
   throw new Error(
-    `the Worker is reachable but an authenticated read answered ${String(res.status)}.`,
+    `the Worker is reachable but an authenticated read answered ${String(status)}.`,
   );
 }
 

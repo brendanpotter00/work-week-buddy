@@ -400,9 +400,13 @@ function err(status: number, errors: Array<{ code: number; message: string }>): 
  */
 export function workerFetchFor(
   cloud: FakeCloudflare,
-  opts: { healthFailures?: number } = {},
+  opts: { healthFailures?: number; authFailures?: number } = {},
 ): typeof fetch {
   let remaining = opts.healthFailures ?? 0;
+  // A new Worker version reaches every colo in seconds rather than atomically,
+  // so an authenticated read right after a redeploy can hit the PREVIOUS
+  // version and reject a token that is completely correct.
+  let staleVersion = opts.authFailures ?? 0;
   return async (input, init) => {
     const url = new URL(typeof input === "string" ? input : String(input));
     if (url.pathname === "/health") {
@@ -412,6 +416,10 @@ export function workerFetchFor(
         throw new TypeError("fetch failed");
       }
       return new Response(JSON.stringify({ ok: true, ms: 1 }), { status: 200 });
+    }
+    if (staleVersion > 0) {
+      staleVersion -= 1;
+      return new Response("unauthorized", { status: 401 });
     }
     const presented = new Headers(init?.headers).get("authorization") ?? "";
     const live = ["TOKEN_PERSONAL", "TOKEN_WORK"]
