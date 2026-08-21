@@ -38,7 +38,7 @@ import {
   type Signal,
   type TrackerState,
 } from "../core";
-import type { RawSignal, NativeStatus, SignalSource } from "../native";
+import type { RawSignal, NativeStatus, SignalSource, TapRevival } from "../native";
 import {
   countIntervals,
   insertClosed,
@@ -133,6 +133,17 @@ export interface AppRuntime {
   onWatchdogTick(status: NativeStatus, atMs: number): void;
   /** The watchdog found the tap dead. Closes at the last signal we still trust. */
   onTapLost(atMs: number): void;
+  /**
+   * The watchdog found the tap off and put it back, unaided.
+   *
+   * Deliberately NOT a close. The tap went off because events were arriving
+   * faster than the callback returned, which means the owner was working; we
+   * were blind for at most one liveness beat, and ending the interval over two
+   * seconds is how a real working session becomes a pile of two-minute
+   * fragments. It is recorded so the Doctor can show how often the machine is
+   * knocking the tap over.
+   */
+  onTapRevived(atMs: number, revival: TapRevival): void;
   /**
    * Re-run the camera/mic level → edge conversion. Called by the watchdog after
    * every probe, because the 60-second mic floor cannot be satisfied by an edge
@@ -251,6 +262,9 @@ class Runtime implements AppRuntime {
   private permSnapshot: PermissionSnapshot;
   private tapLostCount = 0;
   private tapRestarts = 0;
+  private tapRevivals = 0;
+  private lastTapRevivalMs: number | null = null;
+  private lastTapRevivalOutcome: string | null = null;
   private lastWatchdogTickMs: number | null = null;
   private dbWritable = true;
   private launchedAtMs: number;
@@ -668,6 +682,19 @@ class Runtime implements AppRuntime {
     this.emit("tap-health");
   }
 
+  onTapRevived(atMs: number, revival: TapRevival): void {
+    void atMs;
+    this.tapRevivals++;
+    this.lastTapRevivalMs = atMs;
+    this.lastTapRevivalOutcome = revival.outcome;
+    // NOTHING IS CLOSED HERE, and that is the point. See the doc comment on
+    // `AppRuntime.onTapRevived`. The tap being knocked over is a fact about
+    // this machine, not about whether the owner was working — and the app now
+    // knows the difference, where before every knock became a `tap_lost` row
+    // and a truncated interval.
+    this.emit("tap-health");
+  }
+
   // ── power ────────────────────────────────────────────────────────────────
 
   async onSuspend(atMs: number): Promise<void> {
@@ -842,18 +869,35 @@ class Runtime implements AppRuntime {
 
   tapHealth(): TapHealth {
     const s = this.status;
-    const hex = s?.grantedMask ?? "0x0";
+    // A PROCESS WITH NO TAP MUST NOT REPORT A DENIED PERMISSION.
+    //
+    // This used to fall back to "0x0", which reads exactly like "Input
+    // Monitoring was refused" — and `--doctor` never installs a tap at all, so
+    // a perfectly healthy machine produced `grantedMaskHex: 0x0` and
+    // `keyboardBitsPresent: false` and sent two rounds of debugging in the
+    // wrong direction. "-" is what `probe()` already returns when there is no
+    // tap; the mask is UNKNOWN here, not zero.
+    const probed = s !== null;
+    const hex = s?.grantedMask ?? "-";
     return {
       created: s?.tapInstalled ?? false,
       enabled: s?.tapEnabled ?? false,
       grantedMaskHex: hex,
-      keyboardBitsPresent: maskHasBits(hex, KEY_BITS),
-      flagsChangedBitPresent: maskHasBits(hex, FLAGS_CHANGED_BIT),
+      keyboardBitsPresent: probed && maskHasBits(hex, KEY_BITS),
+      flagsChangedBitPresent: probed && maskHasBits(hex, FLAGS_CHANGED_BIT),
+      probed,
       runLoopModes: ["default", "common"],
       eventsSinceLaunch: s?.counters.realEvents ?? 0,
       lastEventMs: this.lastSignalMsEver,
       disabledByTimeoutCount: s?.counters.disableNotices ?? 0,
-      reEnabledCount: this.tapRestarts,
+      disabledByUserInputCount: s?.counters.disableNoticesByUserInput ?? 0,
+      reEnabledCount: s?.counters.reEnables ?? 0,
+      reEnableFailedCount: s?.counters.reEnableFailures ?? 0,
+      revivedCount: this.tapRevivals,
+      lastRevivalMs: this.lastTapRevivalMs,
+      lastRevivalOutcome: this.lastTapRevivalOutcome,
+      drainsOverdue: s?.counters.drainsOverdue ?? 0,
+      worstDrainLagMs: s?.counters.worstDrainLagMs ?? 0,
       tapLostRows: this.tapLostCount,
       lastWatchdogTickMs: this.lastWatchdogTickMs,
     };

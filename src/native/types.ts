@@ -42,10 +42,29 @@ export interface NativeCountersSnapshot {
    */
   readonly foreignNullEvents: number;
   readonly disableNotices: number;
+  /** Of those, the ones that were kCGEventTapDisabledByUserInput. */
+  readonly disableNoticesByUserInput: number;
   readonly lastDisableType: number;
+  readonly lastDisableAtMs: number;
+  /** Re-enables issued from inside the disable-notice callback. */
+  readonly reEnables: number;
+  /**
+   * Re-enables that did not take. Non-zero means the callback cannot heal the
+   * tap by itself and the watchdog's liveness beat is what is keeping the app
+   * measuring. Before this counter existed the re-enable was issued and never
+   * verified, so nothing could tell those two states apart.
+   */
+  readonly reEnableFailures: number;
   readonly callbackErrors: number;
   readonly lastCallbackError: string;
-  readonly inlineDrains: number;
+  /**
+   * Drains that ran more than 50 ms after they were scheduled — the main
+   * thread was starved. Recorded, never acted on from inside the tap callback:
+   * doing the drain there is a synchronous SQLite write on the one code path
+   * where a slow return costs you the tap.
+   */
+  readonly drainsOverdue: number;
+  readonly worstDrainLagMs: number;
   /**
    * AGENTS.md trap #4. A koffi field read that came back as a BigInt rather
    * than a Number. Non-zero means the ours-vs-theirs comparison is at risk of
@@ -65,6 +84,27 @@ export interface NativeStatus {
   readonly micInUse: boolean;
   readonly probedAtMs: number;
   readonly counters: NativeCountersSnapshot;
+}
+
+/**
+ * What it took to get the tap back.
+ *
+ *  - `healthy`    it was never off; the check cost one boolean read
+ *  - `reenabled`  the port was still ours and CGEventTapEnable(true) took
+ *  - `rebuilt`    the re-enable was refused, so the tap was torn down and
+ *                 reinstalled
+ *  - `dead`       neither worked — no Input Monitoring, or not a GUI session
+ *
+ * `reenabled` and `rebuilt` are recoveries: input was invisible for at most one
+ * liveness beat, and the open interval is NOT closed for that. Only `dead` is a
+ * tap loss, and only a tap loss closes an interval — at the last signal we
+ * still trust, never at now().
+ */
+export type TapRevivalOutcome = "healthy" | "reenabled" | "rebuilt" | "dead";
+
+export interface TapRevival {
+  readonly outcome: TapRevivalOutcome;
+  readonly detail: string;
 }
 
 export interface Permissions {
@@ -107,6 +147,20 @@ export interface SignalSource {
    * clock — so this must stay passive.
    */
   probe(): NativeStatus;
+  /**
+   * One CoreGraphics boolean: is the tap still armed?
+   *
+   * Split out from `probe()` because `probe()` also walks the CoreMediaIO and
+   * CoreAudio device lists, which are synchronous HAL round trips and far too
+   * expensive to run at the cadence a dead tap has to be caught at. This one
+   * is cheap enough to ask every couple of seconds, and posts nothing.
+   */
+  tapAlive(): boolean;
+  /**
+   * Get the tap back without posting anything. Called by the watchdog's
+   * liveness beat whenever `tapAlive()` says no.
+   */
+  reviveTap(): TapRevival;
   /** Full teardown + rebuild after a tap death. Caller logs the tap_lost row. */
   restart(): NativeStatus;
   /** Post one stamped null event. False (and nothing posted) without Accessibility. */

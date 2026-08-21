@@ -14,6 +14,7 @@ import type {
   SelfTestReport,
   SignalSink,
   SignalSource,
+  TapRevival,
 } from "./types";
 
 export class MacSignalSource implements SignalSource {
@@ -64,6 +65,15 @@ export class MacSignalSource implements SignalSource {
       probedAtMs: at,
       counters: { ...native.counters },
     };
+  }
+
+  tapAlive(): boolean {
+    return this.started && native.isTapEnabled();
+  }
+
+  reviveTap(): TapRevival {
+    if (!this.started) return { outcome: "dead", detail: "source not started" };
+    return native.reviveTap(this.sink);
   }
 
   restart(): NativeStatus {

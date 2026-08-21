@@ -225,14 +225,32 @@ export interface FlushResult {
 export interface TapHealth {
   created: boolean;
   enabled: boolean;
+  /** "-" when this process has no tap at all — NOT "0x0", which reads as denied. */
   grantedMaskHex: string;
   keyboardBitsPresent: boolean;
   flagsChangedBitPresent: boolean;
+  /**
+   * False when nothing has probed the tap in this process — `--doctor` never
+   * installs one. Without this flag the two mask fields above are indelibly
+   * ambiguous: "denied" and "never asked" look identical.
+   */
+  probed: boolean;
   runLoopModes: Array<"default" | "common">;
   eventsSinceLaunch: number;
   lastEventMs: number | null;
   disabledByTimeoutCount: number;
+  disabledByUserInputCount: number;
+  /** Re-enables issued from the disable-notice callback. */
   reEnabledCount: number;
+  /** Of those, the ones that did not take. Non-zero is a real finding. */
+  reEnableFailedCount: number;
+  /** Times the liveness beat found the tap off and put it back, unaided. */
+  revivedCount: number;
+  lastRevivalMs: number | null;
+  lastRevivalOutcome: string | null;
+  /** Drains that ran >50 ms late — the main thread was starved. */
+  drainsOverdue: number;
+  worstDrainLagMs: number;
   tapLostRows: number;
   lastWatchdogTickMs: number | null;
 }

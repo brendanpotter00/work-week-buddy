@@ -233,9 +233,36 @@ describe("trap #13 — the disable notice is handled before any field read", () 
   it("does no I/O in the callback — the budget is 1.6 microseconds", () => {
     // A 1.6-second block gets the tap disabled by the OS. Everything heavy
     // happens on the setImmediate turn.
-    expect(body).toMatch(/setImmediate\(drain\)/);
+    expect(body).toMatch(/setImmediate\(scheduledDrain\)/);
     expect(body).not.toMatch(/console\./);
     expect(body).not.toMatch(/require\(/);
+  });
+
+  it("NEVER drains from inside the callback", () => {
+    // `drain()` calls the sink, which runs the reducer, which writes the
+    // journal to SQLite and pushes to the tray and the renderer — synchronously,
+    // on the one code path in this codebase where a slow return costs you the
+    // tap. docs/IMPL_NATIVE.md's callback budget says it in as many words:
+    // "It must never call SQLite, webContents.send, console.log to a file, or
+    // the reducer's close path."
+    //
+    // It used to happen here, as a "belt and braces" fallback whenever
+    // setImmediate was 50 ms late — i.e. precisely when the main thread was
+    // already starved and a long callback was most likely. One hiccup became a
+    // tap macOS disables, and the guard re-armed itself on the very next event
+    // after every recovery, so it stayed dead. Every stored interval in the
+    // owner's database was two to six minutes long.
+    expect(body).not.toMatch(/\bdrain\(\)/);
+  });
+
+  it("verifies the re-enable instead of taking it on trust", () => {
+    // macOS delivers the disable notice LAZILY — measured, it waits for the
+    // next event, which is the very thing we have gone blind to. This callback
+    // is the app's one chance to heal itself in place, so whether it worked is
+    // a fact worth recording rather than assuming.
+    const notice = body.slice(body.indexOf("TapDisabledByTimeout"));
+    expect(notice).toMatch(/CGEventTapEnable\(tapPort, true\)/);
+    expect(notice).toMatch(/if \(!CGEventTapIsEnabled\(tapPort\)\) counters\.reEnableFailures\+\+/);
   });
 });
 

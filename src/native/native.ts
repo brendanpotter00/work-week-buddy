@@ -32,6 +32,7 @@ import type {
   SelfTestCheck,
   SelfTestReport,
   SignalSink,
+  TapRevival,
 } from "./types";
 
 if (process.platform !== "darwin") {
@@ -704,15 +705,38 @@ let registeredCallback: bigint | null = null;
 let selfTestSaw: ((ev: CGEventRef, type: number) => void) | null = null;
 let debugStallMs = 0; // M1 gate (d) only
 
+/**
+ * A drain that ran this long after it was scheduled means the Node loop was
+ * starved. It is recorded, never acted on from inside the callback — see the
+ * comment on step 2 of `tapCallback`.
+ */
+const DRAIN_LATE_MS = 50;
+
 export const counters = {
   realEvents: 0,
   ourEvents: 0,
   foreignNullEvents: 0,
   disableNotices: 0,
+  disableNoticesByUserInput: 0,
   lastDisableType: 0,
+  lastDisableAtMs: 0,
+  /** Re-enables issued from inside the disable-notice callback. */
+  reEnables: 0,
+  /**
+   * Re-enables that DID NOT TAKE — `CGEventTapEnable(tap, true)` returned and
+   * `CGEventTapIsEnabled` still said false. Non-zero means the callback cannot
+   * heal the tap on its own and the watchdog's revive path is carrying the app.
+   * Nothing checked this before: the re-enable was issued and never verified,
+   * so "the recovery path exists" and "the recovery works" were never the same
+   * statement.
+   */
+  reEnableFailures: 0,
   callbackErrors: 0,
   lastCallbackError: "",
-  inlineDrains: 0,
+  /** Drains that ran more than DRAIN_LATE_MS after being scheduled. */
+  drainsOverdue: 0,
+  /** The worst such lateness. A field diagnosis of a starved main thread. */
+  worstDrainLagMs: 0,
   get numberContractViolations(): number {
     return numberContractViolations;
   },
@@ -736,17 +760,48 @@ function tapCallback(_proxy: bigint | null, type: number, event: bigint | null):
     if (type === EventType.TapDisabledByTimeout || type === EventType.TapDisabledByUserInput) {
       counters.disableNotices++;
       counters.lastDisableType = type;
-      if (tapPort !== null) CGEventTapEnable(tapPort, true);
+      counters.lastDisableAtMs = Date.now();
+      if (type === EventType.TapDisabledByUserInput) counters.disableNoticesByUserInput++;
+      if (tapPort !== null) {
+        CGEventTapEnable(tapPort, true);
+        counters.reEnables++;
+        // VERIFY IT. Measured: macOS delivers this notice LAZILY — it rides
+        // along with the next event that would have been delivered, not on a
+        // timer. Pumping the run loop for three seconds after a disable
+        // produced no notice at all; posting one event produced it instantly.
+        // So this callback is the app's only chance to heal itself, it comes
+        // exactly once, and it must not be taken on trust.
+        if (!CGEventTapIsEnabled(tapPort)) counters.reEnableFailures++;
+      }
       return event;
     }
 
-    // 2 ─ Belt and braces: if setImmediate has not run in 50 ms the loop is
-    //     starved, so drain inline. A non-zero inlineDrains counter in the field
-    //     is a real finding, not noise.
-    if (drainScheduled && Date.now() - drainScheduledAtMs > 50) {
-      counters.inlineDrains++;
-      drain();
-    }
+    // 2 ─ NO DRAIN HERE, EVER.
+    //
+    //     This step used to be a "belt and braces" inline `drain()` whenever
+    //     setImmediate was more than 50 ms late. `drain()` calls the sink,
+    //     which runs the reducer, which writes the journal to SQLite and
+    //     pushes to the tray and the renderer — all of it synchronously, on
+    //     the CGEventTap callback, which is the one place in this codebase
+    //     where a slow return is fatal. docs/IMPL_NATIVE.md's own callback
+    //     budget forbids exactly that: "It must never call SQLite,
+    //     `webContents.send`, `console.log` to a file, or the reducer's close
+    //     path."
+    //
+    //     Worse, it fired precisely when the main thread was ALREADY starved,
+    //     which is the moment a long callback is most likely — so a single
+    //     hiccup became a tap that macOS disables, and then re-disables on the
+    //     very next event after every recovery, because the guard re-arms
+    //     itself. That is a tap that dies every few minutes forever out of one
+    //     transient stall.
+    //
+    //     Nothing is lost by removing it. The coalesced counts sit in
+    //     `pending` until the loop recovers, and `drain()` emits the MAXIMUM
+    //     hardware timestamp, so the interval still ends at the true last
+    //     keystroke. The countdown that could have closed it early is a timer
+    //     on the same starved loop and cannot fire either. The lateness is
+    //     recorded in `drainsOverdue` / `worstDrainLagMs` instead, which is
+    //     the diagnosis the inline drain was really there to provide.
 
     // 3 ─ Our own jiggle: never a signal, ever. (Traps #4, #5, #6 all land here.)
     if (isOurs(ev)) {
@@ -787,7 +842,7 @@ function tapCallback(_proxy: bigint | null, type: number, event: bigint | null):
     if (!drainScheduled) {
       drainScheduled = true;
       drainScheduledAtMs = Date.now();
-      setImmediate(drain);
+      setImmediate(scheduledDrain);
     }
 
     if (debugStallMs > 0) {
@@ -835,6 +890,27 @@ function drain(): void {
     if (s.atMs > counters.lastRealSignalMs) counters.lastRealSignalMs = s.atMs;
     sink(s);
   }
+}
+
+/**
+ * What `setImmediate` actually schedules.
+ *
+ * The lateness accounting lives HERE and not in `drain()` on purpose: `drain()`
+ * must contain no `Date.now()` at all, because a wall-clock read in the path
+ * that stamps signals is how an interval ends at the moment of noticing instead
+ * of at the last keystroke. There is a source-text test that enforces it.
+ *
+ * A large `worstDrainLagMs` in the field means the main thread was held for
+ * that long — which is the condition that gets the tap disabled. It is a
+ * diagnosis, not a trigger: nothing reacts to it from inside the callback.
+ */
+function scheduledDrain(): void {
+  const lag = Date.now() - drainScheduledAtMs;
+  if (lag > DRAIN_LATE_MS) {
+    counters.drainsOverdue++;
+    if (lag > counters.worstDrainLagMs) counters.worstDrainLagMs = lag;
+  }
+  drain();
 }
 
 /** M1 gate (d) only. Never called in production; never wired to a menu item. */
@@ -930,6 +1006,57 @@ export function isTapEnabled(): boolean {
 export function restartTap(nextSink: SignalSink): void {
   removeTap();
   installTap(nextSink);
+}
+
+/**
+ * Get the tap back, by whatever means, without posting a single event.
+ *
+ * THE REASON THIS EXISTS. When macOS disables a tap it does NOT tell you
+ * promptly. Measured on this machine: a callback blocked for 6 s with a burst
+ * of events queued behind it left `CGEventTapIsEnabled` false, and then three
+ * full seconds of pumping the run loop produced NO disable notice at all. The
+ * notice only arrived when the next event did — it rides along with traffic
+ * rather than arriving on its own.
+ *
+ * For an app whose entire job is to see input, that is the worst possible
+ * delivery guarantee: the one channel that could tell us we have gone deaf is
+ * the channel we have gone deaf on. So the tap-disabled callback cannot be the
+ * recovery mechanism. Something has to ASK, on a clock, and that is this
+ * function plus the watchdog's liveness beat.
+ *
+ * It is safe to call as often as you like: the healthy path is a single
+ * CoreGraphics boolean read and returns immediately. It posts nothing, so it is
+ * not a jiggler (AGENTS.md #7) and it does not touch the idle clock.
+ */
+export function reviveTap(nextSink: SignalSink): TapRevival {
+  if (tapPort === null) {
+    // No port at all — either we were never installed, or a previous rebuild
+    // failed halfway. Either way the only move is a fresh install.
+    try {
+      installTap(nextSink);
+      return { outcome: "rebuilt", detail: "no port; installed a new tap" };
+    } catch (err) {
+      return { outcome: "dead", detail: String(err) };
+    }
+  }
+
+  if (CGEventTapIsEnabled(tapPort)) return { outcome: "healthy", detail: "" };
+
+  // Cheapest first: the port is still ours, just switched off.
+  CGEventTapEnable(tapPort, true);
+  if (CGEventTapIsEnabled(tapPort)) {
+    return { outcome: "reenabled", detail: "CGEventTapEnable took" };
+  }
+
+  // It did not take. The port itself is no good — rebuild from scratch.
+  try {
+    restartTap(nextSink);
+  } catch (err) {
+    return { outcome: "dead", detail: String(err) };
+  }
+  return isTapEnabled()
+    ? { outcome: "rebuilt", detail: "re-enable refused; rebuilt the tap" }
+    : { outcome: "dead", detail: "rebuilt tap is still not enabled" };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

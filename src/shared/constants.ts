@@ -73,7 +73,19 @@ export const DEFAULTS = {
   cameraOnlyMaxMs: 6 * 60 * 60_000,
   micMinCaptureMs: 60_000,
   jigglerIntervalMs: 30_000,
+  /** The EXPENSIVE half of the watchdog: camera, mic, granted mask. */
   watchdogMs: 5 * 60_000,
+  /**
+   * The CHEAP half: one `CGEventTapIsEnabled` read, and a re-arm if it says no.
+   *
+   * macOS never tells you promptly that it has disabled your tap — measured,
+   * the notice waits for the next event, which is the very thing you have gone
+   * blind to. So this is the clock that actually catches a dead tap, and its
+   * period is the worst-case amount of work that can vanish without a trace.
+   * Two seconds is small enough that the interval is not worth closing over;
+   * five minutes was large enough to make every stored session a fragment.
+   */
+  tapLivenessMs: 2_000,
   trayRefreshMs: 60_000,
   /** 1 = Monday. A work week's week is a work week. */
   weekStart: 1,
