@@ -106,14 +106,18 @@ run() {
   "$@"
 }
 
-# scripts/launch-agent.sh, carrying whatever destinations this run is using.
-# Built with `set --` rather than an array because macOS ships bash 3.2, where
-# expanding an empty array under `set -u` is itself an error — and the flags
-# genuinely can contain spaces ("/Applications/Work Week Buddy.app").
+# The three functions below all build their arguments with `set --` rather than
+# an array, because macOS ships bash 3.2, where expanding an empty array under
+# `set -u` is itself an "unbound variable" error — and the flags genuinely can
+# contain spaces ("/Applications/Work Week Buddy.app").
+#
 # `--keychain` is passed ONLY when it has been overridden. On the default login
-# keychain the flag is redundant — codesign already searches it — and this is
-# the one command in the flow that cannot be tested (it needs a trusted
-# certificate), so it stays byte-identical to what has always been run.
+# keychain the flag is redundant, because codesign already searches it. (It is
+# NOT a licence to point codesign anywhere: --keychain says which keychain to
+# PREFER, not where codesign may look, so a keychain outside the search list
+# stays invisible and signing fails with "no identity found". That error is what
+# this repo spent a release misreading as a trust problem.)
+#
 # Resolves the leaf's SHA-1. Deliberately NOT `find-identity -v` — see the
 # precondition block below, and scripts/make-signing-cert.sh's header for the
 # measurements. Signing by hash rather than by common name also removes the
