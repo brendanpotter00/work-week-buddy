@@ -156,8 +156,34 @@ export class FakeSignalSource implements SignalSource {
     return this.perms;
   }
 
+  /**
+   * What the next `selfTest()` will say.
+   *
+   *  - `"throw"` is its own case because a check that could not RUN is not a
+   *    check that passed, and main has to prove it treats the two alike.
+   *  - `"hang"` never settles. The real check takes 6–8 seconds and blocks the
+   *    main thread in the middle of it, so "the caller did not await this" is a
+   *    property worth being able to assert rather than infer.
+   */
+  selfTestVerdict: "pass" | "fail" | "throw" | "hang" = "pass";
+  /** Every `selfTest()` call. Assert on the count, never on a side effect. */
+  selfTestRuns = 0;
+
   async selfTest(): Promise<SelfTestReport> {
-    return { ok: true, checks: [{ name: "fake", ok: true, detail: "no native calls" }] };
+    this.selfTestRuns++;
+    if (this.selfTestVerdict === "hang") return new Promise<SelfTestReport>(() => {});
+    if (this.selfTestVerdict === "throw") throw new Error("fake: the self-test could not run");
+    const ok = this.selfTestVerdict === "pass";
+    return {
+      ok,
+      checks: [
+        {
+          name: "userData read as a number",
+          ok,
+          detail: ok ? "no native calls" : "read back a BigInt, not a number",
+        },
+      ],
+    };
   }
 
   // ── the test driver ─────────────────────────────────────────────────────

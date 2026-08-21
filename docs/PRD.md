@@ -28,7 +28,7 @@ A **signal** is evidence a human is present. There are exactly two:
 |---|---|---|
 | Real input | keyboard or mouse, delivered by a listen-only event tap | Includes modifier-only presses (shift/cmd/ctrl/fn), which arrive on a separate channel — see §3.6 |
 | Camera in use | any camera in use by any process | Camera on = meeting = work, per the brief. No exceptions. |
-| Microphone in use **during a meeting** | mic captured **and** a meeting app is running | Scoped deliberately — see §3.5. Covers audio-only and camera-off calls. |
+| Microphone in use | mic captured by **any** process for at least 60 seconds | Not scoped to meeting apps — see §3.5. Covers audio-only calls, camera-off calls, dictation and recording alike. |
 
 Explicitly **not** signals: our own jiggler, the keep-awake toggle, app UI interaction, network activity, running processes on their own, window titles.
 
@@ -60,23 +60,30 @@ The camera is a *level*, not an *edge* — there is no "camera event" to reset a
 
 A camera-only interval (in a meeting, not touching the machine) is capped, so a forgotten Zoom window or a virtual camera left running cannot log a 14-hour day.
 
-### 3.5 Microphone — scoped to meetings only
+### 3.5 Microphone — in use means working
 
-Without this, an audio-only call or a camera-off Zoom produces no signal at all and those hours vanish silently. With it done naively, every dictation session and every Siri invocation looks like work.
+**The rule, in one line:**
 
-**What the OS actually tells us:** whether the microphone is being *captured* — not what it hears. Ambient noise, music and video playback are all invisible to this. It also does not say *which* app is capturing.
+> the microphone has been captured for at least 60 seconds
 
-**So the signal is a conjunction:**
+That is the whole rule. Not "captured by an app on a list". Not "captured while something else is running". Captured.
 
-> microphone in use **AND** a meeting application is currently running
+**What the OS actually tells us:** whether the microphone is being *captured* — not what it hears, and not by whom. Ambient noise, music and video playback are all invisible to this.
 
-- **Meeting allowlist** (user-editable): Zoom, Slack, Microsoft Teams, Webex, Discord, and a browser with an active meeting tab where detectable.
-- **Ignore list** (user-editable, seeded): dictation and voice-input tools — Wispr Flow, OpenWhispr, and similar. These capture the mic constantly and are not meetings.
-- **Minimum duration:** a capture shorter than 60 seconds never opens an interval, so a Siri invocation or a two-second dictation blip is ignored.
+**The 60-second floor is the only qualifier, and it stays.** A capture shorter than a minute never opens an interval, so a Siri invocation, a "Hey" to a voice assistant or a two-second dictation blip is ignored. The floor is invisible to the user and not configurable — there is nothing here for anyone to get wrong.
 
-**Known limitation:** because the OS reports capture system-wide rather than per-app, a dictation app capturing *while* Zoom happens to be running will satisfy the conjunction. Accepted — in that situation the owner is almost certainly at the machine, and real input covers it anyway.
+#### The meeting-app distinction was removed, and why
 
-**This is a false-negative-averse design and a false-positive-averse one at the same time**, which is why it is a conjunction rather than either signal alone.
+This used to be a conjunction: the mic counted only alongside a running meeting application, backed by a seeded allowlist (Zoom, Slack, Teams, Webex, Discord) and a seeded ignore list of dictation tools (Wispr Flow, OpenWhispr), both user-editable in Settings. All of that is gone — the two lists, the two settings keys, the running-process check, and the conjunction itself.
+
+The reason it went:
+
+- **The premise was wrong.** The conjunction assumed a held microphone might not be work. In practice the owner holds the microphone to dictate, to record, and to take calls, and all three are working. Nobody has the mic open while not at the machine.
+- **It produced silent false negatives, which is the failure this product exists to avoid.** A day spent dictating recorded as idle, and nothing anywhere said so.
+- **It was configuration that could not be got right.** Miss a bundle id and a 50-minute call reads as idle; the lists had to be maintained forever against an open-ended world of apps, by hand, in a settings pane, to answer a question that turned out not to need answering.
+- **The OS could not answer it properly anyway.** Capture is reported system-wide, never per-process, so "a meeting app is running" was only ever a proxy — and one that fired for a dictation tool that happened to be running next to an idle Zoom.
+
+**What we gave up, stated plainly:** a microphone captured by something that genuinely is not work — a background process, another person's remote session — now counts. Two things bound that: the 60-second floor, and the same cap §3.4 puts on the camera, so a mic left open with nobody at the machine stops counting rather than logging a 14-hour day.
 
 ### 3.6 The jiggler
 
@@ -97,7 +104,7 @@ These are the ones that produce plausible-looking wrong numbers rather than erro
 | Keyboard permission not actually granted | A whole class of typing invisible; hours come out slightly low, forever | Assert the granted event mask at boot; red banner if keyboard bits are missing |
 | Modifier-only keys not in the mask | Same as above | Startup assertion |
 | Event tap silently disabled by macOS | Reads as "he never typed again"; every interval closes 15 min early and the day vanishes | Read-only watchdog; recreate the tap; log a `tap_lost` row |
-| Our jiggle misclassified as human input | Work hours inflated with fake time, 24-hour workdays | Boot self-test round-trips a tagged jiggle and asserts it is identified as ours |
+| Our jiggle misclassified as human input | Work hours inflated with fake time, 24-hour workdays | The self-test round-trips a tagged jiggle and asserts it is identified as ours. `scripts/install.sh` gates the install on `--selftest`, and **main runs it again every time the jiggler is switched on** — silent on a pass, and on a failure it switches the jiggler straight back off and raises `selftest_failed` in the degraded banner and the tray. It is not run on any other path: the risk only exists while the jiggler is running, and the jiggler ships off. |
 | Interval written with `end = now` | Every break donates 15 minutes | Unit test asserts close-at-last-signal; property test over arbitrary signal streams |
 
 ## 4. The dashboard

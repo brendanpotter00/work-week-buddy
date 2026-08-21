@@ -22,8 +22,8 @@ const START_MS = 1_700_000_000_000;
 const PLAIN_KINDS = [
   "cameraOn",
   "cameraOff",
-  "micMeetingOn",
-  "micMeetingOff",
+  "micOn",
+  "micOff",
   "jigglerOn",
   "jigglerOff",
   "pauseOn",
@@ -113,8 +113,8 @@ function extendsInterval(sig: Signal, levelHeld: boolean): boolean {
     case "realInput":
     case "cameraOn":
     case "cameraOff":
-    case "micMeetingOn":
-    case "micMeetingOff":
+    case "micOn":
+    case "micOff":
       return true;
     case "deadlineFired":
       return levelHeld;
@@ -155,8 +155,8 @@ function drive(steps: readonly Step[]): Trace {
 
     if (sig.kind === "cameraOn") cameraUp = true;
     if (sig.kind === "cameraOff") cameraUp = false;
-    if (sig.kind === "micMeetingOn") micUp = true;
-    if (sig.kind === "micMeetingOff") micUp = false;
+    if (sig.kind === "micOn") micUp = true;
+    if (sig.kind === "micOff") micUp = false;
 
     const r = reduce(s, sig, cfg, t);
     s = r.state;

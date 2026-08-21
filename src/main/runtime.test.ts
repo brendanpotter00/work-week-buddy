@@ -262,6 +262,161 @@ describe("the jiggler toggle is an interval boundary", () => {
   });
 });
 
+/**
+ * The safety check, moved off a button and onto the moment it is about it.
+ *
+ * It proves the event tap can still tell our own synthetic input apart from a
+ * person's. If it cannot, our jiggle counts as a human and the app reports
+ * twenty-four-hour workdays — silently and plausibly (AGENTS.md trap #4). That
+ * risk exists ONLY while the jiggler is running, which is why the check now
+ * fires on the switch instead of sitting permanently in Settings.
+ */
+describe("the jiggler self-test runs when the jiggler is switched on", () => {
+  /** Let the fire-and-forget verification settle. It is never awaited in main. */
+  async function settle(): Promise<void> {
+    await vi.advanceTimersByTimeAsync(1);
+  }
+
+  it("runs the check when the jiggler goes on", async () => {
+    h = await makeHarness();
+    expect(h.source.selfTestRuns).toBe(0);
+
+    await h.runtime.setToggle({ key: "jiggler", value: true, source: "tray" });
+    await settle();
+
+    expect(h.source.selfTestRuns).toBe(1);
+  });
+
+  it("does not run it when the jiggler goes off", async () => {
+    h = await makeHarness();
+    await h.runtime.setToggle({ key: "jiggler", value: true, source: "tray" });
+    await settle();
+    await h.runtime.setToggle({ key: "jiggler", value: false, source: "tray" });
+    await settle();
+
+    expect(h.source.selfTestRuns).toBe(1);
+  });
+
+  it("does not block the toggle on it — setToggle resolves while the check hangs", async () => {
+    // THE TIMING RULE. The real `selfTest()` deliberately blocks the tap
+    // callback for 2.5 s and takes 6–8 s end to end, and that callback runs on
+    // the main run loop. Awaiting it here would freeze the switch the user is
+    // holding, which is the one thing this codebase does not do.
+    //
+    // A check that never finishes at all is the sharpest form of the same
+    // question, so the fake simply never settles: if `setToggle` awaited it,
+    // this test would hang rather than fail.
+    h = await makeHarness();
+    h.source.selfTestVerdict = "hang";
+
+    const toggles = await h.runtime.setToggle({ key: "jiggler", value: true, source: "tray" });
+
+    expect(toggles.jiggler).toBe(true);
+    expect(h.source.selfTestRuns).toBe(1);
+    // Still in flight, and the app is fully usable meanwhile.
+    expect((await h.runtime.doctor()).selfTest).toBeNull();
+    expect(h.runtime.liveStatus().degraded).toEqual([]);
+  });
+
+  it("does not start a second check while one is still running", async () => {
+    h = await makeHarness();
+    h.source.selfTestVerdict = "hang";
+
+    await h.runtime.setToggle({ key: "jiggler", value: true, source: "tray" });
+    await h.runtime.setToggle({ key: "jiggler", value: false, source: "tray" });
+    await h.runtime.setToggle({ key: "jiggler", value: true, source: "tray" });
+    await settle();
+
+    expect(h.source.selfTestRuns).toBe(1);
+  });
+
+  it("says NOTHING at all when the check passes", async () => {
+    h = await makeHarness();
+    h.source.selfTestVerdict = "pass";
+
+    await h.runtime.setToggle({ key: "jiggler", value: true, source: "tray" });
+    const changesAfterToggle = h.changes.length;
+    await settle();
+
+    // No banner, no tray reason, no dialog, no second push. A pass is invisible.
+    expect(h.runtime.liveStatus().degraded).toEqual([]);
+    expect(h.changes.length).toBe(changesAfterToggle);
+    // …and the jiggler is exactly where the user put it.
+    expect(h.runtime.toggles().jiggler).toBe(true);
+  });
+
+  it("stops the jiggler and raises the alert when the check FAILS", async () => {
+    h = await makeHarness();
+    h.source.selfTestVerdict = "fail";
+
+    await h.runtime.setToggle({ key: "jiggler", value: true, source: "tray" });
+    expect(h.runtime.toggles().jiggler).toBe(true);
+    await settle();
+
+    // Refused: nothing synthetic keeps being posted while the discriminator is
+    // broken. This is the whole point of running the check here.
+    expect(h.runtime.toggles().jiggler).toBe(false);
+    // And it is loud, through the surface that already exists for exactly this.
+    expect(h.runtime.liveStatus().degraded).toContain("selftest_failed");
+  });
+
+  it("stops the jiggler when the check THROWS — an unrun check is not a pass", async () => {
+    h = await makeHarness();
+    h.source.selfTestVerdict = "throw";
+
+    await h.runtime.setToggle({ key: "jiggler", value: true, source: "tray" });
+    await settle();
+
+    expect(h.runtime.toggles().jiggler).toBe(false);
+    expect(h.runtime.liveStatus().degraded).toContain("selftest_failed");
+  });
+
+  it("clears the alert once a later run passes", async () => {
+    h = await makeHarness();
+    h.source.selfTestVerdict = "fail";
+    await h.runtime.setToggle({ key: "jiggler", value: true, source: "tray" });
+    await settle();
+    expect(h.runtime.liveStatus().degraded).toContain("selftest_failed");
+
+    h.source.selfTestVerdict = "pass";
+    await h.runtime.setToggle({ key: "jiggler", value: true, source: "tray" });
+    await settle();
+
+    expect(h.runtime.liveStatus().degraded).not.toContain("selftest_failed");
+    expect(h.runtime.toggles().jiggler).toBe(true);
+  });
+
+  it("does nothing with a verdict that arrives after the app has quit", async () => {
+    // The check takes 6–8 seconds; a quit fits inside that easily. Acting on a
+    // late verdict would dispatch through the reducer into a database the
+    // caller has already closed.
+    h = await makeHarness();
+    h.source.selfTestVerdict = "fail";
+
+    await h.runtime.setToggle({ key: "jiggler", value: true, source: "tray" });
+    await h.runtime.stop("app_quit");
+    await expect(settle()).resolves.toBeUndefined();
+
+    expect(h.runtime.liveStatus().degraded).not.toContain("selftest_failed");
+  });
+
+  it("keeps the last result in the doctor report, which is what npm run doctor reads", async () => {
+    h = await makeHarness();
+    h.source.selfTestVerdict = "fail";
+
+    await h.runtime.setToggle({ key: "jiggler", value: true, source: "tray" });
+    await settle();
+
+    const stored = (await h.runtime.doctor()).selfTest;
+    expect(stored?.passed).toBe(false);
+    expect(stored?.ranAtMs).toBe(T0);
+    expect(stored?.appVersion).toBe("0.0.0-test");
+    // Recorded PASS OR FAIL: a store that only kept the good runs would let a
+    // green date outlive the failure that replaced it.
+    expect(stored?.checks.some((c: { passed: boolean }) => !c.passed)).toBe(true);
+  });
+});
+
 describe("pause and keep-awake", () => {
   it("pausing closes the open interval at its last signal and stops the jiggler", async () => {
     h = await makeHarness();

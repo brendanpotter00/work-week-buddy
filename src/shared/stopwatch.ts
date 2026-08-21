@@ -17,7 +17,7 @@
  *    even if a display tick arrives.
  *  - IDLE — there is no session, so there are no digits. `—`, never `0:00:00`:
  *    a zeroed clock reads as "just started".
- *  - HELD OPEN by a camera or a meeting mic — credited only to
+ *  - HELD OPEN by a camera or a live microphone — credited only to
  *    `min(now, heldUntilMs)` (PRD §3.4). Past the cap the clock STOPS rather
  *    than counting a forgotten Zoom call all night.
  *  - JIGGLER ON with `countJigglerTime: 0` — this time will not survive
@@ -77,7 +77,7 @@ export interface StopwatchView {
 /** No `input` case and no cast: `HoldKind` cannot be `"input"`. */
 const HOLD_NOUN: Record<HoldKind, string> = {
   camera: "camera",
-  mic: "meeting mic",
+  mic: "microphone",
 };
 
 /**
@@ -121,6 +121,12 @@ const BREAKER_NOTE: Record<DegradedReason, string> = {
   accessibility_missing: "The jiggler cannot post. Tracking is unaffected.",
   sync_silent_72h: "Nothing has reached the cloud recently. This session is still being recorded.",
   fingerprint_mismatch: "The cloud disagrees about row counts. This session is still being recorded.",
+  // Also never selected, and deliberately so. By the time this reason exists
+  // the jiggler has already been switched back off, so nothing synthetic is
+  // being posted at this session and its digits are as true as any other's.
+  // It is loud in the banner and the tray, where it belongs; muting the clock
+  // as well would say the wrong thing about the number in front of the reader.
+  selftest_failed: "The jiggler safety check failed, so the jiggler was switched off.",
 };
 
 /**
@@ -221,7 +227,7 @@ export function stopwatchView(
       confident: false,
       tone: "capped",
       label: "Capped",
-      note: `Stopped at the ${HOLD_NOUN[held]} cap — a meeting left running does not count past this.`,
+      note: `Stopped at the ${HOLD_NOUN[held]} cap — something left running with nobody at the machine does not count past this.`,
       warn: false,
     };
   }

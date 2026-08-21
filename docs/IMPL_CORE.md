@@ -50,9 +50,10 @@ export type Signal =
   | { kind: "realInput"; atMs: Ms; keys: number; mouse: number }
   | { kind: "cameraOn"; atMs: Ms }
   | { kind: "cameraOff"; atMs: Ms }
-  /** Already conjoined with "a meeting app is running" — see §6. */
-  | { kind: "micMeetingOn"; atMs: Ms }
-  | { kind: "micMeetingOff"; atMs: Ms }
+  /** The mic has been captured for longer than the minimum — see §6. By whom
+   *  is deliberately not asked. */
+  | { kind: "micOn"; atMs: Ms }
+  | { kind: "micOff"; atMs: Ms }
   | { kind: "jigglerOn"; atMs: Ms }
   | { kind: "jigglerOff"; atMs: Ms }
   | { kind: "pauseOn"; atMs: Ms }
@@ -107,7 +108,7 @@ export interface ClosedInterval extends Omit<OpenInterval, "cameraSinceMs" | "mi
 export interface TrackerState {
   readonly open: OpenInterval | null;
   readonly cameraOn: boolean;
-  readonly micMeeting: boolean;
+  readonly micActive: boolean;
   readonly jiggler: boolean;
   readonly paused: boolean;
   /** Absolute epoch ms. Never a duration — a duration cannot survive sleep. */
@@ -115,7 +116,7 @@ export interface TrackerState {
 }
 
 export const initialState: TrackerState = {
-  open: null, cameraOn: false, micMeeting: false,
+  open: null, cameraOn: false, micActive: false,
   jiggler: false, paused: false, deadlineAtMs: null,
 };
 
@@ -197,14 +198,14 @@ function open(atMs: Ms, source: StartSource, s: TrackerState, cfg: Config): Open
     keyEvents: 0, mouseEvents: 0,
     cameraMs: 0, micMs: 0, jigglerMs: 0,
     cameraSinceMs: s.cameraOn ? atMs : NO_SIGNAL,
-    micSinceMs: s.micMeeting ? atMs : NO_SIGNAL,
+    micSinceMs: s.micActive ? atMs : NO_SIGNAL,
     jigglerSinceMs: s.jiggler ? atMs : NO_SIGNAL,
   };
 }
 
 /** A level signal (camera/mic) holds an interval open. Real input does too. */
 function anyLevelHolding(s: TrackerState): boolean {
-  return s.cameraOn || s.micMeeting;
+  return s.cameraOn || s.micActive;
 }
 
 /** Effects that always accompany a state change, so no call site can forget. */
@@ -286,13 +287,14 @@ export function reduce(s: TrackerState, sig: Signal, cfg: Config, nowMs: Ms): Re
 
     // ── camera / mic: levels that hold an interval open ──────────────────────
     case "cameraOn":
-    case "micMeetingOn": {
+    case "micOn": {
       const isCam = sig.kind === "cameraOn";
-      const lifted = { ...s, cameraOn: isCam ? true : s.cameraOn, micMeeting: isCam ? s.micMeeting : true };
+      const lifted = { ...s, cameraOn: isCam ? true : s.cameraOn, micActive: isCam ? s.micActive : true };
       if (lifted.paused) return { state: lifted, effects: [] };
       if (!lifted.open) {
-        // A meeting joined after 20 idle minutes, without touching anything,
-        // opens an interval. Camera on = meeting = work, per the brief.
+        // A call joined after 20 idle minutes, without touching anything,
+        // opens an interval. Camera on = meeting = work, per the brief; a
+        // held microphone means the same thing, per PRD §3.5.
         const o = open(sig.atMs, isCam ? "camera" : "mic", lifted, cfg);
         const next = { ...lifted, open: o };
         return { state: next, effects: settleEffects(next, cfg) };
@@ -308,9 +310,9 @@ export function reduce(s: TrackerState, sig: Signal, cfg: Config, nowMs: Ms): Re
     }
 
     case "cameraOff":
-    case "micMeetingOff": {
+    case "micOff": {
       const isCam = sig.kind === "cameraOff";
-      const dropped = { ...s, cameraOn: isCam ? false : s.cameraOn, micMeeting: isCam ? s.micMeeting : false };
+      const dropped = { ...s, cameraOn: isCam ? false : s.cameraOn, micActive: isCam ? s.micActive : false };
       if (!dropped.open) return { state: dropped, effects: [] };
       const o0 = dropped.open;
       const o: OpenInterval = {
@@ -380,7 +382,7 @@ export function reduce(s: TrackerState, sig: Signal, cfg: Config, nowMs: Ms): Re
       }
 
       // A level signal still holds it open. Push the deadline out and keep the
-      // interval alive — this is what carries a 50-minute meeting with no mouse.
+      // interval alive — this is what carries a 50-minute call with no mouse.
       if (anyLevelHolding(s)) {
         const bumped: OpenInterval = { ...o, lastRealSignalMs: Math.max(o.lastRealSignalMs, sig.atMs) };
         const next = { ...s, open: bumped };
@@ -428,9 +430,9 @@ Every cell. `—` means no state change and no effects.
 | `boot` (journalled, stale) | **persist closed at `lastRealSignalMs`**, reason `crash_recovered` | n/a | n/a |
 | `realInput`, not paused | **open** at `atMs`, source `input`, arm | extend `lastRealSignalMs` + `lastInputMs`, re-arm | same |
 | `realInput`, paused | — | — | — |
-| `cameraOn` / `micMeetingOn`, not paused | **open** at `atMs`, source `camera`/`mic` | extend `lastRealSignalMs`, start span | start span |
-| `cameraOn` / `micMeetingOn`, paused | set level only | set level only | set level only |
-| `cameraOff` / `micMeetingOff` | set level only | fold span, extend `lastRealSignalMs` | fold span, extend |
+| `cameraOn` / `micOn`, not paused | **open** at `atMs`, source `camera`/`mic` | extend `lastRealSignalMs`, start span | start span |
+| `cameraOn` / `micOn`, paused | set level only | set level only | set level only |
+| `cameraOff` / `micOff` | set level only | fold span, extend `lastRealSignalMs` | fold span, extend |
 | `jigglerOn` / `jigglerOff` | set flag | **close** (`jiggler_toggle`), set flag | **close**, set flag |
 | `pauseOn` | set flag | **close** (`pause`), set flag | **close**, set flag |
 | `pauseOff` | clear flag | n/a | n/a |
@@ -504,19 +506,18 @@ import { NO_SIGNAL, type Ms, type Signal } from "./types";
 export interface LevelInput {
   readonly cameraInUse: boolean;
   readonly micInUse: boolean;
-  readonly meetingAppRunning: boolean;
   readonly atMs: Ms;
 }
 
 export interface LevelState {
   readonly camera: boolean;
-  readonly micMeeting: boolean;
+  readonly micActive: boolean;
   /** When the mic first went up. The 60-second floor is measured from here. */
   readonly micRisingAtMs: Ms;
 }
 
 export const initialLevels: LevelState = {
-  camera: false, micMeeting: false, micRisingAtMs: NO_SIGNAL,
+  camera: false, micActive: false, micRisingAtMs: NO_SIGNAL,
 };
 
 export function levelsToSignals(
@@ -530,31 +531,30 @@ export function levelsToSignals(
       : { kind: "cameraOff", atMs: input.atMs });
   }
 
-  // THE CONJUNCTION. Mic alone is never a signal — dictation tools hold the
-  // microphone more or less continuously and are not meetings. The OS tells us
-  // the mic is captured but not by whom, so a running meeting app is the
-  // available proxy. PRD §3.5.
+  // THE MIC IS A WORK SIGNAL ON ITS OWN. PRD §3.5. This used to be conjoined
+  // with "a meeting app is running"; that half is gone, along with the two
+  // bundle-id lists behind it. Whoever holds the microphone, the owner is at
+  // the machine and working.
   const micRisingAtMs = input.micInUse
     ? (prev.micRisingAtMs === NO_SIGNAL ? input.atMs : prev.micRisingAtMs)
     : NO_SIGNAL;
 
-  const heldLongEnough =
+  // A two-second Siri invocation or a dictation blip never opens an interval.
+  // The floor is now the ONLY qualifier on the mic, which makes it load-bearing.
+  const micActive =
     input.micInUse && micRisingAtMs !== NO_SIGNAL && input.atMs - micRisingAtMs >= micMinCaptureMs;
 
-  // A two-second Siri invocation or a dictation blip never opens an interval.
-  const micMeeting = heldLongEnough && input.meetingAppRunning;
-
-  if (micMeeting !== prev.micMeeting) {
-    signals.push(micMeeting
-      ? { kind: "micMeetingOn", atMs: input.atMs }
-      : { kind: "micMeetingOff", atMs: input.atMs });
+  if (micActive !== prev.micActive) {
+    signals.push(micActive
+      ? { kind: "micOn", atMs: input.atMs }
+      : { kind: "micOff", atMs: input.atMs });
   }
 
-  return { next: { camera: input.cameraInUse, micMeeting, micRisingAtMs }, signals };
+  return { next: { camera: input.cameraInUse, micActive, micRisingAtMs }, signals };
 }
 ```
 
-**Known and accepted:** because capture is reported system-wide, a dictation app capturing *while* Zoom happens to be running satisfies the conjunction. In that situation the owner is at the machine anyway and real input covers it, so the false positive costs nothing.
+**Known and accepted:** because capture is reported system-wide, anything holding the mic counts — including something that is not the owner working. Two things bound it: the 60-second floor, and the same `cameraOnlyMaxMs` cap the camera gets, since `anyLevelHolding()` covers `micActive` too. See PRD §3.5 for why the app-identity half was removed.
 
 ---
 
@@ -578,8 +578,9 @@ export function levelsToSignals(
 | `camera holds an interval past the deadline` | camera on, no input, `deadlineFired` at `T + 20m` ⇒ still open |
 | `camera alone opens an interval` | idle 20m, `cameraOn` ⇒ open, `startSource === "camera"` |
 | `camera-only cap closes it` | camera on, no input, fire past `cameraOnlyMaxMs` ⇒ closed, `endReason === "camera_cap"` |
-| `mic needs a meeting app` | `micInUse` true, `meetingAppRunning` false ⇒ no signal emitted |
-| `mic needs 60 seconds` | mic up for 30s with a meeting app ⇒ no signal; at 61s ⇒ `micMeetingOn` |
+| `mic alone opens an interval` | `micInUse` true past the floor, nothing else true ⇒ `micOn`, `startSource === "mic"` |
+| `mic needs 60 seconds` | mic up for 30s ⇒ no signal; at 61s ⇒ `micOn` |
+| `a dictation tool holding the mic all day counts as work` | 8 h of capture ⇒ one `micOn`, and it is not conditional on any app |
 | `paused input is ignored` | `pauseOn` then `realInput` ⇒ no interval opens |
 
 ### The jiggler — homogeneity
@@ -612,7 +613,7 @@ const arbSignal = (t: number) =>
     fc.record({ kind: fc.constant("realInput" as const), atMs: fc.constant(t),
                 keys: fc.nat(5), mouse: fc.nat(5) }),
     fc.record({ kind: fc.constantFrom("cameraOn" as const, "cameraOff" as const,
-                                      "micMeetingOn" as const, "micMeetingOff" as const,
+                                      "micOn" as const, "micOff" as const,
                                       "jigglerOn" as const, "jigglerOff" as const,
                                       "pauseOn" as const, "pauseOff" as const,
                                       "deadlineFired" as const, "tapLost" as const),

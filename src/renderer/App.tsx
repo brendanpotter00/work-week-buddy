@@ -97,6 +97,8 @@ const DEGRADED_COPY: Record<DegradedReason, string> = {
   sync_silent_72h: "Nothing has reached the cloud for over 72 hours.",
   fingerprint_mismatch: "The local database and the cloud disagree about how many rows exist.",
   db_unwritable: "The database cannot be written. Nothing is being saved.",
+  selftest_failed:
+    "The jiggler safety check failed, so the jiggler was switched off. This Mac may not be able to tell the jiggler’s own input apart from yours — treat hours recorded with it on as suspect.",
 };
 
 function StatCard({

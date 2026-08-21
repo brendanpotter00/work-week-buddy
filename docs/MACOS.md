@@ -151,9 +151,9 @@ CoreAudio, the exact mirror of the camera pattern: enumerate audio devices and r
 
 **It reports capture, not sound.** Ambient noise, speaker output, music and video playback do not register. It also does **not** report which process is capturing, exactly like the camera.
 
-Because of that last point the signal is a conjunction with a running-process check — see PRD §3.5. The process check is a plain running-application enumeration, which needs no permission.
+**That last point no longer matters.** Mic-in-use is a work signal on its own — see PRD §3.5. There was once a conjunction with a running-application enumeration, so that dictation could be told apart from a call; it is gone, and so is the enumeration. Nothing in this layer asks what is running, and there is no NSWorkspace or process-list call anywhere in the app (see §7 and IMPL_NATIVE's forbidden list, which now holds for a second reason).
 
-Seed the ignore list with dictation tools; they hold the mic more or less continuously and are not meetings.
+The only qualifier left on the mic is a **60-second floor**, and it lives in `src/core/levels.ts` where it can be tested with arithmetic. This directory reports the level and nothing else.
 
 ## 5. Keep awake
 

@@ -223,8 +223,8 @@ describe("camera and mic hold an interval open", () => {
     expect(r.state.cameraOn).toBe(true);
   });
 
-  it("mic-meeting-on alone opens an interval with source 'mic'", () => {
-    const r = reduce(initialState, { kind: "micMeetingOn", atMs: T0 }, cfg, T0);
+  it("mic-on alone opens an interval with source 'mic'", () => {
+    const r = reduce(initialState, { kind: "micOn", atMs: T0 }, cfg, T0);
     const o = openInterval(r.state);
     expect(o.startSource).toBe("mic");
     expect(o.micSinceMs).toBe(T0);
@@ -243,14 +243,33 @@ describe("camera and mic hold an interval open", () => {
     expect(openInterval(state).lastRealSignalMs).toBe(T0 + 20 * MIN);
   });
 
-  it("a mic meeting holds an interval open past the deadline too", () => {
+  it("a live microphone holds an interval open past the deadline too", () => {
     const { state, persisted } = run([
       { kind: "realInput", atMs: T0, keys: 1, mouse: 0 },
-      { kind: "micMeetingOn", atMs: T0 + 60_000 },
+      { kind: "micOn", atMs: T0 + 60_000 },
       { kind: "deadlineFired", atMs: T0 + 20 * MIN },
     ]);
     expect(persisted).toHaveLength(0);
     expect(openInterval(state).lastRealSignalMs).toBe(T0 + 20 * MIN);
+  });
+
+  it("a mic-only interval still ends at the last real signal, never at the timeout", () => {
+    // The close rule, asserted specifically on the path the mic simplification
+    // widened. A microphone now opens intervals it never used to open, so the
+    // rule that outranks everything gets a case of its own here: the row ends
+    // at the mic-off edge, and the instant the countdown fired appears nowhere.
+    const micOffAt = T0 + 40 * MIN;
+    const firedAt = micOffAt + 15 * MIN + 4_000;
+    const { persisted } = run([
+      { kind: "micOn", atMs: T0 },
+      { kind: "micOff", atMs: micOffAt },
+      { kind: "deadlineFired", atMs: firedAt },
+    ]);
+    expect(persisted).toHaveLength(1);
+    expect(persisted[0]!.startSource).toBe("mic");
+    expect(persisted[0]!.endedAtMs).toBe(micOffAt);
+    expect(persisted[0]!.endedAtMs).not.toBe(firedAt);
+    expect(persisted[0]!.endReason).toBe("idle_timeout");
   });
 
   it("camera-on into an open interval starts a span without re-dating the start", () => {
@@ -269,9 +288,9 @@ describe("camera and mic hold an interval open", () => {
   it("a repeated on-edge does not restart an already-running span", () => {
     const { state } = run([
       { kind: "cameraOn", atMs: T0 },
-      { kind: "micMeetingOn", atMs: T0 + MIN },
+      { kind: "micOn", atMs: T0 + MIN },
       { kind: "cameraOn", atMs: T0 + 2 * MIN },
-      { kind: "micMeetingOn", atMs: T0 + 3 * MIN },
+      { kind: "micOn", atMs: T0 + 3 * MIN },
     ]);
     const o = openInterval(state);
     expect(o.cameraSinceMs).toBe(T0);
@@ -294,14 +313,14 @@ describe("camera and mic hold an interval open", () => {
   it("mic-off folds the mic span and leaves the camera span running", () => {
     const { state } = run([
       { kind: "cameraOn", atMs: T0 },
-      { kind: "micMeetingOn", atMs: T0 + MIN },
-      { kind: "micMeetingOff", atMs: T0 + 11 * MIN },
+      { kind: "micOn", atMs: T0 + MIN },
+      { kind: "micOff", atMs: T0 + 11 * MIN },
     ]);
     const o = openInterval(state);
     expect(o.micMs).toBe(10 * MIN);
     expect(o.micSinceMs).toBe(NO_SIGNAL);
     expect(o.cameraSinceMs).toBe(T0);
-    expect(state.micMeeting).toBe(false);
+    expect(state.micActive).toBe(false);
     expect(state.cameraOn).toBe(true);
   });
 
@@ -309,7 +328,7 @@ describe("camera and mic hold an interval open", () => {
     const { state } = run([
       { kind: "realInput", atMs: T0, keys: 1, mouse: 0 },
       { kind: "cameraOff", atMs: T0 + MIN },
-      { kind: "micMeetingOff", atMs: T0 + 2 * MIN },
+      { kind: "micOff", atMs: T0 + 2 * MIN },
     ]);
     const o = openInterval(state);
     expect(o.cameraMs).toBe(0);
@@ -331,11 +350,11 @@ describe("camera and mic hold an interval open", () => {
 
     const r2 = reduce(
       { ...initialState, paused: true },
-      { kind: "micMeetingOn", atMs: T0 },
+      { kind: "micOn", atMs: T0 },
       cfg,
       T0,
     );
-    expect(r2.state.micMeeting).toBe(true);
+    expect(r2.state.micActive).toBe(true);
     expect(r2.state.open).toBeNull();
   });
 });

@@ -7,7 +7,7 @@
  */
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { DEFAULTS, MEETING_APPS, MIC_IGNORE } from "../shared/constants";
+import { DEFAULTS } from "../shared/constants";
 import type { SelfTestResult } from "../shared/ipc-types";
 
 export interface MainSettings {
@@ -19,9 +19,6 @@ export interface MainSettings {
   /** '#FFFFFF' | '#191919' — mirrored from the renderer so main can paint first. */
   windowBackground: string;
   onboardingDismissed: boolean;
-  /** bundle ids, user-editable, PRD §3.5 */
-  meetingApps: string[];
-  micIgnoreApps: string[];
   heatmapThresholdsH: [number, number, number];
   minIntervalS: number;
   countJigglerTime: 0 | 1;
@@ -61,8 +58,6 @@ export const SETTINGS_DEFAULTS: MainSettings = {
   jigglerPausePrompt: "ask",
   windowBackground: "#FFFFFF",
   onboardingDismissed: false,
-  meetingApps: [...MEETING_APPS],
-  micIgnoreApps: [...MIC_IGNORE],
   heatmapThresholdsH: [...DEFAULTS.heatmapThresholdsH] as [number, number, number],
   minIntervalS: DEFAULTS.minIntervalMs / 1000,
   countJigglerTime: DEFAULTS.countJigglerTime ? 1 : 0,
@@ -70,6 +65,21 @@ export const SETTINGS_DEFAULTS: MainSettings = {
   syncWorkerUrl: "",
   lastSelfTest: null,
 };
+
+/**
+ * Keys this file used to persist and no longer understands.
+ *
+ * `meetingApps` and `micIgnoreApps` were the two user-editable bundle-id lists
+ * behind the old mic conjunction (PRD §3.5). The mic is now a work signal on
+ * its own, so the lists are gone — but they are sitting in `settings.json` on
+ * every machine that ever ran an older build, and `load()` spreads the parsed
+ * file over the defaults, so without this they would ride along forever and be
+ * written back on the next save.
+ *
+ * Dropped SILENTLY. A settings file from an older version is the ordinary case,
+ * not an error, and nothing here may ever be a reason the app declines to load.
+ */
+const RETIRED_KEYS = ["meetingApps", "micIgnoreApps"] as const;
 
 export class SettingsStore {
   private data: MainSettings = { ...SETTINGS_DEFAULTS };
@@ -93,7 +103,12 @@ export class SettingsStore {
   async load(): Promise<MainSettings> {
     try {
       const raw: unknown = JSON.parse(await readFile(this.path(), "utf8"));
-      this.data = { ...SETTINGS_DEFAULTS, ...(raw as Partial<MainSettings>) };
+      const merged: MainSettings & Record<string, unknown> = {
+        ...SETTINGS_DEFAULTS,
+        ...(raw as Partial<MainSettings>),
+      };
+      for (const key of RETIRED_KEYS) delete merged[key];
+      this.data = merged;
     } catch {
       // Absent or corrupt reads as "first run". Never fatal: a settings file
       // that fails to parse must not stop the app from measuring.

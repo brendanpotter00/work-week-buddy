@@ -63,8 +63,6 @@ function bridgeFor(s: Setup = {}): StubBridge {
       machineLabel: "Work laptop",
       idleTimeoutMin: 15,
       windowBackground: "#FFFFFF",
-      meetingApps: [],
-      micIgnoreApps: [],
       heatmapThresholdsH: [2, 5, 8] as [number, number, number],
       minIntervalS: 90,
       countJigglerTime: 0 as 0 | 1,

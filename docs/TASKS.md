@@ -12,7 +12,7 @@
 | **1.2** | `native.ts` — all koffi declarations in one file, plus a boot test exercising each once | 1.1 | Boot test green |
 | **1.3** | Event tap: create, register in both run-loop modes, assert the granted mask, handle and recover from `tapDisabledByTimeout` | 1.2 | M1 gates (a)–(e) |
 | **1.4** | Jiggler: null event, stamped and filtered; the self-test that proves our own events are identified as ours | 1.2 | M1 gate (c); cursor provably never moves |
-| **1.5** | Camera + microphone in-use detection, plus the meeting-app conjunction for the mic | 1.2 | M1 gate (g); mic needs no permission, or it is reported loudly |
+| **1.5** | Camera + microphone in-use detection, plus the 60-second floor under the mic (the meeting-app conjunction this once carried was removed — PRD §3.5) | 1.2 | M1 gate (g); mic needs no permission, or it is reported loudly |
 | **1.6** | Keep-awake via power assertion | 1.2 | Visible in `pmset -g assertions`, gone after release |
 | **2.1** | The interval reducer — pure, no Electron imports, timestamps as data | 1.1 | M2 gates (a)–(f) |
 | **2.2** | The lazy countdown scheduler, main-process only, absolute deadline | 2.1 | Fires correctly when stepped hours into the past |

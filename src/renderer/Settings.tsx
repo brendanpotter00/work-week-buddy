@@ -14,10 +14,22 @@
  * WHAT IS HERE AND WHY IT IS IN THIS ORDER. Sync first, because it is the thing
  * that could not be done at all. Then the settings that already existed in
  * `src/main/settings.ts` with nothing to edit them: the machine label (reusing
- * `DeviceName`, which was written to be moved here), the idle timeout, the two
- * bundle-id lists, and the heatmap ramp. Nothing new was invented; every field
- * below is a `MainSettings` key that has been persisted since before this
- * window existed.
+ * `DeviceName`, which was written to be moved here), the idle timeout, and the
+ * heatmap ramp. Nothing new was invented; every field below is a `MainSettings`
+ * key that has been persisted since before this window existed.
+ *
+ * WHAT IS DELIBERATELY NOT HERE:
+ *
+ *  - The two mic bundle-id lists. The microphone is now a work signal on its
+ *    own (PRD §3.5), so there is no meeting-versus-dictation call left to
+ *    configure and the lists had nothing to decide.
+ *  - The jiggler safety check. It still exists and still matters — it is what
+ *    proves our own synthetic input cannot be mistaken for a person — but the
+ *    risk it guards only exists while the jiggler is running, and the jiggler
+ *    ships off. Main now runs the check automatically when the jiggler is
+ *    switched on and shouts through `degraded` if it fails, so a permanent card
+ *    warning about a risk nobody is taking earns nothing. `--selftest` and
+ *    `npm run doctor` still report it.
  *
  * The write rule: EVERY EDIT IS A WRITE. There is no page-level Save button, no
  * dirty state to lose, and the one place a draft exists — the sync form — has
@@ -28,9 +40,7 @@
 import * as React from "react";
 
 import { AlertBanner } from "@/renderer/components/alert-banner";
-import { BundleIdList } from "@/renderer/components/bundle-id-list";
 import { DeviceName } from "@/renderer/components/device-name";
-import { SelfTestCard } from "@/renderer/components/self-test-card";
 import { Field, ReadRow, SettingsCard, inputClass } from "@/renderer/components/settings-ui";
 import { SyncSettings } from "@/renderer/components/sync-settings";
 import { TitleBar } from "@/renderer/components/title-bar";
@@ -149,36 +159,6 @@ export function Settings(): React.ReactElement {
           </SettingsCard>
 
           <SettingsCard
-            id="meetings"
-            title="Meetings"
-            description="macOS says the microphone is in use, never by whom. These two lists are how a meeting is told apart from dictation."
-          >
-            <div className="flex flex-col gap-5">
-              <BundleIdList
-                id="meeting-apps"
-                label="Counts as a meeting"
-                hint="Mic in use AND one of these running keeps a session open with no mouse movement."
-                // Deliberately NOT one of the seeded ids: a placeholder that
-                // repeats a row already in the list above reads as a duplicate
-                // rather than as an example.
-                placeholder="add a bundle id, e.g. com.apple.FaceTime"
-                values={value?.meetingApps ?? []}
-                disabled={value === null}
-                onChange={(next) => write({ meetingApps: next })}
-              />
-              <BundleIdList
-                id="mic-ignore"
-                label="Never a meeting"
-                hint="Dictation tools hold the mic all day. Left in, one of them makes every waking hour look like a call."
-                placeholder="add a bundle id, e.g. com.apple.VoiceMemos"
-                values={value?.micIgnoreApps ?? []}
-                disabled={value === null}
-                onChange={(next) => write({ micIgnoreApps: next })}
-              />
-            </div>
-          </SettingsCard>
-
-          <SettingsCard
             id="heatmap"
             title="Daily hours colour"
             description="Where the five shades on the dashboard’s year change. Colour only — no hours move."
@@ -188,8 +168,6 @@ export function Settings(): React.ReactElement {
               onChange={(next) => write({ heatmapThresholdsH: next })}
             />
           </SettingsCard>
-
-          <SelfTestCard doctor={doctor} />
 
           <SettingsCard
             id="about"

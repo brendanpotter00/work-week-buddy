@@ -176,8 +176,6 @@ function uiSettingsOf(s: Readonly<MainSettings>): UiSettings {
     machineLabel: s.machineLabel,
     idleTimeoutMin: s.idleTimeoutMin,
     windowBackground: s.windowBackground,
-    meetingApps: s.meetingApps,
-    micIgnoreApps: s.micIgnoreApps,
     heatmapThresholdsH: s.heatmapThresholdsH,
     minIntervalS: s.minIntervalS,
     countJigglerTime: s.countJigglerTime,
@@ -189,27 +187,17 @@ function uiSettingsOf(s: Readonly<MainSettings>): UiSettings {
 /** PRD §7: "15 minutes, adjustable 10–15 without touching history". */
 export const IDLE_TIMEOUT_MIN_RANGE = { min: 10, max: 15 } as const;
 
-/** Bundle ids only, trimmed, de-duplicated, blanks dropped, order preserved. */
-function cleanBundleIds(raw: unknown): string[] | undefined {
-  if (!Array.isArray(raw)) return undefined;
-  const out: string[] = [];
-  for (const v of raw) {
-    if (typeof v !== "string") continue;
-    const id = v.trim();
-    // A blank row is what an empty "add" field leaves behind, and stored it
-    // would match nothing forever while looking like a configured entry.
-    if (id === "" || out.includes(id)) continue;
-    out.push(id);
-  }
-  return out;
-}
-
 /**
  * The renderer's patch, reduced to values that cannot produce a wrong number.
  *
  * Unknown keys are dropped rather than merged: `settings.json` is spread over
  * the defaults on load, so anything that lands here lands in the file and comes
  * back on every launch afterwards.
+ *
+ * That same drop is what retires a setting. `meetingApps` and `micIgnoreApps`
+ * used to be read here; an older renderer, or an older `settings.json` echoed
+ * back through a patch, simply finds no branch that reads them and they go no
+ * further. Nothing throws and nothing is rejected.
  */
 export function sanitizeUiSettings(patch: Partial<UiSettings>): Partial<UiSettings> {
   const out: Partial<UiSettings> = {};
@@ -232,11 +220,6 @@ export function sanitizeUiSettings(patch: Partial<UiSettings>): Partial<UiSettin
   if (typeof patch.windowBackground === "string" && /^#[0-9a-fA-F]{6}$/.test(patch.windowBackground)) {
     out.windowBackground = patch.windowBackground;
   }
-
-  const meeting = cleanBundleIds(patch.meetingApps);
-  if (meeting !== undefined) out.meetingApps = meeting;
-  const micIgnore = cleanBundleIds(patch.micIgnoreApps);
-  if (micIgnore !== undefined) out.micIgnoreApps = micIgnore;
 
   if (Array.isArray(patch.heatmapThresholdsH) && patch.heatmapThresholdsH.length === 3) {
     const [a, b, c] = patch.heatmapThresholdsH.map((n) =>

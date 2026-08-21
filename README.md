@@ -37,7 +37,7 @@ No timers to start. No projects to tag. No categories. It watches the same signa
 Two signals, one rule.
 
 - **Real input** — keyboard or mouse — or **a live camera** keeps the current interval alive. A camera in use means you're in a meeting, and a meeting is always work, even when nobody touches the mouse for 50 minutes.
-- **A live microphone counts too, but only while a meeting app is running.** That covers audio-only and camera-off calls without letting every dictation session look like work.
+- **A live microphone counts too, whatever is holding it.** A call, dictation, a recording — if the mic is open you are at the machine. A capture shorter than 60 seconds is ignored, so asking Siri the time is not a workday.
 - macOS **pushes** each event to the app. There is no polling for input.
 - Every signal pushes a **15-minute countdown** back out to 15:00.
 - When the countdown finally fires, the interval closes — **at the timestamp of your last real signal, never at the moment the countdown fired.** A 15-minute timeout must never add 15 phantom minutes to a day.

@@ -153,22 +153,3 @@ export const DEFAULTS = {
   countJigglerTime: false,
   heatmapThresholdsH: [3, 6, 8],
 } as const;
-
-/**
- * Bundle ids whose microphone use means "meeting" rather than "dictation".
- * The OS reports that the mic is captured but not by whom, so a running
- * meeting app is the available proxy. See docs/PRD.md section 3.5.
- */
-export const MEETING_APPS = [
-  "us.zoom.xos",
-  "com.microsoft.teams2",
-  "com.cisco.webexmeetingsapp",
-  "com.tinyspeck.slackmacgap",
-  "com.hnc.Discord",
-] as const;
-
-/** Mic holders that are never meetings. Seeded; user-editable. */
-export const MIC_IGNORE = [
-  "com.electron.wispr-flow",
-  "com.gizmolabs.openwhispr",
-] as const;

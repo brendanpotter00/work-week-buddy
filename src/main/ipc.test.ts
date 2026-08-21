@@ -486,13 +486,27 @@ describe("the settings channel validates before it persists", () => {
     expect(deps.settings.get("heatmapThresholdsH")).toEqual([3, 6, 9]);
   });
 
-  it("drops blank and duplicate bundle ids, which would match nothing forever", async () => {
+  it("silently ignores the retired mic bundle-id lists instead of storing them", async () => {
+    // REPLACES a test that asserted these were cleaned and persisted. The mic
+    // conjunction is gone (PRD §3.5), so `meetingApps`/`micIgnoreApps` are no
+    // longer settings at all — but an older renderer, or an older
+    // `settings.json` echoed back through a patch, can still send them. They
+    // must go no further: no throw, no rejected write, no key in the file.
     h = await makeHarness();
     const deps = await register();
+    const before = deps.settings.get("idleTimeoutMin");
+
     await invoke("wwb:settings:set", {
-      meetingApps: ["us.zoom.xos", "  ", "us.zoom.xos", " com.hnc.Discord "],
-    });
-    expect(deps.settings.get("meetingApps")).toEqual(["us.zoom.xos", "com.hnc.Discord"]);
+      meetingApps: ["us.zoom.xos", "com.hnc.Discord"],
+      micIgnoreApps: ["com.electron.wispr-flow"],
+      idleTimeoutMin: 11,
+    } as never);
+
+    expect(deps.settings.all()).not.toHaveProperty("meetingApps");
+    expect(deps.settings.all()).not.toHaveProperty("micIgnoreApps");
+    // The legitimate half of the same patch still landed.
+    expect(deps.settings.get("idleTimeoutMin")).toBe(11);
+    expect(before).not.toBe(11);
   });
 
   it("refuses a blank machine label rather than storing an empty row label", async () => {

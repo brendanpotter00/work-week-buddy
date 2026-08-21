@@ -43,7 +43,7 @@ export type TrackingState = "working" | "idle" | "paused";
 export type SignalKind = "input" | "camera" | "mic";
 
 /**
- * What can hold an interval open WITHOUT a person: a camera or a meeting mic.
+ * What can hold an interval open WITHOUT a person: a camera or a live mic.
  *
  * `docs/IMPL_UI.md` §2.4 types `heldOpenBy` as `SignalKind | null`, which is
  * wider than anything that can occur — `runtime.heldBy()` returns `camera`,
@@ -70,7 +70,15 @@ export type DegradedReason =
   | "sync_silent_72h"
   /** backup layer 3 */
   | "fingerprint_mismatch"
-  | "db_unwritable";
+  | "db_unwritable"
+  /**
+   * The jiggler self-test did not pass, so the jiggler was switched back off.
+   *
+   * This is the only reason on this list that means an hours figure ALREADY
+   * WRITTEN might be too large: a broken ours-vs-theirs discriminator counts
+   * our own synthetic input as a person. AGENTS.md trap #4.
+   */
+  | "selftest_failed";
 
 export interface LiveStatus {
   asOfMs: number;
@@ -88,7 +96,6 @@ export interface LiveStatus {
   heldUntilMs: number | null;
   cameraOn: boolean;
   micCapturing: boolean;
-  meetingAppRunning: boolean;
   machineId: MachineId;
   machineLabel: string;
   /** closed, countable hours this local week. EXCLUDES the open interval. */
@@ -284,8 +291,6 @@ export interface DoctorReport {
   };
   mic: {
     inUse: boolean;
-    meetingAppRunning: boolean;
-    meetingApp: string | null;
     needsPermission: boolean | null;
   };
   sync: {
@@ -350,8 +355,6 @@ export interface UiSettings {
   machineLabel: string;
   idleTimeoutMin: number;
   windowBackground: string;
-  meetingApps: string[];
-  micIgnoreApps: string[];
   heatmapThresholdsH: [number, number, number];
   minIntervalS: number;
   countJigglerTime: 0 | 1;

@@ -66,9 +66,12 @@ export type Signal =
   | { kind: "realInput"; atMs: Ms; keys: number; mouse: number }
   | { kind: "cameraOn"; atMs: Ms }
   | { kind: "cameraOff"; atMs: Ms }
-  /** Already conjoined with "a meeting app is running". */
-  | { kind: "micMeetingOn"; atMs: Ms }
-  | { kind: "micMeetingOff"; atMs: Ms }
+  /**
+   * The microphone has been captured for longer than the minimum. By whom is
+   * deliberately not asked — see PRD §3.5.
+   */
+  | { kind: "micOn"; atMs: Ms }
+  | { kind: "micOff"; atMs: Ms }
   | { kind: "jigglerOn"; atMs: Ms }
   | { kind: "jigglerOff"; atMs: Ms }
   | { kind: "pauseOn"; atMs: Ms }
@@ -85,7 +88,7 @@ export type Signal =
 export interface TrackerState {
   readonly open: OpenInterval | null;
   readonly cameraOn: boolean;
-  readonly micMeeting: boolean;
+  readonly micActive: boolean;
   readonly jiggler: boolean;
   readonly paused: boolean;
   /** Absolute epoch ms. Never a duration — a duration cannot survive sleep. */
@@ -95,7 +98,7 @@ export interface TrackerState {
 export const initialState: TrackerState = {
   open: null,
   cameraOn: false,
-  micMeeting: false,
+  micActive: false,
   jiggler: false,
   paused: false,
   deadlineAtMs: null,

@@ -930,7 +930,7 @@ That leaves the camera and mic sampled by the **existing** 5-minute watchdog. It
 | Edge | `atMs` | Why |
 |---|---|---|
 | `camera_on`, `mic_on` | the probe instant | Later than the truth by up to 5 min. Starting late under-counts, which is the safe direction. |
-| `camera_off`, `mic_off` | **the previous probe at which the level was still on** | Never the detection instant. Closing at detection would donate up to 5 phantom minutes to every meeting — the same bug as closing at the timeout instant, wearing a different hat. |
+| `camera_off`, `mic_off` | **the previous probe at which the level was still on** | Never the detection instant. Closing at detection would donate up to 5 phantom minutes to every call — the same bug as closing at the timeout instant, wearing a different hat. |
 
 ```ts
 // src/native/levels.ts — pure, shared by MacSignalSource and FakeSignalSource
@@ -1271,7 +1271,7 @@ export interface SignalSource {
 }
 ```
 
-`src/main/signals.ts` maps `RawSignal` onto whatever `src/core/` calls its input — including the mic conjunction (mic **AND** a running meeting app **AND** ≥ 60 s), which is a product rule and lives nowhere near this directory. **If core names a signal differently, core wins, and the rename happens at that boundary — never inside `native.ts`.**
+`src/main/runtime.ts` maps `RawSignal` onto whatever `src/core/` calls its input — including the mic's 60-second floor, which is a product rule and lives nowhere near this directory. (It was once a conjunction with a running meeting app; that half was removed, PRD §3.5.) **If core names a signal differently, core wins, and the rename happens at that boundary — never inside `native.ts`.**
 
 ### The real implementation
 
@@ -1498,7 +1498,7 @@ Adding any of these is a spec violation, not an improvement.
 | `CFRunLoopRun`, `CFRunLoopRunInMode` | Electron's pump owns the main run loop. Calling these hangs the app. Only a plain-Node build would need them. |
 | `CGEventCreateKeyboardEvent`, `CGEventSetIntegerValueField` | We synthesize exactly one event type — `kCGEventNull` — and never keystrokes. |
 | `IORegistryEntry*` | `machine_id` is `IOPlatformUUID` read via `ioreg` in `src/main/machine.ts`. Zero permissions, zero FFI. |
-| `CGWindowListCopyWindowInfo`, `NSWorkspace` frontmost-app APIs | NON_GOALS #8. No window, app or URL tracking. The meeting-app check is a plain running-process enumeration in `src/main/`. |
+| `CGWindowListCopyWindowInfo`, `NSWorkspace` frontmost-app APIs, any running-application enumeration | NON_GOALS #8. No window, app or URL tracking. There is no longer a meeting-app check anywhere either — the mic counts on its own, so nothing in this app asks what is running. |
 
 ---
 
