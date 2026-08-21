@@ -42,6 +42,7 @@ import {
 
 import { AlertBanner } from "@/renderer/components/alert-banner";
 import { DeviceName } from "@/renderer/components/device-name";
+import { LastSignal } from "@/renderer/components/last-signal";
 import { LiveStopwatch } from "@/renderer/components/live-stopwatch";
 import { TitleBar } from "@/renderer/components/title-bar";
 import { Badge } from "@/renderer/components/ui/badge";
@@ -75,7 +76,6 @@ import { useThemeMirror } from "@/renderer/lib/use-theme-mirror";
 import { DEFAULT_METRICS_POLICY, type DegradedReason } from "@/shared/ipc-types";
 import {
   creditedOpenMs,
-  formatAgo,
   formatCount,
   formatDuration,
   formatHeaderDate,
@@ -290,13 +290,7 @@ export function App(): React.ReactElement {
             </span>
           </span>
           <Separator orientation="vertical" className="mx-1 !h-4" />
-          <span className="text-sm text-muted-foreground">
-            last signal{" "}
-            <span className="tabular-nums">
-              {status?.lastSignalMs == null ? "—" : formatAgo(nowMs - status.lastSignalMs)}
-            </span>{" "}
-            ago
-          </span>
+          <LastSignal lastSignalMs={status?.lastSignalMs ?? null} asOfMs={status?.asOfMs ?? 0} />
           <div className="ml-auto flex items-center gap-4">
             <label
               className="flex items-center gap-2 text-xs text-muted-foreground"
