@@ -77,6 +77,7 @@ const DEGRADED_COPY: Record<
   sync_silent_72h: { menu: "No cloud write in 72 h — see Doctor…", fix: "dashboard" },
   fingerprint_mismatch: { menu: "Cloud fingerprint mismatch — Doctor…", fix: "dashboard" },
   db_unwritable: { menu: "Local database is not writable…", fix: "dashboard" },
+  selftest_failed: { menu: "Jiggler safety check FAILED — see Doctor…", fix: "dashboard" },
 };
 
 export interface MessageBoxAnswer {
@@ -287,7 +288,7 @@ export class TrayController {
               s.lastSignalKind === "camera"
                 ? " · camera"
                 : s.lastSignalKind === "mic"
-                  ? " · meeting mic"
+                  ? " · microphone"
                   : ""
             }`,
       enabled: false,

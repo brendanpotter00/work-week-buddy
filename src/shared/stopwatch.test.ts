@@ -30,7 +30,6 @@ function status(over: Partial<LiveStatus> = {}): LiveStatus {
     heldUntilMs: null,
     cameraOn: false,
     micCapturing: false,
-    meetingAppRunning: false,
     machineId: "m",
     machineLabel: "",
     closedHoursThisWeek: 0,
@@ -129,7 +128,7 @@ describe("idle", () => {
   });
 });
 
-describe("held open by a camera or a meeting mic", () => {
+describe("held open by a camera or a live microphone", () => {
   it("stops at the cap instead of counting a forgotten Zoom all night", () => {
     const s = status({ heldOpenBy: "camera", heldUntilMs: T0 + 30 * MIN });
     expect(stopwatchView(s, POLICY, T0 + 10 * MIN).ms).toBe(10 * MIN);
@@ -150,7 +149,7 @@ describe("held open by a camera or a meeting mic", () => {
     expect(after.ticking).toBe(false);
     expect(after.confident).toBe(false);
     expect(after.label).toBe("Capped");
-    expect(after.note).toContain("meeting mic cap");
+    expect(after.note).toContain("microphone cap");
   });
 
   it("names the cap in the same units as the digits it is watching", () => {

@@ -15,6 +15,6 @@ State these plainly so no agent adds them "helpfully."
 11. **No `DELETE` or `UPDATE` route on the Worker.** No arbitrary SQL. The route surface is the enforcement.
 12. **No hosted or phone-viewable dashboard.** It reintroduces auth, CORS, egress, and a free tier that pauses. The schema supports adding one later.
 13. **No realtime cross-machine presence.** A pull on launch/wake/after-flush is correct. The dashboard shows "work laptop, synced 4h ago."
-14. **No unscoped microphone detection.** The mic counts only in conjunction with a running meeting app, never on its own — otherwise every dictation session and Siri invocation reads as work. See PRD §3.5. Do not "simplify" this to a bare mic-in-use check.
+14. **No per-application microphone rules.** ~~The mic counts only in conjunction with a running meeting app.~~ **Reversed.** The mic in use *is* the signal — no allowlist, no ignore list, no running-process check. Nobody holds a microphone while not working, and the lists were configuration that could never be complete. What stays is the 60-second floor, so a Siri invocation is still not a workday. See PRD §3.5. Do not reintroduce app identity here.
 15. **No user auth, no OAuth, no token refresh.** One bearer secret per machine. A background daemon with a refreshable session is a failure mode with no upside here.
 16. **Do not "fix" the close rule.** An interval ends at the last real signal. If a change makes `ended_at` closer to `now()`, it is a bug, not an improvement.

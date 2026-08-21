@@ -729,22 +729,9 @@ export const DEFAULTS = {
   countJigglerTime: false,
   heatmapThresholdsH: [3, 6, 8],
 } as const;
-
-/** Bundle ids whose mic use means "meeting", not "dictation". User-editable. */
-export const MEETING_APPS = [
-  "us.zoom.xos",
-  "com.microsoft.teams2",
-  "com.cisco.webexmeetingsapp",
-  "com.tinyspeck.slackmacgap",
-  "com.hnc.Discord",
-] as const;
-
-/** Mic holders that are never meetings. Seeded; user-editable. */
-export const MIC_IGNORE = [
-  "com.electron.wispr-flow",
-  "com.gizmolabs.openwhispr",
-] as const;
 ```
+
+> `MEETING_APPS` and `MIC_IGNORE` used to live here — two bundle-id lists that told a call apart from dictation. Both are gone: the mic is a work signal on its own and there is no per-application rule left to seed. See PRD §3.5.
 
 ---
 

@@ -15,6 +15,7 @@
 > | `src/main/scheduler.ts`, a `DeadlineScheduler` class | `src/main/deadline.ts`, a `createDeadline()` factory |
 > | `lastRealInputMs`, `levelSinceMs` | `lastInputMs`, `cameraSinceMs` / `micSinceMs` |
 > | `reevaluate()` | the deadline recomputes on fire; there is no separate method |
+> | The mic conjunction: mic **AND** a running meeting app, with an allowlist, an ignore list and `meeting-apps.ts` | **The conjunction was removed.** Mic in use, held 60 s, is the signal on its own. No lists, no `meeting-apps.ts`, no running-process enumeration, no `meetingApps`/`micIgnoreApps` settings. See PRD §3.5. Everything T1.5 below says about app identity is history. |
 >
 > The task briefs below are still correct about *what each task delivers and how
 > it is proven*. Treat their code sketches as illustrative, and the committed
@@ -44,7 +45,7 @@ Every task below is a self-contained brief: exact file paths, the interfaces to 
 
 | Term | Means exactly |
 |---|---|
-| **real signal** | A keyboard or mouse event that passed the ours-vs-theirs filter, or a camera/mic-meeting level edge. Never a jiggle, never a toggle, never UI interaction. |
+| **real signal** | A keyboard or mouse event that passed the ours-vs-theirs filter, or a camera/mic level edge. Never a jiggle, never a toggle, never UI interaction. |
 | **last real signal** | `max(lastRealInputMs, lastLevelEvidenceMs)` — see `endTimestamp()` in §T2.1. This is what an interval ends at. |
 | **level** | Camera-in-use, mic-in-use. A state, not an event. Converted to edges by the source adapters. |
 | **edge** | A transition of a level, synthesized into a `Signal` with a timestamp. |
@@ -692,14 +693,20 @@ The BigInt regression guard is worth writing explicitly: assert that `(0x57574B3
 
 ### T1.5 · Camera and microphone in use, plus the meeting-app conjunction
 
+> **⚠︎ SUPERSEDED IN PART.** The meeting-app conjunction described below was
+> removed — the microphone is a work signal on its own, qualified only by a
+> 60-second floor. `meeting-apps.ts`, both bundle-id lists, the settings keys
+> and the running-process enumeration do not exist. The camera half of this
+> brief, the level-to-edge conversion and the 60-second floor are all still
+> current. **PRD §3.5 is the authority.**
+
 **Depends on:** 1.2. **Blocks:** 2.3.
 
 **Files created**
 - `src/main/native/camera.ts`
 - `src/main/native/mic.ts`
-- `src/main/native/meeting-apps.ts`
-- `src/main/config/meeting-apps.default.json`
-- `test/native/camera.test.ts`, `test/native/mic.test.ts`, `test/core/mic-conjunction.test.ts`
+- ~~`src/main/native/meeting-apps.ts`~~, ~~`src/main/config/meeting-apps.default.json`~~ — never shipped in this form, and the capability they carried was removed outright
+- `test/native/camera.test.ts`, `test/native/mic.test.ts`, `src/core/levels.test.ts`
 
 **What to implement**
 
@@ -721,40 +728,21 @@ export function createMicWatch(): LevelWatch;      // CoreAudio
 - **Register the property listeners, but do not trust them.** `docs/MACOS.md` §4 is explicit: the listener registers with `OSStatus 0` and was **never observed firing**. Correctness is anchored on a re-read registered with `Watchdog` (§T1.3), so the worst case is ≤5 minutes of latency, not a lost signal. Both paths feed the same debounced edge emitter, and a listener-driven edge that the next re-read contradicts is discarded.
 - The first CMIO connection powers the camera ISP for ~4 seconds. **Open the connection once at boot and keep it**; never open one per check.
 
-```ts
-// src/main/native/meeting-apps.ts
-export interface MeetingAppRules { allow: string[]; ignore: string[] }   // bundle ids
-export function loadRules(): MeetingAppRules;      // default json, overridable in app support
-export function meetingAppRunning(rules: MeetingAppRules): boolean;      // NSRunningApplication
-```
+**There is no meeting-app module.** The running-application enumeration this brief once specified was removed along with the conjunction it fed — see PRD §3.5. Nothing in the app asks what is running, which is also why `NSWorkspace` stays on IMPL_NATIVE's forbidden list.
 
-Seed `allow` with `us.zoom.xos`, `com.tinyspeck.slackmacgap`, `com.microsoft.teams2`, `com.cisco.webexmeetingsapp`, `com.hnc.Discord`, `com.google.Chrome`, `com.apple.Safari`, `com.brave.Browser`. Seed `ignore` with `com.wisprflow.flow`, `com.openwhispr.app`. Enumeration of running applications needs **no permission**.
-
-The conjunction and the 60-second floor live in one place, and it is pure so it can be tested without a Mac:
+The 60-second floor is what remains, and it is pure so it can be tested without a Mac. It ships in `src/core/levels.ts` as part of `levelsToSignals()` rather than as a separate `mic-gate.ts` — one level-to-edge converter handles camera and mic together:
 
 ```ts
-// src/core/mic-gate.ts  — pure, no imports
-export interface MicGateState { captureSinceMs: number | null; qualified: boolean }
-export const MIC_MIN_CAPTURE_MS = 60_000;
+// src/core/levels.ts — pure, and the mic half in full
+const micRisingAtMs = input.micInUse
+  ? (prev.micRisingAtMs === NO_SIGNAL ? input.atMs : prev.micRisingAtMs)
+  : NO_SIGNAL;
 
-/** Returns the qualified mic-meeting level, plus the edge to emit (or null). */
-export function micGate(
-  s: MicGateState,
-  now: { atMs: number; capturing: boolean; meetingAppRunning: boolean },
-): { state: MicGateState; edge: { on: boolean; atMs: number } | null } {
-  const live = now.capturing && now.meetingAppRunning;
-  if (!live) {
-    return { state: { captureSinceMs: null, qualified: false },
-             edge: s.qualified ? { on: false, atMs: now.atMs } : null };
-  }
-  const since = s.captureSinceMs ?? now.atMs;
-  const qualified = now.atMs - since >= MIC_MIN_CAPTURE_MS;
-  return { state: { captureSinceMs: since, qualified },
-           edge: qualified && !s.qualified ? { on: true, atMs: now.atMs } : null };
-}
+const micActive =
+  input.micInUse && micRisingAtMs !== NO_SIGNAL && input.atMs - micRisingAtMs >= micMinCaptureMs;
 ```
 
-**The qualifying edge is stamped at `now.atMs`, not back-dated to `captureSinceMs`.** Decision, taken here so nobody re-litigates it: back-dating would push a signal *behind* timestamps the reducer has already consumed and break the monotonic-input invariant that the property test in §T2.1 relies on. The cost is a deliberate ≤60-second undercount at the front of a mic-only meeting, which is a rounding error against a 15-minute timeout. Do not "improve" this.
+**The qualifying edge is stamped at `input.atMs`, not back-dated to `micRisingAtMs`.** Decision, taken here so nobody re-litigates it: back-dating would push a signal *behind* timestamps the reducer has already consumed and break the monotonic-input invariant that the property test in §T2.1 relies on. The cost is a deliberate ≤60-second undercount at the front of a mic-only call, which is a rounding error against a 15-minute timeout. Do not "improve" this.
 
 **Definition of done**
 
@@ -776,20 +764,23 @@ If a prompt appears, the gate must **FAIL loudly and say so** — `docs/MACOS.md
 
 | File | Name |
 |---|---|
-| `test/core/mic-gate.test.ts` | `a 59-second capture with a meeting app running never qualifies` |
-| `test/core/mic-gate.test.ts` | `a 61-second capture with a meeting app running qualifies exactly once` |
-| `test/core/mic-gate.test.ts` | `mic capture without a meeting app running never qualifies` |
-| `test/core/mic-gate.test.ts` | `losing the meeting app mid-capture emits an off edge` |
-| `test/core/mic-gate.test.ts` | `restarting a capture restarts the 60-second clock` |
+Shipped as `src/core/levels.test.ts` rather than `test/core/mic-gate.test.ts`, and without the app-identity half:
+
+| File | Name |
+|---|---|
+| `src/core/levels.test.ts` | `never opens an interval for a capture shorter than the floor` |
+| `src/core/levels.test.ts` | `emits exactly at the sixty-second boundary, not one probe later` |
+| `src/core/levels.test.ts` | `opens on mic capture alone — there is no meeting app and no such concept` |
+| `src/core/levels.test.ts` | `counts a dictation tool holding the mic all day as work` |
+| `src/core/levels.test.ts` | `restarts the clock when the mic drops, so two short captures never sum` |
 | `test/native/camera.test.ts` | `ORs the running flag across every enumerated device` |
 | `test/native/camera.test.ts` | `holds one CMIO connection for the process lifetime` |
 | `test/native/camera.test.ts` | `a listener edge contradicted by the next re-read is discarded` |
 | `test/native/mic.test.ts` | `reading the mic level produces no TCC prompt` |
-| `test/native/meeting-apps.test.ts` | `an ignore-list app alone does not satisfy the conjunction` |
 
 **Traps** — #7 (this is where an agent is most tempted to reach for an idle API "to check if he's there"), #12 (App Sandbox returns zero CMIO devices — if the device count is 0 on a machine with a built-in camera, that is the symptom), and the `docs/MACOS.md` §8 unverified-listener caveat.
 
-**Size** — medium · `src/core/mic-gate.ts` is **fakes-only**; the two watches **require a real Mac** plus a camera and a meeting app to toggle.
+**Size** — medium · the level converter in `src/core/levels.ts` is **fakes-only**; the two watches **require a real Mac** plus a camera and a microphone to toggle.
 
 ---
 
@@ -867,7 +858,7 @@ export type Signal =
   | { kind: 'key';   atMs: Ms; count: number }
   | { kind: 'mouse'; atMs: Ms; count: number }
   | { kind: 'camera';      atMs: Ms; on: boolean }
-  | { kind: 'mic_meeting'; atMs: Ms; on: boolean };
+  | { kind: 'mic'; atMs: Ms; on: boolean };
 
 export type Command =
   | { kind: 'deadline';  atMs: Ms }
@@ -883,14 +874,14 @@ export interface OpenSnapshot {
   startedAtMs: Ms; lastRealInputMs: Ms; lastLevelEvidenceMs: Ms;
   keyEvents: number; mouseEvents: number;
   cameraAccumMs: number; cameraSinceMs: Ms | null;
-  levelSinceMs: Ms | null;      // camera OR mic_meeting currently held, since when
+  levelSinceMs: Ms | null;      // camera OR mic currently held, since when
   jigglerOn: boolean;
   suspendedSinceMs: Ms | null;  // a 'suspend' seen while this interval was open
 }
 
 export interface State {
   open: OpenSnapshot | null;
-  cameraOn: boolean; micMeetingOn: boolean;
+  cameraOn: boolean; micActive: boolean;
   jigglerOn: boolean; paused: boolean;
   lastInputMs: Ms;              // monotonicity guard for the whole stream
 }
@@ -971,9 +962,9 @@ Behaviour, exhaustively, because every one of these is a place agents diverge:
 | `key` / `mouse` | none, not paused | Open at `atMs`. Mint `uuidv7`. `arm(deadlineFor)`. `journal`. |
 | `key` / `mouse` | open | Advance `lastRealInputMs`, bump counters, `arm` only if the new deadline differs by >1000 ms (lazy re-arm), `journal` at most once per second |
 | `key` / `mouse` | paused | Nothing. Not even `lastInputMs`. |
-| `camera on` / `mic_meeting on` | none | Open at `atMs`, `levelSinceMs = atMs` |
-| `camera on` / `mic_meeting on` | open | Set `levelSinceMs` if it was null; **does not advance `lastRealInputMs`** |
-| `camera off` / `mic_meeting off` | open | `lastLevelEvidenceMs = atMs`; clear `levelSinceMs` if no other level is held; `arm(deadlineFor)` |
+| `camera on` / `mic on` | none | Open at `atMs`, `levelSinceMs = atMs` |
+| `camera on` / `mic on` | open | Set `levelSinceMs` if it was null; **does not advance `lastRealInputMs`** |
+| `camera off` / `mic off` | open | `lastLevelEvidenceMs = atMs`; clear `levelSinceMs` if no other level is held; `arm(deadlineFor)` |
 | `deadline` | open, `atMs < deadlineFor` | **Re-arm**, close nothing. This is the lazy re-arm. |
 | `deadline` | open, `atMs >= deadlineFor` | `close` with `endedAtMs = endTimestamp(...)`, reason `idle_timeout` (or `sleep`, see below), `disarm`, `journal(null)`, `flush` |
 | `jiggler on/off` | open | **Close at `endTimestamp`, then immediately open a new interval at the same instant** with `jigglerOn` set to the new value. This is the homogeneity rule. |
@@ -1062,8 +1053,8 @@ grep -rn "from 'electron'" src/core/    # → no matches
 | `test/core/reduce.jiggler.test.ts` | `toggling the jiggler closes the current interval and opens a new one` |
 | `test/core/reduce.jiggler.test.ts` | `jigglerS is 0 or equals durationS, never in between` |
 | `test/core/reduce.pause.test.ts` | `pausing closes the interval with reason paused and drops later signals` |
-| `test/core/reduce.mic.test.ts` | `a qualified mic-meeting edge opens an interval` |
-| `test/core/reduce.mic.test.ts` | `mic without a meeting app never reaches the reducer` |
+| `src/core/reduce.test.ts` | `mic-on alone opens an interval with source 'mic'` |
+| `src/core/reduce.test.ts` | `a mic-only interval still ends at the last real signal, never at the timeout` |
 | `test/core/property.test.ts` | `property: endedAtMs <= lastRealSignal within the interval, over 10000 arbitrary streams` |
 | `test/core/property.test.ts` | `property: intervals never overlap and are ordered` |
 | `test/core/property.test.ts` | `property: sum of durations never exceeds wall-clock span of the stream` |
@@ -1185,7 +1176,6 @@ Use vitest fake timers plus an injected `now` so the 4-hour case runs in microse
 // src/main/signals.ts
 export interface SignalSources {
   tap: EventTap; camera: LevelWatch; mic: LevelWatch;
-  meetingRules: () => MeetingAppRules; meetingRunning: () => boolean;
 }
 export interface Runtime {
   dispatch(input: Input): void;        // clampMonotonic → reduce → run effects

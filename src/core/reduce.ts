@@ -84,14 +84,14 @@ function openAt(atMs: Ms, source: StartSource, s: TrackerState, cfg: Config): Op
     micMs: 0,
     jigglerMs: 0,
     cameraSinceMs: s.cameraOn ? atMs : NO_SIGNAL,
-    micSinceMs: s.micMeeting ? atMs : NO_SIGNAL,
+    micSinceMs: s.micActive ? atMs : NO_SIGNAL,
     jigglerSinceMs: s.jiggler ? atMs : NO_SIGNAL,
   };
 }
 
 /** A level signal (camera/mic) holds an interval open. Real input does too. */
 function anyLevelHolding(s: TrackerState): boolean {
-  return s.cameraOn || s.micMeeting;
+  return s.cameraOn || s.micActive;
 }
 
 /** Effects that always accompany a state change, so no call site can forget. */
@@ -185,17 +185,18 @@ export function reduce(s: TrackerState, sig: Signal, cfg: Config, nowMs: Ms): Re
 
     // ── camera / mic: levels that hold an interval open ──────────────────────
     case "cameraOn":
-    case "micMeetingOn": {
+    case "micOn": {
       const isCam = sig.kind === "cameraOn";
       const lifted: TrackerState = {
         ...s,
         cameraOn: isCam ? true : s.cameraOn,
-        micMeeting: isCam ? s.micMeeting : true,
+        micActive: isCam ? s.micActive : true,
       };
       if (lifted.paused) return { state: lifted, effects: [] };
       if (!lifted.open) {
-        // A meeting joined after 20 idle minutes, without touching anything,
-        // opens an interval. Camera on = meeting = work, per the brief.
+        // A call joined after 20 idle minutes, without touching anything, opens
+        // an interval. Camera on = meeting = work, per the brief; a held
+        // microphone means the same thing, per PRD §3.5.
         const o = openAt(sig.atMs, isCam ? "camera" : "mic", lifted, cfg);
         const next: TrackerState = { ...lifted, open: o };
         return { state: next, effects: settleEffects(next, cfg) };
@@ -213,12 +214,12 @@ export function reduce(s: TrackerState, sig: Signal, cfg: Config, nowMs: Ms): Re
     }
 
     case "cameraOff":
-    case "micMeetingOff": {
+    case "micOff": {
       const isCam = sig.kind === "cameraOff";
       const dropped: TrackerState = {
         ...s,
         cameraOn: isCam ? false : s.cameraOn,
-        micMeeting: isCam ? s.micMeeting : false,
+        micActive: isCam ? s.micActive : false,
       };
       if (!dropped.open) return { state: dropped, effects: [] };
       const o0 = dropped.open;
@@ -293,7 +294,7 @@ export function reduce(s: TrackerState, sig: Signal, cfg: Config, nowMs: Ms): Re
       }
 
       // A level signal still holds it open. Push the deadline out and keep the
-      // interval alive — this is what carries a 50-minute meeting with no mouse.
+      // interval alive — this is what carries a 50-minute call with no mouse.
       if (anyLevelHolding(s)) {
         const bumped: OpenInterval = {
           ...o,

@@ -68,7 +68,7 @@ A locally built app carries no quarantine attribute, so Gatekeeper never engages
 | Jiggler semantics | **(a) jiggler ON = off the clock** | ✔ — chosen over the recommendation; see PRD §6 for the exact implementation and the one accepted consequence |
 | Watchdog tick | always on, every 5 minutes | ✔ |
 | Menu-bar title | hours this week | ✔ |
-| Microphone detection | **in v1, scoped to meetings** | ✔ — mic alone is not a signal; it counts only alongside a running meeting app |
+| Microphone detection | **in v1, unscoped** | ↺ — shipped scoped to meeting apps, then simplified: mic in use, held 60 s, is the signal. The allowlist, the ignore list and the running-process check are gone. See PRD §3.5 |
 | ~209 MB resident | accepted | ✔ |
 
 ## Rejected implementation shortcuts

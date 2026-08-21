@@ -690,8 +690,6 @@ export interface MainSettings {
   jigglerPausePrompt: "ask" | "never"
   windowBackground: string               // '#FFFFFF' | '#191919' — mirrored from the renderer
   onboardingDismissed: boolean
-  meetingApps: string[]                  // bundle ids, user-editable, PRD §3.5
-  micIgnoreApps: string[]
   heatmapThresholdsH: [number, number, number]
   minIntervalS: number
   countJigglerTime: 0 | 1
@@ -704,11 +702,6 @@ const DEFAULTS: MainSettings = {
   jigglerPausePrompt: "ask",
   windowBackground: "#FFFFFF",
   onboardingDismissed: false,
-  meetingApps: [
-    "us.zoom.xos", "com.tinyspeck.slackmacgap", "com.microsoft.teams2",
-    "com.cisco.webexmeetingsapp", "com.hnc.Discord",
-  ],
-  micIgnoreApps: ["com.wisprflow.flow", "com.openwhispr.app"],
   heatmapThresholdsH: [2, 5, 8],
   minIntervalS: 90,
   countJigglerTime: 0,
@@ -836,7 +829,7 @@ export default defineConfig({
 | `wwb:permissions:relaunch` | `void` | `never` | closes the interval, then relaunches (§4.4) |
 | `wwb:onboarding:dismiss` | `void` | `void` | sets `onboardingDismissed`, closes the window |
 | `wwb:doctor:get` | `void` | `DoctorReport` | |
-| `wwb:doctor:selftest` | `void` | `SelfTestResult` | posts a tagged jiggle; needs Accessibility |
+| `wwb:doctor:selftest` | `void` | `SelfTestResult` | posts a tagged jiggle; needs Accessibility. Main also runs the same check itself whenever the jiggler is switched ON — never awaited, since it blocks the main thread for ~2.5 s. See PRD §3.7 |
 | `wwb:sync:flush` | `void` | `FlushResult` | manual "Sync now" |
 | `wwb:machine:rename` | `{ label: string }` | `AppInfo` | |
 | `wwb:settings:get` | `void` | `UiSettings` | the subset the renderer may see |
@@ -883,6 +876,7 @@ export type DegradedReason =
   | "sync_silent_72h"                // DATA_MODEL backup layer 4
   | "fingerprint_mismatch"           // backup layer 3
   | "db_unwritable"
+  | "selftest_failed"                // the jiggler self-test failed; the jiggler was switched back off
 
 export interface LiveStatus {
   asOfMs: number
@@ -900,7 +894,6 @@ export interface LiveStatus {
   heldUntilMs: number | null
   cameraOn: boolean
   micCapturing: boolean
-  meetingAppRunning: boolean
   machineId: MachineId
   machineLabel: string
   /** closed, countable hours this local week. Excludes the open interval. */
@@ -1026,7 +1019,7 @@ export interface DoctorReport {
   permissions: PermissionSnapshot
   tap: TapHealth
   camera: { deviceCount: number; inUse: boolean; listenerRegistered: boolean; lastReadMs: number | null }
-  mic: { inUse: boolean; meetingAppRunning: boolean; meetingApp: string | null; needsPermission: boolean | null }
+  mic: { inUse: boolean; needsPermission: boolean | null }
   sync: {
     pendingRows: number; lastFlushOkMs: number | null; lastFlushError: string | null
     lastPullMs: number | null; watermark: number; lastCloudWriteMs: number | null
@@ -1053,8 +1046,6 @@ export interface UiSettings {
   machineLabel: string
   idleTimeoutMin: number
   windowBackground: string
-  meetingApps: string[]
-  micIgnoreApps: string[]
   heatmapThresholdsH: [number, number, number]
   minIntervalS: number
   countJigglerTime: 0 | 1
@@ -1264,8 +1255,7 @@ export function registerIpcHandlers(runtime: AppRuntime): void {
     const s = settings.all()
     return {
       machineLabel: s.machineLabel, idleTimeoutMin: s.idleTimeoutMin,
-      windowBackground: s.windowBackground, meetingApps: s.meetingApps,
-      micIgnoreApps: s.micIgnoreApps, heatmapThresholdsH: s.heatmapThresholdsH,
+      windowBackground: s.windowBackground, heatmapThresholdsH: s.heatmapThresholdsH,
       minIntervalS: s.minIntervalS, countJigglerTime: s.countJigglerTime, graceS: s.graceS,
     }
   }
@@ -1703,6 +1693,7 @@ const DEGRADED_COPY: Record<DegradedReason, { menu: string; fix: "onboarding" | 
   sync_silent_72h:             { menu: "No cloud write in 72 h — see Doctor…", fix: "none" },
   fingerprint_mismatch:        { menu: "Cloud fingerprint mismatch — Doctor…", fix: "none" },
   db_unwritable:               { menu: "Local database is not writable…",      fix: "none" },
+  selftest_failed:             { menu: "Jiggler safety check FAILED — Doctor…", fix: "none" },
 }
 
 export class TrayController {
@@ -1833,7 +1824,7 @@ export class TrayController {
     items.push({
       label: s.lastSignalMs === null
         ? "no signal yet"
-        : `last signal ${formatAgo(now - s.lastSignalMs)} ago${s.lastSignalKind === "camera" ? " · camera" : s.lastSignalKind === "mic" ? " · meeting mic" : ""}`,
+        : `last signal ${formatAgo(now - s.lastSignalMs)} ago${s.lastSignalKind === "camera" ? " · camera" : s.lastSignalKind === "mic" ? " · microphone" : ""}`,
       enabled: false,
     })
     items.push({ type: "separator" })
@@ -2314,6 +2305,10 @@ const COPY: Record<DegradedReason, { title: string; detail: string; action?: { l
   db_unwritable: {
     title: "The local database is not writable",
     detail: "Nothing is being recorded right now.",
+  },
+  selftest_failed: {
+    title: "The jiggler safety check failed",
+    detail: "The jiggler has been switched off. This Mac may not be able to tell its own synthetic input apart from yours — treat hours recorded with it on as suspect.",
   },
 }
 

@@ -61,7 +61,7 @@ export const GREEN: DoctorReport = {
     lastWatchdogTickMs: NOW - 2 * MINUTE,
   },
   camera: { deviceCount: 1, inUse: false, listenerRegistered: true, lastReadMs: NOW - MINUTE },
-  mic: { inUse: false, meetingAppRunning: false, meetingApp: null, needsPermission: false },
+  mic: { inUse: false, needsPermission: false },
   sync: {
     configured: true,
     pendingRows: 0,

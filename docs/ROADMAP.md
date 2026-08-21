@@ -46,7 +46,7 @@ Build a throwaway self-signed bundle. Put it in `/Applications` on the **work** 
 - (d) sleep closes at `lastRealSignalMs`, not at wake time
 - (e) toggling the jiggler closes the current interval and opens a new one, so no stored interval is ever partially jiggler-covered
 - (f) a property test over arbitrary signal streams asserts `endedAt <= lastRealSignalWithin(interval)` **always**
-- (g) mic-in-use **without** a meeting app running does **not** open an interval; mic-in-use **with** one does; a sub-60-second capture never opens one
+- (g) mic-in-use opens an interval on its own, whatever is running; a sub-60-second capture never opens one. (Originally worded as a conjunction with a running meeting app — that half was removed, see PRD §3.5)
 
 ---
 

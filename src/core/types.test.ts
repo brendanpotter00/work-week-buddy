@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { NO_SIGNAL, initialState } from "./types";
-import { DEFAULTS, WWB_MAGIC, MEETING_APPS, MIC_IGNORE } from "../shared/constants";
+import { DEFAULTS, WWB_MAGIC } from "../shared/constants";
 
 describe("core types", () => {
   it("uses a sentinel that cannot collide with a real epoch", () => {
@@ -35,13 +35,10 @@ describe("constants", () => {
   });
 
   it("keeps a 60-second floor under mic capture", () => {
-    // Otherwise a two-second Siri invocation opens a work interval.
+    // Otherwise a two-second Siri invocation opens a work interval. This is now
+    // the ONLY guard on the mic — the meeting-app allowlist and the dictation
+    // ignore list are gone (PRD §3.5) — so the number is load-bearing rather
+    // than a belt beside a brace.
     expect(DEFAULTS.micMinCaptureMs).toBe(60_000);
-  });
-
-  it("never lists a dictation app as a meeting app", () => {
-    for (const ignored of MIC_IGNORE) {
-      expect(MEETING_APPS as readonly string[]).not.toContain(ignored);
-    }
   });
 });

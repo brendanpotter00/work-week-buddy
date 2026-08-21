@@ -46,7 +46,6 @@ function status(over: Partial<LiveStatus> = {}): LiveStatus {
     heldUntilMs: null,
     cameraOn: false,
     micCapturing: false,
-    meetingAppRunning: false,
     machineId: "m",
     machineLabel: "",
     closedHoursThisWeek: 0,

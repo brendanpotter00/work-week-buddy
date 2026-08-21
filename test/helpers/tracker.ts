@@ -50,7 +50,7 @@ export function run(
   start: TrackerState = {
     open: null,
     cameraOn: false,
-    micMeeting: false,
+    micActive: false,
     jiggler: false,
     paused: false,
     deadlineAtMs: null,

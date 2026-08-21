@@ -205,14 +205,6 @@ export interface RuntimeOptions {
    */
   readonly sync?: SyncSeam | null;
   /**
-   * "Is a meeting app running." The mic alone is never a work signal — dictation
-   * tools hold the microphone more or less continuously — so `src/core/levels`
-   * conjoins it with this. Detecting it needs a process scan that no committed
-   * module exposes yet, so it is injected and defaults to `false`: under-count
-   * rather than invent a meeting.
-   */
-  readonly isMeetingAppRunning?: () => boolean;
-  /**
    * Where the last self-test result is kept between launches.
    *
    * Injected rather than reached for, for the same reason the sync seam is:
@@ -272,6 +264,16 @@ class Runtime implements AppRuntime {
   private launchedAtMs: number;
 
   private jigglerTimer: NodeJS.Timeout | null = null;
+  /**
+   * The last jiggler self-test said no. Cleared only by a run that says yes.
+   *
+   * Not read back from `selfTestStore`: the store is evidence about an INSTALL
+   * and is deliberately allowed to hold a stale answer from another build,
+   * whereas this is one bit about the process that is running right now.
+   */
+  private selfTestFailed = false;
+  /** One run at a time. A second toggle mid-run must not start a second test. */
+  private selfTestRunning = false;
   private lastSignalEmitMs = 0;
   private rowVersion = 0;
   private hoursCache: { key: string; week: number | null; today: number | null } | null = null;
@@ -405,7 +407,6 @@ class Runtime implements AppRuntime {
       {
         cameraInUse: this.cameraInUse,
         micInUse: this.micInUse,
-        meetingAppRunning: this.o.isMeetingAppRunning?.() ?? false,
         atMs,
       },
       this.o.micMinCaptureMs ?? DEFAULTS.micMinCaptureMs,
@@ -552,6 +553,8 @@ class Runtime implements AppRuntime {
     switch (change.key) {
       case "jiggler":
         this.setJiggler(change.value);
+        // NOT AWAITED, ON PURPOSE. See `verifyJigglerSafety`.
+        if (change.value) this.verifyJigglerSafety();
         break;
       case "paused":
         this.dispatch(
@@ -602,7 +605,7 @@ class Runtime implements AppRuntime {
       // only the fact that presence continued across the seam.
       if (hadInput) this.dispatch({ kind: "realInput", atMs, keys: 0, mouse: 0 });
       else if (this.state.cameraOn) this.dispatch({ kind: "cameraOn", atMs });
-      else if (this.state.micMeeting) this.dispatch({ kind: "micMeetingOn", atMs });
+      else if (this.state.micActive) this.dispatch({ kind: "micOn", atMs });
     }
 
     if (on && !this.state.paused) this.startJiggler();
@@ -749,7 +752,6 @@ class Runtime implements AppRuntime {
       heldUntilMs: held === null || open === null ? null : this.heldUntil(open.lastInputMs, open.startedAtMs),
       cameraOn: this.state.cameraOn,
       micCapturing: this.micInUse,
-      meetingAppRunning: this.o.isMeetingAppRunning?.() ?? false,
       machineId: this.machineId,
       machineLabel: this.o.machineLabel?.() ?? "",
       closedHoursThisWeek: hours.week,
@@ -761,7 +763,7 @@ class Runtime implements AppRuntime {
 
   private heldBy(): HoldKind | null {
     if (this.state.cameraOn) return "camera";
-    if (this.state.micMeeting) return "mic";
+    if (this.state.micActive) return "mic";
     return null;
   }
 
@@ -823,6 +825,10 @@ class Runtime implements AppRuntime {
     if (p.accessibility !== "granted" && (this.state.jiggler || p.promptConsumed.accessibility)) {
       out.push("accessibility_missing");
     }
+    // Set only by an actual failed run, and cleared only by a passing one. A
+    // machine that has never failed never wears this, which is what keeps the
+    // ⚠︎ meaningful — the same reasoning `accessibility_missing` above gets.
+    if (this.selfTestFailed) out.push("selftest_failed");
     const sync = this.sync.health();
     if (sync.silentForMs !== null && sync.silentForMs > 72 * 3_600_000) {
       out.push("sync_silent_72h");
@@ -844,6 +850,64 @@ class Runtime implements AppRuntime {
     const res = await this.sync.flush();
     this.emit("sync");
     return res;
+  }
+
+  /**
+   * The safety check, run because the jiggler was just switched ON.
+   *
+   * WHY HERE AND NOWHERE ELSE. The check proves the event tap can still tell
+   * our own synthetic input apart from a person's. If it cannot, our jiggle
+   * counts as a human and the app reports twenty-four-hour workdays — silently
+   * and plausibly (AGENTS.md trap #4). That risk exists only while the jiggler
+   * is running, and the jiggler ships off, which is why this is a moment and
+   * not a card sitting permanently in Settings.
+   *
+   * WHY IT IS NOT AWAITED. `selfTest()` in `src/native/native.ts` deliberately
+   * BLOCKS THE TAP CALLBACK for 2.5 seconds to prove macOS disables the tap and
+   * that the app gets it back unaided — and that callback runs on the main run
+   * loop. End to end the call is 6–8 seconds of wall clock with a hard
+   * main-thread block in the middle. Awaiting it inside `setToggle` would
+   * freeze the switch the user is holding, which is precisely the thing this
+   * codebase learned not to do. So it is started here, the toggle returns
+   * immediately, and the answer is reconciled when it arrives.
+   *
+   * A THROW IS A FAILURE. A check that could not run is not a check that
+   * passed, and the safe direction is to stop posting synthetic input.
+   */
+  private verifyJigglerSafety(): void {
+    if (this.selfTestRunning) return;
+    this.selfTestRunning = true;
+    void this.selfTest().then(
+      (result) => {
+        this.selfTestRunning = false;
+        this.onSelfTestVerdict(result.passed);
+      },
+      (err: unknown) => {
+        this.selfTestRunning = false;
+        console.error("[runtime] jiggler self-test could not run", err);
+        this.onSelfTestVerdict(false);
+      },
+    );
+  }
+
+  /** Silent on a pass. On a failure: stop jiggling, and say so out loud. */
+  private onSelfTestVerdict(passed: boolean): void {
+    // Six to eight seconds is long enough for a quit to land underneath us, and
+    // `setJiggler` dispatches through the reducer, which writes to a database
+    // the caller may already have closed. A verdict that arrives after `stop()`
+    // has nothing left to act on.
+    if (this.stopped) return;
+    const was = this.selfTestFailed;
+    this.selfTestFailed = !passed;
+    if (passed) {
+      // Only worth a push if it is CLEARING something the user can see. A pass
+      // is otherwise invisible: no banner, no dialog, no tray change, nothing.
+      if (was) this.emit("toggles");
+      return;
+    }
+    // The discriminator is broken or unproven. Refuse to keep posting.
+    this.setJiggler(false);
+    this.emit("toggles");
   }
 
   async selfTest(): Promise<SelfTestResult> {
@@ -944,8 +1008,6 @@ class Runtime implements AppRuntime {
       },
       mic: {
         inUse: this.micInUse,
-        meetingAppRunning: this.o.isMeetingAppRunning?.() ?? false,
-        meetingApp: null,
         needsPermission: null,
       },
       sync: sync.sync,
