@@ -180,7 +180,16 @@ if [ "$DO_SIGN" != "1" ]; then
   warn "--no-sign: the bundle will keep Electron's ad-hoc signature"
   info "Grants do not survive a rebuild without a stable designated requirement."
 elif [ "$DRY_RUN" = "1" ]; then
-  info "would require the '$IDENTITY' codesigning identity"
+  # Resolve the hash even here. It is a read-only keychain lookup, and without it
+  # the dry run prints `--sign WWB Local Signing` while the real run signs by
+  # SHA-1 — a dry run that describes a different command than the one it is
+  # previewing is worse than no dry run.
+  IDENTITY_HASH="$(identity_hash)"
+  if [ -n "$IDENTITY_HASH" ]; then
+    info "would sign with '$IDENTITY' ($IDENTITY_HASH)"
+  else
+    info "would require the '$IDENTITY' codesigning identity (none found yet)"
+  fi
 else
   # NOT `find-identity -v`. -v means "the chain validates", which for a
   # self-signed leaf it never will unless someone marks it Always Trust in
