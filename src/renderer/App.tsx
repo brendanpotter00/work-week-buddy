@@ -256,16 +256,6 @@ export function App(): React.ReactElement {
           />
         ) : null}
 
-        {/* The headline: how long this session has been running, and how much
-            of today is already banked. `metrics.policy` rather than the
-            settings pane, so the caveat the stopwatch shows and the numbers the
-            stat cards show were computed under the same policy. */}
-        <LiveStopwatch
-          status={status}
-          policy={metrics?.policy ?? DEFAULT_METRICS_POLICY}
-          nowMs={nowMs}
-        />
-
         {/* Context strip — machine, signal, toggles.
             IT NO LONGER SAYS WHAT STATE YOU ARE IN. It used to carry its own
             pulsing dot and its own "Working", six pixels under the stopwatch's,
@@ -380,6 +370,24 @@ export function App(): React.ReactElement {
             }
           />
         </section>
+
+        {/* The live session: how long it has been running, and how much of
+            today is already banked. `metrics.policy` rather than the settings
+            pane, so the caveat the stopwatch shows and the numbers the stat
+            cards show were computed under the same policy.
+
+            IT SITS HERE, below the tracked figures, at the owner's request —
+            "the timer should be below all those metric tracked blocks as well,
+            above the GitHub graph thing". It was the top of the page; the
+            things that are true right now (which Mac, counted, last signal,
+            the two switches) and the week's totals now come first. The order
+            is asserted in `test/renderer/dashboard.test.tsx`, because an order
+            nothing checks is an order that drifts back. */}
+        <LiveStopwatch
+          status={status}
+          policy={metrics?.policy ?? DEFAULT_METRICS_POLICY}
+          nowMs={nowMs}
+        />
 
         {/* Heatmap */}
         <section

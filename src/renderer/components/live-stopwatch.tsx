@@ -76,7 +76,10 @@ export function LiveStopwatch({
       data-slot="stopwatch"
       data-tone={view.tone}
       aria-label="Current session"
-      className="mt-6 flex flex-wrap items-center justify-between gap-x-8 gap-y-4 rounded-lg border border-border bg-card px-6 py-5"
+      // mt-4, not the mt-6 it carried while it was the first card on the page:
+      // it now sits between the stat row and the heatmap, and everything in
+      // that stretch is 16 px apart. At 24 px it read as wedged in.
+      className="mt-4 flex flex-wrap items-center justify-between gap-x-8 gap-y-4 rounded-lg border border-border bg-card px-6 py-5"
     >
       <div>
         <div className="flex items-center gap-2 text-[11px] font-medium tracking-[0.06em] text-muted-foreground uppercase">
