@@ -205,8 +205,10 @@ else
   else
     bad "'$IDENTITY' is in $KEYCHAIN but codesign cannot sign with it."
     info "This is NOT a trust problem — trust is not required and never was."
-    info "The usual cause is a certificate imported without its private key."
-    info "Check with: ./scripts/make-signing-cert.sh --show"
+    info "Either $KEYCHAIN is outside the keychain search list (check with"
+    info "'security list-keychains -d user'), or the .p12 was imported without"
+    info "its private key."
+    info "Diagnose with: ./scripts/make-signing-cert.sh --show"
     exit 1
   fi
 fi

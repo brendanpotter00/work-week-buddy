@@ -259,8 +259,12 @@ if [ "$SHOW_ONLY" = "1" ]; then
   bad "'$NAME' is in $KEYCHAIN but codesign cannot sign with it."
   print_identity
   info "This is NOT a trust problem — trust is not required and never was."
-  info "The usual cause is a certificate imported without its private key."
-  info "Delete it in Keychain Access and re-run ./scripts/make-signing-cert.sh."
+  info "There are exactly two causes, and Always Trust fixes neither:"
+  info "  1. $KEYCHAIN is not in the keychain search list, so codesign cannot"
+  info "     see it at all. --keychain says which keychain to PREFER, not where"
+  info "     codesign may look. Check: security list-keychains -d user"
+  info "  2. the .p12 was imported without its private key. Delete the"
+  info "     certificate in Keychain Access and re-run this script."
   exit 1
 fi
 
@@ -354,8 +358,10 @@ if proves_it_can_sign "$HASH"; then
 else
   bad "imported, but codesign cannot sign with it."
   print_identity
-  info "Not a trust problem. Most likely the private key did not come across."
-  info "Delete the certificate in Keychain Access and run this script again."
+  info "Not a trust problem. Either $KEYCHAIN is outside the keychain search"
+  info "list (check: security list-keychains -d user), or the private key did"
+  info "not come across — for that, delete the certificate in Keychain Access"
+  info "and run this script again."
   exit 1
 fi
 

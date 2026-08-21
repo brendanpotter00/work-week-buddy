@@ -135,8 +135,43 @@ describe("make-signing-cert.sh", () => {
   });
 });
 
+describe("neither script gates on `find-identity -v`", () => {
+  // THE regression test for the whole "Always Trust" saga. `-v` means "the
+  // certificate chain validates", which a self-signed leaf's never does unless
+  // a human opens Keychain Access and marks it Always Trust. codesign does not
+  // care — it signs with an untrusted leaf, and the requirement it produces
+  // (`certificate leaf = H"…"`, no anchor clause) is never chain-validated
+  // either, by codesign or by TCC. So gating on -v added a GUI step, a login
+  // password, and a second-Mac repeat, all to satisfy a check that was asking
+  // the wrong question. If `security find-identity -v` comes back, so does all
+  // of that.
+  it.each(["install.sh", "make-signing-cert.sh"])("%s", (name) => {
+    const src = readFileSync(join(SCRIPTS, name), "utf8");
+    // Comments stripped: both scripts explain -v at length, and the explanation
+    // is the point. What must not come back is the CALL.
+    const code = src
+      .split("\n")
+      .filter((line) => !/^\s*#/.test(line))
+      .join("\n");
+    expect(code).not.toMatch(/security find-identity -v/);
+    // …and the honest check is still there: resolve, then actually sign.
+    expect(code).toMatch(/security find-identity -p codesigning/);
+    expect(code).toContain("codesign");
+  });
+});
+
 describe("install.sh", () => {
   const src = readFileSync(join(SCRIPTS, "install.sh"), "utf8");
+
+  it("signs by SHA-1, not by common name", () => {
+    // Two certificates can share a CN — which is exactly what happens when
+    // someone re-mints instead of importing the shared wwb.p12 — and the wrong
+    // one produces a different designated requirement and silently drops every
+    // grant. The hash is unambiguous. `man codesign`: "If identity consists of
+    // exactly forty hexadecimal digits, it is instead interpreted as the SHA-1
+    // hash of the certificate part of the desired identity."
+    expect(src).toMatch(/--sign "\$\{IDENTITY_HASH:-\$IDENTITY\}"/);
+  });
 
   it("installs to exactly /Applications/Work Week Buddy.app", () => {
     // The TCC grant binds to the on-disk path. Any other destination is an

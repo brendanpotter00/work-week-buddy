@@ -363,4 +363,56 @@ describe.runIf(isMac)("make-signing-cert.sh, executed for real into a scratch di
     expect(r.code).toBe(1);
     expect(r.out).toContain("may not be empty");
   });
+
+  it("says one true thing when there is no identity — not two contradictory ones", () => {
+    // `--show` used to print "no 'WWB Local Signing' identity" and then, on the
+    // very next line, "it IS in the keychain but is not trusted". Both cannot be
+    // true, and neither told the reader what to do.
+    const r = sh(CERT, ["--show", "--keychain", join(root, "nope.keychain")]);
+    expect(r.code).toBe(1);
+    expect(r.out).toContain("no 'WWB Local Signing' identity");
+    expect(r.out).not.toContain("is not trusted");
+    expect(r.out).not.toContain("Always Trust");
+    // …and it says what to do instead.
+    expect(r.out).toContain("make-signing-cert.sh");
+  });
+});
+
+/**
+ * The success path of the precondition, against the REAL certificate.
+ *
+ * Skipped when this Mac has no `WWB Local Signing` identity, which is every CI
+ * runner and any fresh clone — there is no way to fake it, because putting a
+ * scratch keychain where codesign can see it means mutating the user's global
+ * keychain search list, and a test suite may not do that.
+ *
+ * Where it does run it is the thing that was broken: on a machine whose leaf is
+ * untrusted (the normal, expected state), the old gate reported "0 valid
+ * identities found" and refused to install.
+ */
+const hasLocalIdentity =
+  isMac &&
+  spawnSync("bash", [CERT, "--print-hash"], { encoding: "utf8", cwd: REPO }).status === 0;
+
+describe.runIf(hasLocalIdentity)("the real signing identity on this Mac", () => {
+  it("is usable even though `find-identity -v` calls it invalid", () => {
+    const all = spawnSync("security", ["find-identity", "-p", "codesigning"], {
+      encoding: "utf8",
+    }).stdout;
+    const valid = spawnSync("security", ["find-identity", "-v", "-p", "codesigning"], {
+      encoding: "utf8",
+    }).stdout;
+
+    expect(all).toContain("WWB Local Signing");
+    // The precondition this repo used to gate on. If this ever starts passing,
+    // someone marked the certificate Always Trust — which is harmless, but the
+    // point is that it is NOT required for anything below.
+    const trusted = valid.includes("WWB Local Signing");
+
+    const r = sh(CERT, ["--show"]);
+    expect(r.code, r.out).toBe(0);
+    expect(r.out).toContain("able to sign");
+    // Signing works whether or not the chain validates.
+    expect(r.out, `trusted=${trusted}`).toMatch(/certificate leaf = H"[0-9a-f]{40}"/);
+  });
 });

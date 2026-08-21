@@ -627,10 +627,27 @@ is not involved either, because a locally built bundle has no
 fine today, which is the proof.
 
 The earlier note recorded `codesign --sign "WWB Local Signing"` answering *"no
-identity found"*. **That does not reproduce**, and the likeliest explanation is a
-`.p12` whose private key never made it into the keychain — which is a missing
-key, not a missing trust setting, and the two look identical from the outside.
-`--show` now distinguishes them.
+identity found"*, and read that as the symptom of an untrusted certificate. That
+error is real, but trust is not what causes it — **the keychain search list is**.
+Reproduced deliberately, with a throwaway leaf in a keychain that is not in the
+search list:
+
+```
+$ security find-identity -p codesigning /tmp/scratch.keychain
+  1) 90A1…919C "WWB Test Leaf" (CSSMERR_TP_NOT_TRUSTED)   ← present
+$ codesign --keychain /tmp/scratch.keychain --sign 90A1…919C probe
+  90A1…919C: no identity found                            ← and unusable
+$ security list-keychains -d user -s /tmp/scratch.keychain <the login keychain>
+$ codesign --keychain /tmp/scratch.keychain --sign 90A1…919C probe
+  probe: replacing existing signature                     → exit 0
+```
+
+Nothing about trust changed between those last two commands. `--keychain` tells
+codesign which keychain to *prefer*, not where it is allowed to look; a keychain
+outside the search list is invisible to it. So "present in the keychain but
+`no identity found`" means one of two things — the keychain is not in the search
+list, or the `.p12` arrived without its private key — and **neither is fixed by
+Always Trust**. `--show` distinguishes them by trying the operation.
 
 What genuinely depended on trust was **this repo's own precondition check**:
 `install.sh` gated on `find-identity -v`, which hides an identity whose chain
