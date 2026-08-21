@@ -391,6 +391,32 @@ describe("failures", () => {
     expect(cloud.databases.map((d) => d.name)).toEqual(["wwb"]);
   });
 
+  it("never shows a token the upload did not land", async () => {
+    // `scripts/bringup-cloud.sh` learned this first: a token printed by a run
+    // that did not upload it is WORSE than no token. It looks exactly like the
+    // real thing, and pasting it into the other Mac produces 401s that read as
+    // a broken Worker.
+    cloud.denied.add("Workers Scripts: Edit");
+    const out = await run();
+
+    expect(out.ok).toBe(false);
+    expect(out.steps.find((s) => s.id === "deploy")?.state).toBe("failed");
+    expect(out.otherMachineToken).toBeNull();
+  });
+
+  it("DOES show it when the upload landed and a later step failed", async () => {
+    // The opposite case, and it matters just as much: the token is in
+    // Cloudflare, cannot be read back, and a re-run would replace it rather
+    // than recover it. Losing it here would strand the other Mac.
+    cloud.failOnce.set("/workers/scripts/wwb-sync/subdomain", 500);
+    const out = await run();
+
+    expect(out.ok).toBe(false);
+    expect(out.steps.find((s) => s.id === "deploy")?.state).toBe("done");
+    expect(out.otherMachineToken).not.toBeNull();
+    expect(out.otherMachineToken).toBe(cloud.bindingValue("TOKEN_WORK"));
+  });
+
   it("tells a dead network apart from a refused one", async () => {
     cloud.offline = true;
     const out = await run();

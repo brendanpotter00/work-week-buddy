@@ -416,6 +416,21 @@ export async function runCloudSetup(
 
   let workerUrl: string | null = null;
   let otherMachineToken: string | null = null;
+  /**
+   * Has the OTHER Mac's minted token actually reached Cloudflare?
+   *
+   * The token is minted before the upload and the upload can fail, so these are
+   * two different facts and only one of them makes it safe to show. From
+   * `scripts/bringup-cloud.sh`, which learned this first: "A token printed by a
+   * run that did not upload it is worse than no token: it looks exactly like
+   * the real thing, and pasting it into the app produces 401s that read as a
+   * broken Worker."
+   *
+   * After a SUCCESSFUL upload the opposite is true and it must be shown even if
+   * a later step fails — it is in Cloudflare, it cannot be read back, and a
+   * re-run would replace it rather than recover it.
+   */
+  let otherTokenUploaded = false;
   let unstoredToken: string | null = null;
 
   try {
@@ -486,6 +501,8 @@ export async function runCloudSetup(
         existingNames,
       }),
     });
+    // Only now is the minted token a real credential rather than a string.
+    otherTokenUploaded = mintOther;
     tracker.done(
       "deploy",
       mintOther
@@ -583,10 +600,13 @@ export async function runCloudSetup(
       workerUrl,
       slot: req.slot,
       otherSlot,
-      // Shown even on failure when it was minted BEFORE the failure: the upload
-      // may well have landed it in Cloudflare, and a token that exists up there
-      // and nowhere else is the one thing that cannot be recovered by re-running.
-      otherMachineToken,
+      // ONLY IF THE UPLOAD LANDED IT. After a successful upload it must be
+      // shown even though a later step failed — it is in Cloudflare, it cannot
+      // be read back, and a re-run replaces it rather than recovering it.
+      // Before one, it is a string that has never been a credential, and
+      // showing it would produce 401s on the other Mac that read as a broken
+      // Worker. See `otherTokenUploaded`.
+      otherMachineToken: otherTokenUploaded ? otherMachineToken : null,
       unstoredToken,
     };
   }
