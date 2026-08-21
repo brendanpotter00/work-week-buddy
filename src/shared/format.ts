@@ -224,12 +224,49 @@ export function formatStopwatch(ms: number): string {
   return `${Math.floor(total / 3600)}:${p(Math.floor((total % 3600) / 60))}:${p(total % 60)}`;
 }
 
-/** '12s' · '4m' · '2h'. The ONLY formatter allowed to be relative to now(). */
+/**
+ * '12s' · '4m' · '2h'. The ONLY formatter allowed to be relative to now().
+ *
+ * Seconds resolution, bare magnitude — the caller supplies its own 'ago'. It
+ * belongs where the string is computed once per glance and the seconds are the
+ * information: the tray menu, rebuilt on every open (`main/tray.ts` says so),
+ * and a sync flush whose age is a diagnostic. For an age that simply SITS on a
+ * panel, use `formatAgoMinutes()`.
+ */
 export function formatAgo(ms: number): string {
   const s = Math.max(0, Math.floor(ms / 1000));
   if (s < 60) return `${s}s`;
   if (s < 3600) return `${Math.floor(s / 60)}m`;
   return `${Math.floor(s / 3600)}h`;
+}
+
+/**
+ * 'just now' · '4m ago' · '2h ago' — the same age at MINUTE resolution, as a
+ * whole phrase.
+ *
+ * The split from `formatAgo()` above is the split `formatStopwatch()` and
+ * `formatDuration()` already make, for the same reason: a figure that is on
+ * screen continuously and changes sixty times a minute is movement, not
+ * information. A stopwatch has earned that; nothing else on the dashboard has.
+ *
+ * 'ago' is INSIDE, because the sub-minute case cannot take one — 'last signal
+ * just now ago' is not a sentence. Callers append nothing.
+ *
+ * Why 'just now' for the sub-minute case:
+ *  - '0m' reads as a measurement that came out zero, and `formatDuration()`
+ *    already spends '0m' on exactly that meaning.
+ *  - '<1m ago' reads as a threshold, and a '<' beside tabular digits at 13px
+ *    reads as a rendering fault before it reads as a less-than.
+ *  - 'less than a minute ago' is four times the width of every other cell in
+ *    the status strip, so the row reflows the moment it flips to '1m ago'.
+ * 'just now' is the shortest phrasing that is plainly not a number, which is
+ * the whole point: under a minute there is nothing worth counting.
+ */
+export function formatAgoMinutes(ms: number): string {
+  const m = Math.max(0, Math.floor(ms / 60_000));
+  if (m < 1) return "just now";
+  if (m < 60) return `${m}m ago`;
+  return `${Math.floor(m / 60)}h ago`;
 }
 
 /** '36.5' · '—'. null means no data; 0 means zero hours. They differ. */

@@ -21,7 +21,7 @@ Everything this document owns talks to the rest of the app through **one interfa
 
 Each of these produces a plausible-looking wrong number, not an error.
 
-1. **Every duration displayed anywhere is `lastSignalMs − openedAtMs`.** Never `now − openedAtMs`. Only "last signal *N*s ago" is allowed to read `now`. (§3.1)
+1. **Every duration displayed anywhere is `lastSignalMs − openedAtMs`.** Never `now − openedAtMs`. The one `now`-relative field is the tray menu's "last signal *N*s ago", which is rebuilt on every open. **The dashboard's is not one of them:** its cell reads `asOfMs − lastSignalMs`, both off the same snapshot, at minute resolution. It used to read the renderer's clock and that was a bug in both directions — sixty redraws a minute, and a value that froze at whatever it said when the session went idle, because `useNowMs()` is armed only while an interval is open (§5.7). (§3.1, §3.3)
 2. **The 15-minute deadline never crosses IPC.** `LiveStatus.deadlineMs` is display-only and no renderer code may schedule anything from it. `AGENTS.md` trap #10.
 3. **The renderer has no database handle, no `node:sqlite`, no `fs`, no `electron`.** Three enforcement layers in §2.8.
 4. **`sandbox: true` requires a CommonJS preload.** An ESM preload under sandbox silently fails to load and `window.wwb` is `undefined`. (§1.10)
@@ -1610,12 +1610,33 @@ export function formatDuration(ms: number): string {
   return h > 0 ? `${h}h ${m}m` : `${m}m`
 }
 
-/** '12s' · '4m' · '2h'. The ONLY formatter allowed to be relative to now(). */
+/**
+ * '12s' · '4m' · '2h'. Seconds resolution, bare magnitude — the caller adds
+ * its own 'ago'. For a string computed once per glance: the tray menu (rebuilt
+ * on every open) and the sync pane's flush/pull ages, where the seconds ARE the
+ * diagnostic. Not for anything that sits on screen.
+ */
 export function formatAgo(ms: number): string {
   const s = Math.max(0, Math.floor(ms / 1000))
   if (s < 60) return `${s}s`
   if (s < 3600) return `${Math.floor(s / 60)}m`
   return `${Math.floor(s / 3600)}h`
+}
+
+/**
+ * 'just now' · '4m ago' · '2h ago'. The same age at MINUTE resolution, as a
+ * whole phrase — 'ago' is inside because the sub-minute case cannot take one.
+ *
+ * The split mirrors formatStopwatch/formatDuration: a figure that is
+ * continuously on screen and changes sixty times a minute is movement, not
+ * information. The dashboard's status strip is the caller; the stopwatch is the
+ * only thing on that page allowed to tick.
+ */
+export function formatAgoMinutes(ms: number): string {
+  const m = Math.max(0, Math.floor(ms / 60_000))
+  if (m < 1) return "just now"
+  if (m < 60) return `${m}m ago`
+  return `${Math.floor(m / 60)}h ago`
 }
 
 /** '36.5' · '—'. null means no data; 0 means zero hours. They differ. */

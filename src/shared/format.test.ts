@@ -10,6 +10,7 @@ import fc from "fast-check";
 import {
   creditedOpenMs,
   formatAgo,
+  formatAgoMinutes,
   formatCount,
   formatDuration,
   formatHeaderDate,
@@ -239,6 +240,26 @@ describe("display formatters", () => {
     expect(formatAgo(12_000)).toBe("12s");
     expect(formatAgo(4 * MIN)).toBe("4m");
     expect(formatAgo(2 * 3600_000)).toBe("2h");
+  });
+
+  it("the minute-resolution age is a whole phrase, and never a bare zero", () => {
+    // The pair mirrors formatStopwatch/formatDuration: seconds where they are
+    // information, minutes where the figure just sits on screen. The status
+    // strip is the second kind — `test/renderer/last-signal.test.tsx` has the
+    // owner's complaint in his own words.
+    expect(formatAgoMinutes(0)).toBe("just now");
+    expect(formatAgoMinutes(59_000)).toBe("just now");
+    expect(formatAgoMinutes(60_000)).toBe("1m ago");
+    expect(formatAgoMinutes(119_000)).toBe("1m ago");
+    expect(formatAgoMinutes(4 * MIN)).toBe("4m ago");
+    expect(formatAgoMinutes(59 * MIN)).toBe("59m ago");
+    expect(formatAgoMinutes(60 * MIN)).toBe("1h ago");
+    expect(formatAgoMinutes(2 * 3600_000)).toBe("2h ago");
+    // Clamped like every other formatter here: a clock that skewed backwards
+    // must not render '-1m ago'.
+    expect(formatAgoMinutes(-5)).toBe("just now");
+    // 'ago' is inside, so a caller appending its own would read 'ago ago'.
+    expect(formatAgoMinutes(30_000).endsWith("ago")).toBe(false);
   });
 
   it("the week delta uses a real minus sign and needs a baseline", () => {

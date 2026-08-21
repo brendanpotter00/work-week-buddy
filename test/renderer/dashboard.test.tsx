@@ -170,7 +170,10 @@ describe("tabular-nums", () => {
     const bridge = makeBridge(
       defaultHandlers(
         metricsBundle(),
-        liveStatus({ lastSignalMs: asOf - 12_000, openedAtMs: asOf - 12_000 - 9_660_000 }),
+        // 4 minutes rather than 12 seconds: the last-signal cell rounds to the
+        // minute now, and '12s' would land on 'just now' — a string with no
+        // digits in it, which cannot demonstrate anything about tabular-nums.
+        liveStatus({ lastSignalMs: asOf - 240_000, openedAtMs: asOf - 240_000 - 9_660_000 }),
       ),
     );
     installBridge(bridge);
@@ -188,7 +191,10 @@ describe("tabular-nums", () => {
       return el;
     };
     expect(spanWith("2h 41m").className).toContain("tabular-nums"); // the open interval
-    expect(spanWith("12s").className).toContain("tabular-nums"); // last signal, ago
+    // The last-signal cell reads '4m ago' rather than '12s ago': it settles to
+    // the minute and no longer ticks at all. `last-signal.test.tsx` owns that
+    // behaviour; this line only checks it kept the class.
+    expect(spanWith("4m ago").className).toContain("tabular-nums");
     expect(spanWith("24.5h").className).toContain("tabular-nums"); // per machine
     expect(spanWith("2,614 h tracked since Aug 2025").className).toContain("tabular-nums");
     expect(spanWith("15 min").className).toContain("tabular-nums"); // idle timeout
@@ -418,7 +424,10 @@ describe("live status", () => {
     // the rule that outranks everything.
     expect(container.querySelector('[data-slot="credited-open"]')?.textContent).toBe("2h 41m");
     expect(container.textContent).toContain("2h 41m");
-    expect(container.textContent).toContain("12s");
+    // 12 seconds since the last signal now reads 'just now', not '12s': the
+    // strip settled to minute resolution so the stopwatch above is the only
+    // thing on the page that moves. `last-signal.test.tsx` owns that.
+    expect(container.textContent).toContain("last signal just now");
     vi.restoreAllMocks();
   });
 
