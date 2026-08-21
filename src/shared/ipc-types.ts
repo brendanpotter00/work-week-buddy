@@ -459,6 +459,18 @@ export interface InvokeContract {
    * navigating itself and losing the dashboard.
    */
   "wwb:window:openSettings": { req: void; res: void };
+  /**
+   * Double-click on the title bar — zoom, the way every macOS title bar does.
+   *
+   * It is wired by hand because a `-webkit-app-region: drag` region gets NO
+   * double-click behaviour from macOS. Measured on Electron 43 against a
+   * `hiddenInset` window: a double-click anywhere in the drag region, and a
+   * double-click in the top 28 px where the native title bar would be, both do
+   * nothing — `fullSizeContentView` means the web contents own every pixel, so
+   * there is no title bar left for AppKit to act on. A no-op on a window that
+   * is not maximizable (onboarding is a fixed box).
+   */
+  "wwb:window:zoom": { req: void; res: void };
 }
 
 export interface PushContract {
@@ -496,6 +508,7 @@ export const INVOKE_CHANNELS = [
   "wwb:settings:set",
   "wwb:window:openDashboard",
   "wwb:window:openSettings",
+  "wwb:window:zoom",
 ] as const satisfies readonly InvokeChannel[];
 
 export const PUSH_CHANNELS = [

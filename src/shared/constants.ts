@@ -66,6 +66,60 @@ export const WINDOW_SIZE = {
   settings: { width: 680, height: 820, minWidth: 560, minHeight: 520 },
 } as const;
 
+/** The three windows, by the name both halves of the app call them. */
+export type AppWindow = keyof typeof WINDOW_SIZE;
+
+/**
+ * WHERE MACOS FLOATS THE TRAFFIC LIGHTS, and therefore where the title bar has
+ * to start.
+ *
+ * All three windows are `titleBarStyle: "hiddenInset"`, which means there is no
+ * chrome: the web contents fill the window right up to the top edge and macOS
+ * draws the three buttons on top of them at this offset. Nothing else marks the
+ * title bar — so if the renderer does not put a drag region up there, the strip
+ * a person reaches for to move the window does nothing at all. That was the
+ * bug: the dashboard's drag region started 40 px down and 32 px in, because it
+ * was the `<header>` inside the centred content column rather than a bar across
+ * the window.
+ *
+ * `src/main/windows.ts` spreads these into `trafficLightPosition` and
+ * `src/renderer/components/title-bar.tsx` reads them back, so the two cannot
+ * drift into a title bar that covers the buttons or a title that starts under
+ * them.
+ */
+export const TRAFFIC_LIGHT = {
+  dashboard: { x: 18, y: 18 },
+  onboarding: { x: 14, y: 14 },
+  settings: { x: 14, y: 14 },
+} as const satisfies Record<AppWindow, { x: number; y: number }>;
+
+/**
+ * How tall a macOS window button is, measured from `trafficLightPosition.y`.
+ *
+ * 12 px of circle in a 14 px box. Rounded UP on purpose: the title bar's job is
+ * to be at least this tall, and being a pixel generous costs nothing while
+ * being a pixel short puts the window title through the close button.
+ */
+export const TRAFFIC_LIGHT_HEIGHT = 14;
+
+/**
+ * The blank strip each title bar keeps above its own first line of text.
+ *
+ * Every one of these is what that window's header already had — the dashboard's
+ * `py-10`, the other two's `pt-8` — so making the header a real title bar moved
+ * nothing on screen. That matters most for onboarding, which is a fixed
+ * 560 × 640 box nobody can resize and which `src/main/smoke.ts` measures with
+ * 16 px of required headroom.
+ *
+ * Each must clear its own traffic lights; `test/renderer/title-bar.test.tsx`
+ * asserts exactly that against `TRAFFIC_LIGHT` above.
+ */
+export const TITLE_BAR_INSET = {
+  dashboard: 40,
+  onboarding: 32,
+  settings: 32,
+} as const satisfies Record<AppWindow, number>;
+
 /** Initial values for the settings rows. All are user-changeable later. */
 export const DEFAULTS = {
   idleTimeoutMs: 15 * 60_000,

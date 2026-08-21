@@ -103,6 +103,64 @@ describe("stat cards render the values the IPC client returned", () => {
   });
 });
 
+describe("the order of the blocks down the page", () => {
+  /** The `data-slot` markers that name a block, in the order they render. */
+  const BLOCKS = ["title-bar", "alert-banner", "status-strip", "stat-row", "stopwatch", "heatmap"];
+
+  function blockOrder(container: HTMLElement): string[] {
+    return Array.from(container.querySelectorAll("[data-slot]"))
+      .map((el) => el.getAttribute("data-slot") ?? "")
+      .filter((slot) => BLOCKS.includes(slot));
+  }
+
+  it("puts the tracked figures above the timer, and the timer above the heatmap", async () => {
+    // The owner's words: "the server laptop counted 4 minutes, last signal 19
+    // seconds ago, the jiggler and keep awake — that should be above the
+    // timer", and "the timer should be below all those metric tracked blocks
+    // as well, above the GitHub graph thing".
+    //
+    // The stopwatch was the first card on the page. What is true RIGHT NOW
+    // (which Mac, counted, last signal, the two switches) and the week's
+    // totals now come first, and the live session sits between them and the
+    // heatmap. This is asserted rather than merely done, because an order
+    // nothing checks is an order that drifts back to whatever reads best in
+    // the source file.
+    const bridge = makeBridge(defaultHandlers(metricsBundle()));
+    installBridge(bridge);
+
+    const { container } = renderApp(<App />);
+    await waitFor(() => expect(cardValue(cardByLabel(container, "This week"))).toBe("36.5"));
+
+    expect(blockOrder(container)).toEqual([
+      "title-bar",
+      "status-strip",
+      "stat-row",
+      "stopwatch",
+      "heatmap",
+    ]);
+  });
+
+  it("keeps the degraded banner above everything it is warning about", async () => {
+    // A banner under the numbers it disowns is a banner nobody reads.
+    const bridge = makeBridge(
+      defaultHandlers(metricsBundle(), liveStatus({ degraded: ["keyboard_permission_missing"] })),
+    );
+    installBridge(bridge);
+
+    const { container, findByRole } = renderApp(<App />);
+    await findByRole("alert");
+
+    expect(blockOrder(container)).toEqual([
+      "title-bar",
+      "alert-banner",
+      "status-strip",
+      "stat-row",
+      "stopwatch",
+      "heatmap",
+    ]);
+  });
+});
+
 describe("tabular-nums", () => {
   it("is on every number that changes on a timer or on data arrival", async () => {
     // Without it the layout jitters once a second, which is the sort of thing

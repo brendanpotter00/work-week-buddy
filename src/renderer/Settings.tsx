@@ -33,6 +33,7 @@ import { DeviceName } from "@/renderer/components/device-name";
 import { SelfTestCard } from "@/renderer/components/self-test-card";
 import { Field, ReadRow, SettingsCard, inputClass } from "@/renderer/components/settings-ui";
 import { SyncSettings } from "@/renderer/components/sync-settings";
+import { TitleBar } from "@/renderer/components/title-bar";
 import { Button } from "@/renderer/components/ui/button";
 import { ipc, messageOf, useDoctor, useSettings, useSyncConfig } from "@/renderer/lib/ipc";
 import { useThemeMirror } from "@/renderer/lib/use-theme-mirror";
@@ -81,16 +82,19 @@ export function Settings(): React.ReactElement {
 
   return (
     <div data-view="settings" className="flex h-svh flex-col bg-background">
-      {/* `titleBarStyle: "hiddenInset"` leaves no chrome to drag, so the header
-          IS the drag region. pt-8 clears the traffic lights. */}
-      <header className="shrink-0 px-7 pt-8 pb-3 [-webkit-app-region:drag]">
+      {/* `titleBarStyle: "hiddenInset"` leaves no chrome to drag, so this IS
+          the title bar — full window width, from the very top edge, and it
+          double-clicks to zoom. The 32 px above the word "Settings" is
+          `TITLE_BAR_INSET.settings`, which is the `pt-8` this header already
+          had, checked against the traffic lights' own offset. */}
+      <TitleBar window="settings" className="px-7 pb-3">
         <h1 className="font-heading text-[19px] leading-tight font-semibold tracking-tight">
           Settings
         </h1>
         <p className="mt-1 text-xs text-muted-foreground">
           Changes apply immediately. Nothing here rewrites an hour you have already worked.
         </p>
-      </header>
+      </TitleBar>
 
       {/* THIS scrolls, never the page body — the same rule the onboarding panes
           and the heatmap wrapper follow. */}

@@ -511,6 +511,76 @@ export function cardSub(card: HTMLElement): string {
   return card.children[2]?.textContent ?? "";
 }
 
+// ── the title bar ───────────────────────────────────────────────────────────
+
+/**
+ * Everything a person can click, in one selector.
+ *
+ * A `-webkit-app-region: drag` region SWALLOWS clicks on whatever it covers, so
+ * the list has to be generous rather than accurate: the failure it guards is a
+ * control that quietly stops working because it landed inside the title bar
+ * without opting out.
+ */
+export const INTERACTIVE_SELECTOR = [
+  "button",
+  "a[href]",
+  "input",
+  "select",
+  "textarea",
+  "summary",
+  '[role="button"]',
+  '[role="switch"]',
+  '[role="link"]',
+  '[role="checkbox"]',
+  '[role="menuitem"]',
+  '[role="tab"]',
+  '[contenteditable="true"]',
+  "[tabindex]",
+].join(",");
+
+const DRAG = "[-webkit-app-region:drag]";
+const NO_DRAG = "[-webkit-app-region:no-drag]";
+
+const classOf = (el: Element): string => el.getAttribute("class") ?? "";
+
+/**
+ * Does `el` end up OUTSIDE the drag region?
+ *
+ * Chromium resolves draggable regions as nested rectangles: `drag` claims a
+ * box, a descendant's `no-drag` punches a hole in it, and a deeper `drag`
+ * fills the hole back in. So the answer is the first declaration found walking
+ * up from the element — not the element's own class alone, which would fail a
+ * button correctly covered by a `no-drag` wrapper.
+ */
+export function optsOutOfDrag(el: Element, stopAt: Element): boolean {
+  for (let n: Element | null = el; n !== null; n = n.parentElement) {
+    const cls = classOf(n);
+    if (cls.includes(NO_DRAG)) return true;
+    if (cls.includes(DRAG)) return false;
+    if (n === stopAt) return false;
+  }
+  return false;
+}
+
+export interface TitleBarProbe {
+  root: HTMLElement;
+  bar: HTMLElement;
+  /** Controls inside the bar that a drag region would swallow clicks on. */
+  interactive: HTMLElement[];
+}
+
+export function titleBarOf(container: HTMLElement): TitleBarProbe {
+  const root = container.querySelector<HTMLElement>("[data-view]");
+  if (!root) throw new Error("no [data-view] root rendered");
+  const bar = root.querySelector<HTMLElement>('[data-slot="title-bar"]');
+  if (!bar) throw new Error("no [data-slot=title-bar] — this window has no title bar at all");
+  return {
+    root,
+    bar,
+    interactive: Array.from(bar.querySelectorAll<HTMLElement>(INTERACTIVE_SELECTOR)),
+  };
+}
+
 /**
  * Tag names + classes, ignoring text. Two renders with identical skeletons
  * occupy identical space, which is how "the grid does not reflow when data

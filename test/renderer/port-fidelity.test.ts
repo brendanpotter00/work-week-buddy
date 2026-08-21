@@ -9,7 +9,12 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
-import { WINDOW_SIZE } from "@/shared/constants";
+import {
+  TITLE_BAR_INSET,
+  TRAFFIC_LIGHT,
+  TRAFFIC_LIGHT_HEIGHT,
+  WINDOW_SIZE,
+} from "@/shared/constants";
 
 const read = (rel: string): string =>
   readFileSync(fileURLToPath(new URL(`../../${rel}`, import.meta.url)), "utf8");
@@ -97,6 +102,41 @@ describe("the heatmap's width", () => {
     const app = read("src/renderer/App.tsx");
     expect(app).toContain("showTotalCount={false}");
     expect(app).not.toMatch(/hideColorLegend|hideTotalCount|hideMonthLabels/);
+  });
+});
+
+describe("the title bar's geometry has one home", () => {
+  it("is the same traffic-light offset main hands macOS", () => {
+    // The renderer decides how far down its title starts; the main process
+    // decides where macOS floats the three buttons. Those two numbers have to
+    // agree or the title renders through the close button — and nothing about
+    // that failure is visible in a jsdom render or in a unit test of either
+    // half alone. So both read `TRAFFIC_LIGHT`, and this asserts main really
+    // spreads it rather than keeping a literal that merely happens to match.
+    const windows = read("src/main/windows.ts");
+    expect(windows).toContain("trafficLightPosition: TRAFFIC_LIGHT.dashboard");
+    expect(windows).toContain("trafficLightPosition: TRAFFIC_LIGHT.onboarding");
+    expect(windows).toContain("trafficLightPosition: TRAFFIC_LIGHT.settings");
+    expect(windows).not.toMatch(/trafficLightPosition:\s*\{/);
+
+    for (const w of ["dashboard", "onboarding", "settings"] as const) {
+      expect(TITLE_BAR_INSET[w]).toBeGreaterThanOrEqual(
+        TRAFFIC_LIGHT[w].y + TRAFFIC_LIGHT_HEIGHT,
+      );
+    }
+  });
+
+  it("is a bar across the window in all three views, not a header in a column", () => {
+    // The bug, as source text. `<TitleBar>` renders a direct child of the view
+    // root; the dashboard's used to be a `<header>` nested inside
+    // `mx-auto max-w-[1100px] px-8 py-10`, which is why the top 40 px and both
+    // 32-px gutters were dead. `test/renderer/title-bar.test.tsx` asserts the
+    // rendered parentage; this asserts nobody hand-rolled a second one.
+    for (const f of ["src/renderer/App.tsx", "src/renderer/Onboarding.tsx", "src/renderer/Settings.tsx"]) {
+      const src = read(f);
+      expect(src).toContain("<TitleBar window=");
+      expect(src).not.toMatch(/<header[^>]*app-region:drag/);
+    }
   });
 });
 
