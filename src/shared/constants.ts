@@ -84,6 +84,12 @@ export const DEFAULTS = {
    * period is the worst-case amount of work that can vanish without a trace.
    * Two seconds is small enough that the interval is not worth closing over;
    * five minutes was large enough to make every stored session a fragment.
+   *
+   * It is still ONE timer, not a second one: the same interval does the cheap
+   * read every beat and the expensive probe every `watchdogMs`. Measured cost
+   * of the cheap read on this Mac: `CGEventTapIsEnabled` is 15.6 µs, so 43,200
+   * calls a day come to 0.67 s of CPU. That is what catching a dead tap in two
+   * seconds instead of five minutes costs.
    */
   tapLivenessMs: 2_000,
   trayRefreshMs: 60_000,

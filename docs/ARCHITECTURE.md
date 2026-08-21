@@ -83,15 +83,23 @@ No tick is involved in any of them.
 
 ### 3.5 Residual polling, stated plainly
 
-**There is exactly one timer that is not the countdown: a 5-minute read-only sanity tick.** It reads three integers and posts nothing (~20 µs, 288 fires/day, ~6 ms CPU/day).
+**There is exactly one timer that is not the countdown: the read-only sanity tick.** It posts nothing. It beats every **2 seconds** and does two different jobs on that one timer:
 
-It exists because two of the three tap-death modes are not self-reporting, and because **an active liveness probe is impossible**: measured, even a `kCGEventNull` canary resets `HIDIdleTime`, so a periodic self-probe would double as an always-on jiggler. The watchdog must therefore be a passive read.
+| Cadence | What it reads | Cost |
+|---|---|---|
+| every 2 s | `CGEventTapIsEnabled` — and `reviveTap()` if it says no | 15.6 µs × 43,200/day = **0.67 s CPU/day** |
+| every 5 min | the full probe: camera, mic, granted mask, clock re-anchor | ~20 µs × 288/day = ~6 ms CPU/day |
+
+It exists because **none** of the tap-death modes is reliably self-reporting, and because **an active liveness probe is impossible**: measured, even a `kCGEventNull` canary resets `HIDIdleTime`, so a periodic self-probe would double as an always-on jiggler. The watchdog must therefore be a passive read.
+
+The tick used to run only every five minutes, and that is what made the app measure nothing. `kCGEventTapDisabledByTimeout` was assumed to announce itself; measured on real hardware, macOS disabled the tap and delivered **no notice at all** (docs/MACOS.md §1). Five minutes of invisible input is a lost session — the owner's database was five rows, none longer than six minutes, the two most recent ending `tap_lost`. Splitting the cheap read out of the expensive one is what makes a 2-second cadence affordable; the HAL walk over the CoreMediaIO and CoreAudio device lists stays at five minutes because it is the part that could block.
 
 Nothing else in the system samples "seconds since last input" as a detection mechanism.
 
 | Timer | Exists when | Does what |
 |---|---|---|
 | The countdown | an interval is open | ~1 op per 15 min at any input rate |
+| Stall watch | always | 1 Hz heartbeat; reports its own gap when the main thread was held |
 | Flush backoff | pending rows > 0 | drains to zero and stops; a failed fetch is the network signal |
 | Tray refresh | popover open | UI only |
 | Jiggler | user switched it on | posts a null event every 30 s |
