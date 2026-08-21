@@ -84,9 +84,28 @@ function detailOf(detail: unknown): string {
   }
 }
 
+/**
+ * STDOUT BELONGS TO THE REPORT. EVERY LOG LINE GOES TO STDERR.
+ *
+ * `--doctor` writes a `DoctorReport` and `--selftest` writes a `SelfTestReport`,
+ * each as one JSON document on stdout, and each is parsed by something that is
+ * not a human: `scripts/doctor.ts` and `scripts/install.sh`. Info used to take
+ * `console.log`, so every `--doctor` run opened with
+ *
+ *     [wwb] boot: ready · mode=doctor · packaged=true · v0.1.0
+ *
+ * ahead of the `{`, and the report came out of a healthy app looking exactly
+ * like a missing one. `scripts/doctor.ts` has an `extractJson()` that survives
+ * leading noise, but relying on it means the contract is "stdout is mostly
+ * JSON", which is not a contract — it is a coincidence that holds until a log
+ * line contains a brace.
+ *
+ * `console.warn` and `console.error` were already stderr in Node. `console.log`
+ * is NOT, and it is the only reason this function has to choose.
+ */
 function emit(level: "info" | "warn" | "error", msg: string, detail?: unknown): void {
   const text = `${msg}${detailOf(detail)}`;
-  const console_ = level === "info" ? console.log : level === "warn" ? console.warn : console.error;
+  const console_ = level === "warn" ? console.warn : console.error;
   if (detail === undefined) console_(`[wwb] ${msg}`);
   else console_(`[wwb] ${msg}`, detail);
   toFile(`${new Date().toISOString()} ${level.toUpperCase().padEnd(5)} ${text}\n`);

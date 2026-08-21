@@ -81,6 +81,14 @@ export interface NativeStatus {
   /** Hex string, never a BigInt: BigInt is not JSON-serialisable and dies in IPC logs. */
   readonly grantedMask: string;
   readonly cameraInUse: boolean;
+  /**
+   * How many video devices CoreMediaIO can see at this probe.
+   *
+   * Carried alongside `cameraInUse` because zero devices and zero cameras in
+   * use are the same boolean and completely different diagnoses — see
+   * `CameraStatus` in `native.ts`.
+   */
+  readonly cameraDeviceCount: number;
   readonly micInUse: boolean;
   readonly probedAtMs: number;
   readonly counters: NativeCountersSnapshot;

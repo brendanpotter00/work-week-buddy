@@ -88,6 +88,45 @@ describe("the log file", () => {
     expect(readFileSync(`${path}.1`, "utf8").length).toBe(1_200_000);
   });
 
+  it("writes NOTHING to stdout — stdout belongs to the report", () => {
+    // `--doctor` writes a DoctorReport and `--selftest` writes a SelfTestReport,
+    // each as one JSON document on stdout, each parsed by a script. Info used
+    // to take `console.log`, so every `--doctor` run opened with
+    // `[wwb] boot: ready · mode=doctor …` ahead of the `{` and `npm run doctor`
+    // answered "could not obtain a report — is the app installed?" out of a
+    // perfectly healthy app.
+    //
+    // Asserted against the console METHODS rather than the streams, because
+    // vitest replaces `console` with its own reporter-bound one and nothing
+    // reaches `process.stdout.write` from inside a test. That is still the
+    // exact claim: in Node `console.log` is stdout and `console.warn` /
+    // `console.error` are stderr, and taking `console.log` is the entire bug.
+    const toStdout = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const warned: string[] = [];
+    const errored: string[] = [];
+    vi.spyOn(console, "warn").mockImplementation((...a: unknown[]) => {
+      warned.push(a.map(String).join(" "));
+    });
+    vi.spyOn(console, "error").mockImplementation((...a: unknown[]) => {
+      errored.push(a.map(String).join(" "));
+    });
+    const wroteToStdout = vi
+      .spyOn(process.stdout, "write")
+      .mockImplementation(() => true);
+
+    log.info("an info line");
+    log.boot("ready · mode=doctor");
+    log.warn("a warning");
+    log.error("a failure");
+
+    expect(toStdout).not.toHaveBeenCalled();
+    expect(wroteToStdout).not.toHaveBeenCalled();
+    expect(errored.join("\n")).toContain("an info line");
+    expect(errored.join("\n")).toContain("boot: ready · mode=doctor");
+    expect(warned.join("\n")).toContain("a warning");
+    expect(errored.join("\n")).toContain("a failure");
+  });
+
   it("degrades to console when the directory cannot be written, and says so once", () => {
     quiet();
     // A REGULAR FILE where a parent directory should be. ENOTDIR, on every

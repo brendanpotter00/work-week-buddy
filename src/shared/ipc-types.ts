@@ -269,6 +269,38 @@ export interface SelfTestResult {
   checks: Array<{ id: string; passed: boolean; detail: string }>;
 }
 
+/**
+ * Will this Mac start the app at login, and will it start THIS copy of it?
+ *
+ * The wire shape lives here rather than in `src/main/autostart.ts` because the
+ * renderer's Doctor panel reads it and `src/shared/` may not import from
+ * `src/main/`. The producer is `verifyLaunchAgent()`; the reasoning for every
+ * field is in that file's header.
+ */
+export interface AutostartState {
+  /** False means nothing below was looked at — not that the answer is "no". */
+  probed: boolean;
+  installed: boolean;
+  loaded: boolean;
+  plistPath: string;
+  /** ProgramArguments[0] as the plist has it. */
+  execPath: string | null;
+  /** Does that program still exist? False is a plist pointing into thin air. */
+  execExists: boolean;
+  execMatchesRunningApp: boolean;
+}
+
+/**
+ * The bundle's code identity — what every TCC grant is really bound to.
+ * Produced by `readCodesign()`; see `src/main/codesign.ts`.
+ */
+export interface CodesignState {
+  probed: boolean;
+  /** SHA-256 of the designated requirement. Hashed: this repository is public. */
+  designatedRequirementSha256: string | null;
+  valid: boolean | null;
+}
+
 export interface DoctorReport {
   generatedAtMs: number;
   allGreen: boolean;
@@ -284,14 +316,29 @@ export interface DoctorReport {
   permissions: PermissionSnapshot;
   tap: TapHealth;
   camera: {
-    deviceCount: number;
+    /**
+     * Did anything actually read the camera in this process?
+     *
+     * This replaces `listenerRegistered`, which was a field that could never be
+     * true: `native.ts` registers no CMIO property listener anywhere, on
+     * purpose — the HAL delivers them on its own thread and a koffi callback
+     * invoked off the JS thread is a crash, not a latency problem. The runtime
+     * was answering it with `status !== null`, which is "probed", so the field
+     * has been renamed to what it was already measuring. Same story as
+     * `tap.probed` (AGENTS.md silent-failure #16).
+     */
+    probed: boolean;
+    /**
+     * Video devices CoreMediaIO can see. Null when `probed` is false — NOT 0.
+     * Zero devices on a Mac that has cameras is the App Sandbox failure
+     * (AGENTS.md #12), and it must not be indistinguishable from "did not look".
+     */
+    deviceCount: number | null;
     inUse: boolean;
-    listenerRegistered: boolean;
     lastReadMs: number | null;
   };
   mic: {
     inUse: boolean;
-    needsPermission: boolean | null;
   };
   sync: {
     /**
@@ -328,18 +375,14 @@ export interface DoctorReport {
   selfTest: SelfTestResult | null;
   db: {
     path: string;
+    /** `page_count * page_size` — the database, not the directory. */
     sizeBytes: number;
     rows: number;
     openIntervalPresent: boolean;
     integrityOk: boolean;
   };
-  autostart: {
-    installed: boolean;
-    loaded: boolean;
-    plistPath: string;
-    execMatchesRunningApp: boolean;
-  };
-  codesign: { designatedRequirementSha256: string | null; valid: boolean | null };
+  autostart: AutostartState;
+  codesign: CodesignState;
 }
 
 export interface AppInfo {
@@ -435,7 +478,12 @@ export interface InvokeContract {
   "wwb:permissions:relaunch": { req: void; res: void };
   "wwb:onboarding:dismiss": { req: void; res: void };
   "wwb:doctor:get": { req: void; res: DoctorReport };
-  "wwb:doctor:selftest": { req: void; res: SelfTestResult };
+  // `wwb:doctor:selftest` was removed with the Settings self-test card (#29).
+  // The self-test itself is very much alive — `--selftest` is install.sh's hard
+  // gate, and `runtime.selfTest()` runs whenever the jiggler is switched on —
+  // but nothing in the renderer had called this channel since that card went,
+  // and a declared channel with no caller is reachable surface nobody reviews.
+  // `doctor.selfTest` in the report is where the last result is read from now.
   "wwb:sync:flush": { req: void; res: FlushResult };
   "wwb:sync:config": { req: void; res: SyncConfigState };
   /** Either half may be omitted. The token is write-only; it never comes back. */
@@ -501,7 +549,6 @@ export const INVOKE_CHANNELS = [
   "wwb:permissions:relaunch",
   "wwb:onboarding:dismiss",
   "wwb:doctor:get",
-  "wwb:doctor:selftest",
   "wwb:sync:flush",
   "wwb:sync:config",
   "wwb:sync:setConfig",

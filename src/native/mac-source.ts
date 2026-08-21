@@ -41,7 +41,8 @@ export class MacSignalSource implements SignalSource {
   probe(): NativeStatus {
     const at = Date.now();
     native.reanchorClock();
-    const cameraOn = native.anyCameraInUse();
+    const camera = native.cameraStatus();
+    const cameraOn = camera.inUse;
     const micOn = native.anyMicInUse();
 
     const cam = levelEdge(this.camera, cameraOn, at, "camera_on", "camera_off");
@@ -61,6 +62,7 @@ export class MacSignalSource implements SignalSource {
       // that crossed IPC as one would throw in a log line, not here.
       grantedMask: mask === null ? "-" : `0x${mask.toString(16)}`,
       cameraInUse: cameraOn,
+      cameraDeviceCount: camera.deviceCount,
       micInUse: micOn,
       probedAtMs: at,
       counters: { ...native.counters },

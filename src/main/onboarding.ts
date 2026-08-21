@@ -104,7 +104,15 @@ export class PermissionTracker {
 
   read(source: SignalSource, status: NativeStatus | null): PermissionSnapshot {
     const p = source.permissions();
-    const maskHex = status?.grantedMask ?? "0x0";
+    // "-", NOT "0x0". A process with no tap has not read a mask of zero, it has
+    // read no mask at all, and `0x0` is byte-for-byte what a REFUSED Input
+    // Monitoring grant looks like. This is AGENTS.md silent-failure #16, which
+    // `tapHealth()` already learned; the permission snapshot is fed by the same
+    // `NativeStatus` and was still answering the old way, so `--doctor` — which
+    // never installs a tap — reported `relaunchRequired: true` and
+    // `grantedMaskHex: 0x0` on a perfectly healthy Mac, and `npm run doctor`
+    // exited 1 for it at the end of every install.
+    const maskHex = status?.grantedMask ?? "-";
     // The mask is the authority; `keyboardBitsGranted` from the status is the
     // source's own reading of the same fact and agrees with it by construction.
     const keyboardBitsGranted = status === null ? false : status.keyboardBitsGranted;
@@ -141,7 +149,12 @@ export class PermissionTracker {
       // A fresh Input Monitoring grant does not retroactively add the keyboard
       // bits to a tap that already exists. The DECIDER IS THE MASK, not the
       // grant: granted-but-no-bits is exactly the "quit and reopen" case.
-      relaunchRequired: inputMonitoring === "granted" && !keyboardBitsGranted,
+      //
+      // `status !== null` because a mask nobody read is not a mask without the
+      // bits. Telling a healthy owner to relaunch is a small lie; telling him
+      // so at the end of every install, in red, is how a doctor stops being
+      // read at all.
+      relaunchRequired: status !== null && inputMonitoring === "granted" && !keyboardBitsGranted,
       promptConsumed: { ...this.consumed },
       microphone: "not-required",
     };

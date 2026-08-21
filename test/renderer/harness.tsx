@@ -435,8 +435,8 @@ export function doctorReport(over: Partial<DoctorReport> = {}): DoctorReport {
       tapLostRows: 0,
       lastWatchdogTickMs: now - 60_000,
     },
-    camera: { deviceCount: 1, inUse: false, listenerRegistered: true, lastReadMs: now },
-    mic: { inUse: false, needsPermission: null },
+    camera: { probed: true, deviceCount: 2, inUse: false, lastReadMs: now },
+    mic: { inUse: false },
     sync: {
       configured: false,
       pendingRows: 0,
@@ -466,12 +466,15 @@ export function doctorReport(over: Partial<DoctorReport> = {}): DoctorReport {
       integrityOk: true,
     },
     autostart: {
+      probed: true,
       installed: true,
       loaded: true,
       plistPath: "~/Library/LaunchAgents/com.bpotter.workweekbuddy.plist",
+      execPath: "/Applications/Work Week Buddy.app/Contents/MacOS/Work Week Buddy",
+      execExists: true,
       execMatchesRunningApp: true,
     },
-    codesign: { designatedRequirementSha256: "abc", valid: true },
+    codesign: { probed: true, designatedRequirementSha256: "abc", valid: true },
     ...over,
   };
 }
