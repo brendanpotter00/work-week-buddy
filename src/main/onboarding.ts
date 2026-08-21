@@ -66,6 +66,15 @@ function hasBits(hex: string, bits: number): boolean {
  * anything, and if we have already spent the prompt the honest answer is still
  * "denied" — offering to ask again would be the old lie in a new place.
  */
+/**
+ * What `PermissionTracker.request` actually did.
+ *
+ * `"already-granted"` and `"no-prompt-possible"` both mean "no dialog appeared",
+ * and that is exactly why they must not share a value: the first wants the
+ * caller to do nothing, the second wants it to send the user to System Settings.
+ */
+export type RequestOutcome = "prompted" | "already-granted" | "no-prompt-possible";
+
 export function resolveState(
   capable: boolean,
   access: AccessState,
@@ -142,16 +151,16 @@ export class PermissionTracker {
    * Preflight, THEN request. Never prompts twice — the OS would ignore it
    * anyway, and a consumed prompt is the reason "Open System Settings…" exists.
    *
-   * Returns whether a prompt could still appear. `false` means the caller must
-   * send the user to System Settings instead of waiting for a dialog that is
-   * never coming.
+   * Three outcomes, not two. A boolean here would fuse "nothing to do, it is
+   * already granted" with "nothing CAN be done, send them to System Settings",
+   * and those want opposite things from the caller.
    */
-  request(source: SignalSource, which: PermissionKey): boolean {
+  request(source: SignalSource, which: PermissionKey): RequestOutcome {
     const before = source.permissions();
     if (which === "inputMonitoring") {
-      if (before.listenEvent) return false;
+      if (before.listenEvent) return "already-granted";
     } else if (before.postEvent && before.axTrusted) {
-      return false;
+      return "already-granted";
     }
     // A denied row is a dead end: TCC answers `CGRequest…Access` from the
     // stored row without drawing anything, so calling it would look like a
@@ -160,11 +169,11 @@ export class PermissionTracker {
       which === "inputMonitoring" ? before.listenEventAccess : before.postEventAccess;
     if (access === "denied") {
       this.consumed[which] = true;
-      return false;
+      return "no-prompt-possible";
     }
     source.requestPermissions({ prompt: true });
     this.consumed[which] = true;
-    return true;
+    return "prompted";
   }
 
   /** Test seam: replay a prior session's one-shot state. */

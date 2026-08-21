@@ -158,6 +158,31 @@ describe("neither script gates on `find-identity -v`", () => {
     expect(code).toMatch(/security find-identity -p codesigning/);
     expect(code).toContain("codesign");
   });
+
+  it("resolves the hash identically in both, and refuses to guess between duplicates", () => {
+    // The two scripts carry their own copies on purpose: install.sh must not be
+    // taken down by a broken or missing make-signing-cert.sh. Copies drift, and
+    // this one must not, because the bug it guards is silent — two certificates
+    // CAN share the common name (someone re-mints on the second Mac instead of
+    // importing wwb.p12), and picking whichever `security` lists first signs
+    // with a coin flip and drops every grant on one of the machines.
+    const awks = ["install.sh", "make-signing-cert.sh"].map((name) => {
+      const src = readFileSync(join(SCRIPTS, name), "utf8");
+      return /awk -v want="\$[A-Z_]+" '([\s\S]*?)'\n/.exec(src)?.[1]?.replace(/\s+/g, " ").trim();
+    });
+    expect(awks[0], "install.sh has no identity awk").toBeTruthy();
+    expect(awks[1]).toBe(awks[0]);
+
+    // `break`, never `exit`: exit stops at the first match and hides the second.
+    for (const a of awks) {
+      expect(a).toContain("break");
+      expect(a).not.toContain("exit");
+    }
+    // And each script must actually count them rather than trusting the first.
+    for (const name of ["install.sh", "make-signing-cert.sh"]) {
+      expect(readFileSync(join(SCRIPTS, name), "utf8")).toContain("identity_count()");
+    }
+  });
 });
 
 describe("install.sh", () => {

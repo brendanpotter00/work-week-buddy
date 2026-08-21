@@ -109,11 +109,20 @@ function describePermission(state: PermissionState): string {
  */
 function remedy(state: PermissionState, pane: string): string {
   if (state !== "denied") return "";
+  // `tccutil reset X` is a literal string prefix — it resets `kTCCServiceX` and
+  // validates nothing (the binary's format string is "kTCCService%s", and a
+  // nonsense service name is accepted and silently matches no rows). So the
+  // service names have to be exact, and Accessibility needs BOTH: this app's
+  // "Accessibility" is kTCCServiceAccessibility (AXIsProcessTrusted) plus
+  // kTCCServicePostEvent (CGEventPost). Resetting only the first leaves a denied
+  // PostEvent row in place and the dead end exactly where it was.
+  const services =
+    pane === "Input Monitoring" ? ["ListenEvent"] : ["Accessibility", "PostEvent"];
+  const cmds = services.map((s) => `tccutil reset ${s} com.bpotter.workweekbuddy`).join(" && ");
   return (
     ` — macOS will NOT prompt again. Tick it in System Settings ›` +
-    ` Privacy & Security › ${pane}, or run` +
-    ` \`tccutil reset ${pane === "Input Monitoring" ? "ListenEvent" : "Accessibility"}` +
-    ` com.bpotter.workweekbuddy\` to make the prompt available again.`
+    ` Privacy & Security › ${pane}, or run \`${cmds}\`` +
+    ` to make the prompt available again.`
   );
 }
 

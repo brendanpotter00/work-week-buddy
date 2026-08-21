@@ -123,12 +123,38 @@ run() {
 # measurements. Signing by hash rather than by common name also removes the
 # ambiguity of two certificates sharing a CN, which is exactly what happens
 # after someone re-mints instead of importing the shared wwb.p12.
+# Prints EVERY match, one per line — `break`, not `exit`. Two certificates CAN
+# share this common name: it is what happens when someone runs
+# make-signing-cert.sh on the second Mac without putting wwb.p12 in place first.
+# Taking whichever `security` happens to list first would sign with a coin flip
+# and silently drop every grant on one of the two machines.
 identity_hash() {
   security find-identity -p codesigning "$KEYCHAIN" 2>/dev/null \
     | awk -v want="$IDENTITY" '
         index($0, want) == 0 { next }
-        { for (i = 1; i <= NF; i++) if ($i ~ /^[0-9A-Fa-f]{40}$/) { print $i; exit } }
+        { for (i = 1; i <= NF; i++) if ($i ~ /^[0-9A-Fa-f]{40}$/) { print $i; break } }
       '
+}
+
+identity_count() {
+  h="$(identity_hash)"
+  if [ -z "$h" ]; then printf '0\n'; else printf '%s\n' "$h" | wc -l | tr -d ' '; fi
+}
+
+# Sets IDENTITY_HASH, or explains and returns non-zero. Ambiguity is a hard stop,
+# never a guess.
+resolve_identity() {
+  n="$(identity_count)"
+  if [ "$n" -gt 1 ]; then
+    bad "$n certificates in $KEYCHAIN are called '$IDENTITY'."
+    identity_hash | sed 's/^/       /'
+    info "Signing would pick one arbitrarily, and only one of them matches the"
+    info "grants on your other Mac. Delete the wrong one in Keychain Access — it"
+    info "is the one whose SHA-1 the other Mac's --show does NOT print."
+    return 1
+  fi
+  IDENTITY_HASH="$(identity_hash)"
+  [ -n "$IDENTITY_HASH" ]
 }
 
 # The precondition that means something: sign a throwaway Mach-O and confirm the
@@ -188,11 +214,10 @@ elif [ "$DRY_RUN" = "1" ]; then
   # the dry run prints `--sign WWB Local Signing` while the real run signs by
   # SHA-1 — a dry run that describes a different command than the one it is
   # previewing is worse than no dry run.
-  IDENTITY_HASH="$(identity_hash)"
-  if [ -n "$IDENTITY_HASH" ]; then
+  if resolve_identity; then
     info "would sign with '$IDENTITY' ($IDENTITY_HASH)"
   else
-    info "would require the '$IDENTITY' codesigning identity (none found yet)"
+    info "would require the '$IDENTITY' codesigning identity (none usable yet)"
   fi
 else
   # NOT `find-identity -v`. -v means "the chain validates", which for a
@@ -202,12 +227,15 @@ else
   # precondition check said "0 valid identities found" anyway. codesign does not
   # consult trust — measured, see scripts/make-signing-cert.sh's header — so the
   # gate is now "resolve the identity, then actually sign something with it".
-  IDENTITY_HASH="$(identity_hash)"
-  if [ -z "$IDENTITY_HASH" ]; then
-    bad "no '$IDENTITY' codesigning identity in $KEYCHAIN."
-    info "Run ./scripts/make-signing-cert.sh first (once per Mac, importing the"
-    info "SAME wwb.p12 on both — a second, freshly minted certificate has a"
-    info "different designated requirement and your grants will not transfer)."
+  if ! resolve_identity; then
+    # resolve_identity has already explained a DUPLICATE. Only the "none at all"
+    # case still needs saying.
+    if [ "$(identity_count)" = "0" ]; then
+      bad "no '$IDENTITY' codesigning identity in $KEYCHAIN."
+      info "Run ./scripts/make-signing-cert.sh first (once per Mac, importing the"
+      info "SAME wwb.p12 on both — a second, freshly minted certificate has a"
+      info "different designated requirement and your grants will not transfer)."
+    fi
     exit 1
   fi
   if signing_probe_ok "$IDENTITY_HASH"; then

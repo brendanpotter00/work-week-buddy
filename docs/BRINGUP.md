@@ -257,11 +257,20 @@ ad-hoc build. **Order matters** — the requirement is written at grant time fro
 whatever the app is signed with then, so signing has to come first:
 
 ```bash
-./scripts/install.sh                                   # 1. sign with the real leaf
+./scripts/install.sh                                    # 1. sign with the real leaf
 tccutil reset ListenEvent    com.bpotter.workweekbuddy  # 2. drop the stale rows
 tccutil reset Accessibility  com.bpotter.workweekbuddy
+tccutil reset PostEvent      com.bpotter.workweekbuddy
 open "/Applications/Work Week Buddy.app"                # 3. grant once more
 ```
+
+**Three resets, not two.** `tccutil reset X` is a literal string prefix — it
+resets `kTCCServiceX` and validates nothing, so a typo is accepted and silently
+matches no rows. This app's *Accessibility* is two services:
+`kTCCServiceAccessibility` (`AXIsProcessTrusted`) and `kTCCServicePostEvent`
+(`CGEventPost`, the jiggler). Reset only the first and a denied `PostEvent` row
+survives, along with the dead end. `tccutil reset All com.bpotter.workweekbuddy`
+does all three if you would rather not remember which.
 
 `tccutil` needs no password, and it removes the row rather than denying it —
 which is what makes the prompt available again. It resolves the bundle id
@@ -495,7 +504,7 @@ and at launch; `pull()` runs after every successful flush.
 |---|---|
 | Permissions re-prompt after every rebuild | Are both Macs on the same `wwb.p12`? `./scripts/make-signing-cert.sh --show` on each; the SHA-1s must match. Then check the app is actually signed with it: `codesign -dvvv "/Applications/Work Week Buddy.app"` must say `Authority=WWB Local Signing`, **not** `Signature=adhoc`. |
 | System Settings says granted, the app disagrees | The stored grant is against a *different* build. `codesign -d -r- "/Applications/Work Week Buddy.app"` — if it prints `cdhash H"…"` the app is ad-hoc signed and every rebuild broke the grant. Re-run `./scripts/install.sh`, then `tccutil reset ListenEvent com.bpotter.workweekbuddy` and grant it once more. From then on it sticks. |
-| A permission prompt never appears | The row is **denied** (`auth_value = 0`), and macOS asks exactly once per permission per code identity. Nothing the app can do brings the prompt back. Either tick the box in System Settings › Privacy & Security, or `tccutil reset Accessibility com.bpotter.workweekbuddy` (or `ListenEvent`) to make the prompt available again. `npm run doctor` names this explicitly. |
+| A permission prompt never appears | The row is **denied** (`auth_value = 0`), and macOS asks exactly once per permission per code identity. Nothing the app can do brings the prompt back. Either tick the box in System Settings › Privacy & Security, or `tccutil reset All com.bpotter.workweekbuddy` to make the prompts available again. `npm run doctor` names this explicitly, with the per-service commands. |
 | Hours look too high | `"/Applications/Work Week Buddy.app/Contents/MacOS/Work Week Buddy" --selftest`. A failed jiggle discriminator is the one way this happens silently. |
 | Nothing at login | `npm run launch-agent status`. A plist pointing at a missing app is a login that does nothing. |
 | Sync silent | `npm run doctor`. Over 72 h silent is a hard red, not a warning. |

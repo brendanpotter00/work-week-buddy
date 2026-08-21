@@ -94,7 +94,8 @@ usage: scripts/make-signing-cert.sh [options]
   --dry-run         print what would happen; create and import nothing
   --show            print the existing identity, its fingerprint, and proof that
                     it can sign; exit non-zero if it cannot
-  --print-hash      print just the SHA-1 of the identity and exit (for scripts)
+  --print-hash      print just the SHA-1 and exit; non-zero unless there is
+                    exactly one such identity (for scripts)
 USAGE
 }
 
@@ -167,16 +168,48 @@ esac
 # this. `find-identity` without -v lists every certificate that has a matching
 # PRIVATE KEY in the keychain, which is the actual definition of an identity and
 # the only thing signing needs.
+#
+# Prints EVERY match, one SHA-1 per line — `break`, not `exit`. Callers must
+# handle more than one. Two certificates CAN share this common name, and the way
+# that happens is the expensive way: someone runs this script on the second Mac
+# without putting wwb.p12 in place first, mints a fresh leaf, and now holds two
+# "WWB Local Signing" certificates with different public keys and different
+# designated requirements. Silently taking whichever `security` lists first
+# would sign with a coin flip and drop every grant on one of the two machines —
+# the exact failure this whole file exists to prevent.
 identity_hash() {
   security find-identity -p codesigning "$KEYCHAIN" 2>/dev/null \
     | awk -v want="$NAME" '
         index($0, want) == 0 { next }
-        { for (i = 1; i <= NF; i++) if ($i ~ /^[0-9A-Fa-f]{40}$/) { print $i; exit } }
+        { for (i = 1; i <= NF; i++) if ($i ~ /^[0-9A-Fa-f]{40}$/) { print $i; break } }
       '
+}
+
+identity_count() {
+  h="$(identity_hash)"
+  if [ -z "$h" ]; then printf '0\n'; else printf '%s\n' "$h" | wc -l | tr -d ' '; fi
 }
 
 identity_present() {
   [ -n "$(identity_hash)" ]
+}
+
+# Prints the one unambiguous hash, or explains why there isn't one. Non-zero on
+# both "none" and "more than one".
+resolved_hash() {
+  n="$(identity_count)"
+  case "$n" in
+    0) return 1 ;;
+    1) identity_hash; return 0 ;;
+    *)
+      bad "$n certificates in $KEYCHAIN are called '$NAME'." >&2
+      identity_hash | sed 's/^/       /' >&2
+      info "Signing would pick one of them arbitrarily, and only one matches the" >&2
+      info "grants on your other Mac. Delete the wrong one in Keychain Access —" >&2
+      info "it is the one whose SHA-1 the other Mac's --show does NOT print." >&2
+      return 1
+      ;;
+  esac
 }
 
 print_identity() {
@@ -212,11 +245,15 @@ proves_it_can_sign() {
 }
 PROVEN_REQUIREMENT=""
 
-# ── --print-hash: one line, for install.sh ──────────────────────────────────
+# ── --print-hash: one line and nothing else ─────────────────────────────────
+# The scriptable query interface: no banner, no colour, exit 1 if there is not
+# exactly one usable identity. Used by test/scripts/install-flow.test.ts as a
+# capability probe ("does this Mac have the certificate at all?"). install.sh
+# does NOT call it — it carries its own copy of these helpers so that a broken
+# or missing make-signing-cert.sh cannot take the install path down with it;
+# test/scripts/shell.test.ts pins the two copies together.
 if [ "$PRINT_HASH" = "1" ]; then
-  h="$(identity_hash)"
-  [ -n "$h" ] || exit 1
-  printf '%s\n' "$h"
+  resolved_hash || exit 1
   exit 0
 fi
 
@@ -230,8 +267,8 @@ info "keychain: $KEYCHAIN"
 # claims, neither of which was the thing the reader needed. There are exactly
 # three states and each gets one answer.
 if [ "$SHOW_ONLY" = "1" ]; then
-  HASH="$(identity_hash)"
-  if [ -z "$HASH" ]; then
+  # Three states, three answers, and never two of them at once.
+  if [ "$(identity_count)" = "0" ]; then
     bad "no '$NAME' identity in $KEYCHAIN."
     info "Run ./scripts/make-signing-cert.sh to create and import one."
     info "On the SECOND Mac, put the first Mac's ~/.wwb-signing/wwb.p12 in place"
@@ -239,6 +276,8 @@ if [ "$SHOW_ONLY" = "1" ]; then
     info "and its grants do not transfer."
     exit 1
   fi
+  # Duplicates are their own answer: resolved_hash explains and exits non-zero.
+  HASH="$(resolved_hash)" || exit 1
   if proves_it_can_sign "$HASH"; then
     ok "identity present and able to sign: $NAME"
     info "SHA-1: $HASH"
@@ -272,7 +311,19 @@ fi
 if [ "$DO_IMPORT" = "1" ] && identity_present; then
   ok "Already present: $NAME"
   print_identity
-  info "Nothing to do. To start over, delete the identity in Keychain Access first."
+  # That line ends in "(CSSMERR_TP_NOT_TRUSTED)" and it is NOT a warning. Saying
+  # so here matters more than anywhere else: this is the path a returning reader
+  # hits, and an unexplained error code is exactly what sent the last one into
+  # Keychain Access looking for a trust setting to change.
+  if EXISTING_HASH="$(resolved_hash)" && proves_it_can_sign "$EXISTING_HASH"; then
+    info "CSSMERR_TP_NOT_TRUSTED above is expected and harmless: it means the"
+    info "chain does not validate, which a self-signed leaf's never does. It has"
+    info "signed a test binary just now regardless — trust is not consulted."
+    info "requirement: $PROVEN_REQUIREMENT"
+  else
+    warn "…but codesign could not sign with it. Run --show for the diagnosis."
+  fi
+  info "Nothing else to do. To start over, delete the identity in Keychain Access first."
   exit 0
 fi
 
@@ -342,10 +393,12 @@ fi
 hdr "3. Prove it can sign"
 # Not "trust it". Signing a throwaway binary and reading the requirement back is
 # the whole acceptance test, and it is what install.sh gates on too.
-HASH="$(identity_hash)"
-if [ -z "$HASH" ]; then
+if [ "$(identity_count)" = "0" ]; then
   die "import reported success but no '$NAME' identity is in $KEYCHAIN."
 fi
+# A duplicate here means this run just minted a SECOND leaf beside one that was
+# already there — the one mistake this script is built to make impossible.
+HASH="$(resolved_hash)" || exit 1
 if proves_it_can_sign "$HASH"; then
   ok "signed a test binary with $NAME"
   info "SHA-1: $HASH"

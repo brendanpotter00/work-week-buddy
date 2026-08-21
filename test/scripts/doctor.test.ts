@@ -109,13 +109,19 @@ describe("permissions", () => {
     );
     const detail = (id: string): string => inv.find((i) => i.id === id)?.detail ?? "";
 
-    for (const [id, pane, service] of [
-      ["input-monitoring", "Input Monitoring", "ListenEvent"],
-      ["accessibility", "Accessibility", "Accessibility"],
+    for (const [id, pane, services] of [
+      ["input-monitoring", "Input Monitoring", ["ListenEvent"]],
+      // BOTH. This app's "Accessibility" is kTCCServiceAccessibility
+      // (AXIsProcessTrusted) plus kTCCServicePostEvent (CGEventPost), and
+      // `tccutil reset` is a literal kTCCService%s prefix that validates
+      // nothing — so resetting only the first leaves the dead end in place.
+      ["accessibility", "Accessibility", ["Accessibility", "PostEvent"]],
     ] as const) {
       expect(detail(id)).toContain("will NOT prompt again");
       expect(detail(id)).toContain(`Privacy & Security › ${pane}`);
-      expect(detail(id)).toContain(`tccutil reset ${service} com.bpotter.workweekbuddy`);
+      for (const service of services) {
+        expect(detail(id)).toContain(`tccutil reset ${service} com.bpotter.workweekbuddy`);
+      }
     }
   });
 

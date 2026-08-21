@@ -121,7 +121,7 @@ describe("PermissionTracker.read", () => {
     };
     const t = new PermissionTracker();
 
-    expect(t.request(source, "accessibility")).toBe(false);
+    expect(t.request(source, "accessibility")).toBe("no-prompt-possible");
     expect(requests).toBe(0);
   });
 
@@ -138,7 +138,7 @@ describe("PermissionTracker.read", () => {
     };
     const t = new PermissionTracker();
 
-    expect(t.request(source, "accessibility")).toBe(true);
+    expect(t.request(source, "accessibility")).toBe("prompted");
     expect(requests).toBe(1);
   });
 
