@@ -55,6 +55,8 @@ export type RefreshReason =
   | "rows-pulled"
   | "resume"
   | "unlock"
+  /** Sync was configured or unconfigured — the "Set up cloud sync…" item changes. */
+  | "sync-config"
   | "week-rollover";
 
 type IconName = "trayTemplate" | "trayIdleTemplate" | "trayAlertTemplate";
@@ -102,6 +104,21 @@ export interface TrayDeps {
    * dashboard instead would be a menu item that lies about where it goes.
    */
   readonly showSettings: () => void;
+  /**
+   * Open the cloud-setup wizard directly.
+   *
+   * The tray is where this app lives, and a setup flow reachable only by
+   * finding Settings and scrolling to a card is a setup flow that does not get
+   * run. Offered only while sync is unconfigured — see `syncConfigured`.
+   */
+  readonly showCloudSetup?: () => void;
+  /**
+   * Is sync already set up? Decides whether the item above is shown at all.
+   *
+   * Optional and defaulting to "yes": an unknown answer hides the item rather
+   * than offering setup to somebody who has already done it.
+   */
+  readonly syncConfigured?: () => boolean;
   readonly openPrivacyPane: (which: PermissionKey) => void;
   readonly showErrorBox: (title: string, content: string) => void;
   readonly askJigglerPause: (() => Promise<MessageBoxAnswer>) | null;
@@ -353,6 +370,13 @@ export class TrayController {
       },
     });
     items.push({ label: "Doctor…", click: () => this.deps.showDashboard() });
+    // The one-click way in, and only while there is something to set up. The
+    // wizard is a task with its own window, so the tray can open it directly
+    // rather than sending someone to Settings to look for it.
+    const showCloudSetup = this.deps.showCloudSetup;
+    if (showCloudSetup !== undefined && this.deps.syncConfigured?.() === false) {
+      items.push({ label: "Set up cloud sync…", click: () => showCloudSetup() });
+    }
     // Sync is turned on HERE, from the menu bar, without opening the dashboard
     // first. Until this item existed there was no way to enter a Worker URL at
     // all in a packaged build — `devTools` is off there, so the console

@@ -54,10 +54,14 @@ export const RESULT_FILENAME = "result.json";
  */
 export const MAX_STALL_MS = 3_000;
 
-export type SmokeWindow = "dashboard" | "onboarding";
+/**
+ * Spelled the way `data-view` spells it, because the routing check is
+ * `p.view === p.window` and that identity is the whole point of the probe.
+ */
+export type SmokeWindow = "dashboard" | "onboarding" | "cloud-setup";
 
 /**
- * Two passes over the same two windows.
+ * Two passes over the same two windows, plus one over the wizard.
  *
  * `degraded` is the state a fresh install is really in — Input Monitoring
  * granted but the running tap has no keyboard bits, Accessibility never
@@ -150,6 +154,9 @@ const EXPECTED: ReadonlyArray<{ window: SmokeWindow; scenario: SmokeScenario }> 
   { window: "onboarding", scenario: "degraded" },
   { window: "dashboard", scenario: "granted" },
   { window: "onboarding", scenario: "granted" },
+  // The fourth window, measured once. A window nothing measures is the exact
+  // bug `Root.tsx` was written for — it renders the dashboard and nobody knows.
+  { window: "cloud-setup", scenario: "degraded" },
 ];
 
 function find(
@@ -215,6 +222,27 @@ export function checkSmokeReport(report: SmokeReport): string[] {
       }
       if (!p.text.includes("This week")) {
         fail.push(`${where} shows no "This week" card — this is not the dashboard.`);
+      }
+    }
+
+    if (p.window === "cloud-setup") {
+      // Resizable, so height is not a hard promise the way onboarding's is —
+      // but the wizard must still open on its own first screen rather than on
+      // an empty box, and the wayfinding sentence is the fix for failure #1.
+      if (p.bounds.width < WINDOW_SIZE.cloudSetup.minWidth) {
+        fail.push(
+          `${where} is ${p.bounds.width}px wide; minWidth is ${WINDOW_SIZE.cloudSetup.minWidth}px.`,
+        );
+      }
+      if (!p.resizable) {
+        fail.push(`${where} is not resizable; the wizard is deliberately not a fixed box.`);
+      }
+      // "Cloud sync" is the title bar, which renders immediately. "Cancel" is
+      // on both entry screens and only appears once `wwb:sync:config` has come
+      // back and decided which one to open on — so together they separate "the
+      // window is up" from "the window is up and has something in it".
+      for (const needed of ["Cloud sync", "Cancel"]) {
+        if (!p.text.includes(needed)) fail.push(`${where} never mentions "${needed}".`);
       }
     }
 

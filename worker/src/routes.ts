@@ -77,8 +77,8 @@ export interface RouteContext {
   readonly env: Env;
   readonly url: URL;
   /**
-   * Derived from the bearer token, never from the body. Empty only for routes
-   * declared `auth: false`, which never write.
+   * Derived from the machine registry via the bearer token, never from the
+   * body. Empty only for routes declared `auth: false`, which never write.
    */
   readonly machineId: string;
 }

@@ -26,11 +26,12 @@
 import worker from "../../worker/src/index.js";
 import { FakeD1 } from "../../worker/test/fake-d1.js";
 import type { Env } from "../../worker/src/types.js";
+import { createHash } from "node:crypto";
 
-export const TOKEN_PERSONAL = "not-a-real-token-personal-aaaaaaaaaaaaaaaa";
-export const TOKEN_WORK = "not-a-real-token-work-bbbbbbbbbbbbbbbbbbbb";
-export const MACHINE_PERSONAL = "00000000-0000-0000-0000-00000000AAAA";
-export const MACHINE_WORK = "00000000-0000-0000-0000-00000000BBBB";
+export const TOKEN_A = "not-a-real-token-machine-a-aaaaaaaaaaaaaaaa";
+export const TOKEN_B = "not-a-real-token-machine-b-bbbbbbbbbbbbbbbb";
+export const MACHINE_A = "00000000-0000-0000-0000-00000000AAAA";
+export const MACHINE_B = "00000000-0000-0000-0000-00000000BBBB";
 
 export const BASE_URL = "https://wwb-sync.test";
 
@@ -74,13 +75,21 @@ export class FakeCloud {
   beforeDispatch: (() => void) | null = null;
 
   constructor() {
-    this.env = {
-      DB: this.d1,
-      TOKEN_PERSONAL,
-      TOKEN_WORK,
-      MACHINE_ID_PERSONAL: MACHINE_PERSONAL,
-      MACHINE_ID_WORK: MACHINE_WORK,
-    };
+    // Credentials are rows in the registry now, not Worker bindings. Two
+    // machines are enrolled because the cross-machine merge needs two — not
+    // because the Worker knows anything about a number of machines.
+    for (const [token, machineId] of [
+      [TOKEN_A, MACHINE_A],
+      [TOKEN_B, MACHINE_B],
+    ] as const) {
+      this.d1.raw
+        .prepare(
+          `INSERT INTO machine_token (token_sha256, machine_id, enrolled_at_ms)
+           VALUES (?,?,?)`,
+        )
+        .run(createHash("sha256").update(token, "utf8").digest("hex"), machineId, 1);
+    }
+    this.env = { DB: this.d1 };
   }
 
   /** Hand this to `createWorkerClient({ fetchImpl })`. */

@@ -1,32 +1,37 @@
 /**
- * Turning cloud sync on — the thing that could not be done at all.
+ * The Cloud sync card — one card, three states, ONE codepath.
  *
- * Every layer under this existed and was tested: the Worker, the flusher, the
- * puller, the `safeStorage` vault, and the `wwb:sync:config` /
- * `wwb:sync:setConfig` channels. Nothing in the renderer ever called them, so
- * `npm run bringup:cloud` could print a URL and a token and there was nowhere
- * to put them. `devTools: isDev()` closed the console workaround in a packaged
- * build, which left exactly zero routes in. A feature that is built, tested and
- * unreachable is not shipped.
+ * ── WHAT WAS WRONG WITH IT ──────────────────────────────────────────────────
+ * It showed `Worker URL` and `This Mac's token` — fields that only make sense
+ * for a setup that already exists — with `Set up cloud sync…`, the thing that
+ * CREATES one, buried underneath and opening a bordered sub-panel INSIDE the
+ * card. Three levels deep, with the expert affordance on top. The owner's words:
+ * "this onboarding flow is very confusing … I don't like how there was like a
+ * sub menu."
+ *
+ * So: exactly one primary path, chosen by whether sync is configured, and the
+ * two expert fields behind a disclosure. The wizard itself moved out to its own
+ * window (`ROUTE.cloudSetup`).
+ *
+ * ── STILL ONE COMPONENT ─────────────────────────────────────────────────────
+ * One `SyncSettings`, one pair of `<Field>`s, one `save()`, one `runTest()`.
+ * All `configured` decides is which sentence shows, which button is primary,
+ * and whether the disclosure starts open. There is no second component to
+ * drift out of step with this one.
  *
  * ── THE TOKEN NEVER ENTERS REACT STATE ──────────────────────────────────────
- *
  * The token input is UNCONTROLLED, held by a ref, and that is a security
  * decision rather than a style one. A controlled `value={token}` would put the
  * secret in a React fibre, in every re-render's closure, in a component-tree
  * snapshot and — depending on the renderer — in a `value` attribute in the DOM.
  * With a ref it exists in exactly one DOM node's `.value` property and in the
  * argument to one IPC call, and the field is cleared the moment that call
- * resolves. What React state holds is a BOOLEAN: whether something has been
- * typed. `test/renderer/settings.test.tsx` asserts the token is absent from
- * `innerHTML`, from every attribute, and from the state the pane renders back.
+ * resolves. What React state holds is a BOOLEAN and an ENUM.
  *
  * The other direction is enforced by the contract itself: `SyncConfigState` has
- * `tokenPresent: boolean` and no field a token could ride back on, so there is
- * nothing here to accidentally render.
+ * `tokenPresent: boolean` and no field a token could ride back on.
  *
  * ── WHY "TEST" IS A SEPARATE BUTTON ─────────────────────────────────────────
- *
  * Saving a wrong URL is silent. The flusher retries in the background, the
  * doctor says `configured: true`, and the only symptom is that the other Mac's
  * hours never appear — a week later. `wwb:sync:test` calls `/health` and then
@@ -36,13 +41,13 @@
 import * as React from "react";
 
 import { AlertBanner } from "@/renderer/components/alert-banner";
-import { CloudSetupWizard } from "@/renderer/components/cloud-setup-wizard";
 import { Field, ReadRow, SettingsCard, inputClass } from "@/renderer/components/settings-ui";
 import { Badge } from "@/renderer/components/ui/badge";
 import { Button } from "@/renderer/components/ui/button";
 import { Separator } from "@/renderer/components/ui/separator";
 import { ipc, messageOf, type Query } from "@/renderer/lib/ipc";
 import { syncHealthView, workerUrlError, type SyncTone } from "@/renderer/lib/sync-health";
+import { classifyCredential, type CredentialShape } from "@/shared/credentials";
 import { formatAgo, formatCount } from "@/shared/format";
 import type { DoctorReport, SyncConfigState, SyncTestResult } from "@/shared/ipc-types";
 
@@ -71,6 +76,7 @@ export function SyncSettings({
   const saved = config.data;
   const health = syncHealthView(saved, doctor.data);
   const sync = doctor.data?.sync ?? null;
+  const configured = saved?.configured === true;
 
   // `null` means "not edited", which is not the same as an empty edit — the
   // same rule `device-name.tsx` uses. It is what lets the field adopt the stored
@@ -82,6 +88,7 @@ export function SyncSettings({
   // The secret lives HERE and nowhere else. See the header.
   const tokenRef = React.useRef<HTMLInputElement>(null);
   const [tokenTyped, setTokenTyped] = React.useState(false);
+  const [tokenShape, setTokenShape] = React.useState<CredentialShape>("unknown");
 
   const [busy, setBusy] = React.useState<Busy>("idle");
   const [test, setTest] = React.useState<SyncTestResult | null>(null);
@@ -90,6 +97,22 @@ export function SyncSettings({
   const nowMs = Date.now();
 
   const { reload: reloadDoctor } = doctor;
+
+  /**
+   * Whether the manual fields are on screen.
+   *
+   * ONE-WAY within a session: once opened it stays open until the window
+   * closes. Collapsing a panel that holds a half-typed token would discard it
+   * silently, and the token lives in a DOM ref precisely so that it is never in
+   * state to restore from.
+   */
+  const [opened, setOpened] = React.useState(false);
+  const halfConfigured =
+    saved !== null && saved.tokenPresent !== (saved.workerUrl.trim() !== "");
+  // It opens BY ITSELF when the fields are the fix rather than the wizard: a
+  // saved URL that is not a URL, or exactly one half present — which is the
+  // "finish this" state `sync-health.ts` already writes a sentence for.
+  const manualOpen = opened || saved?.error != null || halfConfigured;
 
   /**
    * Read the field, then blank it — in that order, and never into state.
@@ -108,6 +131,7 @@ export function SyncSettings({
   const clearTokenField = (): void => {
     if (tokenRef.current) tokenRef.current.value = "";
     setTokenTyped(false);
+    setTokenShape("unknown");
   };
 
   const patch = (): { workerUrl?: string; token?: string } => {
@@ -189,6 +213,10 @@ export function SyncSettings({
     );
   };
 
+  const openWizard = (): void => {
+    void ipc.openCloudSetup().catch((e: unknown) => setError(messageOf(e)));
+  };
+
   const dirty = urlDraft !== null || tokenTyped;
   const vaultMissing = saved !== null && !saved.vaultAvailable;
 
@@ -244,63 +272,153 @@ export function SyncSettings({
 
       <Separator className="my-4" />
 
-      <div className="flex flex-col gap-3">
-        <Field
-          htmlFor="sync-url"
-          label="Worker URL"
-          hint="From npm run bringup:cloud — https://wwb-sync.<account>.workers.dev"
-          error={urlProblem}
-        >
-          <input
-            id="sync-url"
-            type="text"
-            inputMode="url"
-            spellCheck={false}
-            autoComplete="off"
-            autoCorrect="off"
-            autoCapitalize="off"
-            placeholder="https://wwb-sync.example.workers.dev"
-            className={inputClass}
-            aria-invalid={urlProblem !== null}
-            value={url}
-            onChange={(e) => {
-              setUrlDraft(e.target.value);
-              setTest(null);
-              setSavedNote(null);
-            }}
-          />
-        </Field>
+      {/* ── EXACTLY ONE PRIMARY PATH ──────────────────────────────────────── */}
+      <div data-slot="sync-primary" data-configured={String(configured)}>
+        {configured ? (
+          <>
+            <p className="text-xs text-muted-foreground">
+              Syncing to <code className="rounded bg-muted px-1 py-0.5">{saved?.workerUrl}</code>
+              {saved?.tokenPresent === true
+                ? " · this Mac’s token is stored in the keychain."
+                : "."}
+            </p>
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={runTest}
+                disabled={busy !== "idle" || urlProblem !== null}
+              >
+                {busy === "testing" ? "Testing…" : "Test connection"}
+              </Button>
+              <Button size="sm" variant="outline" onClick={flush} disabled={busy !== "idle"}>
+                {busy === "flushing" ? "Syncing…" : "Sync now"}
+              </Button>
+              <Button size="sm" variant="ghost" onClick={openWizard} disabled={busy !== "idle"}>
+                Set up again…
+              </Button>
+            </div>
+          </>
+        ) : (
+          <>
+            <p className="text-xs text-muted-foreground">
+              Nothing is sent anywhere yet. Every hour is recorded and kept on this Mac.
+            </p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Setting this up creates a database and a Worker in your own Cloudflare
+              account, on the free plan.
+            </p>
+            <div className="mt-3">
+              <Button size="sm" onClick={openWizard} disabled={busy !== "idle"}>
+                Set up cloud sync…
+              </Button>
+            </div>
+          </>
+        )}
+      </div>
 
-        <Field
-          htmlFor="sync-token"
-          label="This Mac’s token"
-          hint={
-            vaultMissing
-              ? "This Mac has no keychain available, so a token cannot be stored."
-              : saved?.tokenPresent === true
-                ? "A token is stored. It cannot be shown again — type a new one to replace it, or leave this blank."
-                : "Each Mac gets its own token. Swapping them attributes every hour to the other laptop."
-          }
-        >
-          {/* UNCONTROLLED. The value never reaches React state, a re-render
-              closure, or the DOM as an attribute. See the file header. */}
-          <input
-            id="sync-token"
-            ref={tokenRef}
-            type="password"
-            name="wwb-sync-token"
-            spellCheck={false}
-            autoComplete="off"
-            disabled={vaultMissing}
-            placeholder={saved?.tokenPresent === true ? "•••••••• stored" : "paste the token"}
-            className={inputClass}
-            onChange={(e) => {
-              setTokenTyped(e.target.value.trim() !== "");
-              setTest(null);
-              setSavedNote(null);
-            }}
-          />
-        </Field>
+      {/* ── THE EXPERT FIELDS, BEHIND A DISCLOSURE ────────────────────────── */}
+      {/* A plain toggle button rather than a native <details>, so the open
+          state is ours to hold and can be forced open by the two conditions
+          above that mean the FIELDS are the fix rather than the wizard. */}
+      <div className="mt-4">
+        {manualOpen ? null : (
+          <button
+            type="button"
+            data-slot="manual-toggle"
+            className="text-xs text-muted-foreground underline underline-offset-2 hover:text-foreground"
+            onClick={() => setOpened(true)}
+          >
+            {configured
+              ? "Change the URL, or replace this Mac’s token"
+              : "Already have a Worker URL and token? Enter them by hand"}
+          </button>
+        )}
+
+        {manualOpen ? (
+          <div data-slot="manual-fields" className="flex flex-col gap-3">
+            <Field
+              htmlFor="sync-url"
+              label="Worker URL"
+              hint="Set up sync fills this in. It looks like https://wwb-sync.<account>.workers.dev"
+              error={urlProblem}
+            >
+              <input
+                id="sync-url"
+                type="text"
+                inputMode="url"
+                spellCheck={false}
+                autoComplete="off"
+                autoCorrect="off"
+                autoCapitalize="off"
+                placeholder="https://wwb-sync.example.workers.dev"
+                className={inputClass}
+                aria-invalid={urlProblem !== null}
+                value={url}
+                onChange={(e) => {
+                  setUrlDraft(e.target.value);
+                  setTest(null);
+                  setSavedNote(null);
+                }}
+              />
+            </Field>
+
+            <Field
+              htmlFor="sync-token"
+              label="This Mac’s token"
+              hint={
+                vaultMissing
+                  ? "This Mac has no keychain available, so a token cannot be stored."
+                  : saved?.tokenPresent === true
+                    ? "A token is stored. It cannot be shown again — type a new one to replace it, or leave this blank."
+                    : "Each Mac has its own, minted by setup on that Mac. It is 44 characters and ends in “=”."
+              }
+            >
+              {/* UNCONTROLLED. The value never reaches React state, a re-render
+                  closure, or the DOM as an attribute. See the file header. */}
+              <input
+                id="sync-token"
+                ref={tokenRef}
+                type="password"
+                name="wwb-sync-token"
+                spellCheck={false}
+                autoComplete="off"
+                disabled={vaultMissing}
+                placeholder={saved?.tokenPresent === true ? "•••••••• stored" : "paste the token"}
+                className={inputClass}
+                onChange={(e) => {
+                  setTokenTyped(e.target.value.trim() !== "");
+                  // The ENUM, never the value. See `shared/credentials.ts`.
+                  setTokenShape(classifyCredential(e.target.value));
+                  setTest(null);
+                  setSavedNote(null);
+                }}
+              />
+            </Field>
+
+            <WrongCredentialNote shape={tokenShape} onSetUp={openWizard} />
+
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={runTest}
+                // Nothing to test at all is the one state where this button
+                // would be decoration: no stored config and nothing typed.
+                disabled={busy !== "idle" || urlProblem !== null || (!dirty && !configured)}
+              >
+                {busy === "testing" ? "Testing…" : "Test connection"}
+              </Button>
+              <Button
+                size="sm"
+                onClick={save}
+                disabled={busy !== "idle" || !dirty || urlProblem !== null}
+              >
+                {busy === "saving" ? "Saving…" : "Save"}
+              </Button>
+            </div>
+          </div>
+        ) : null}
       </div>
 
       {test === null ? null : (
@@ -325,52 +443,56 @@ export function SyncSettings({
           {savedNote}
         </p>
       )}
-
-      {/* Everything below the fields is for a setup that already exists. This is
-          how one comes into being — and it is placed after them, not before,
-          because the fields are what a returning owner is here for. */}
-      <CloudSetupWizard
-        onFinished={() => {
-          // Setup finishing IS a config change: main has already stored the
-          // token and reconfigured the flusher, so the card has to re-read both
-          // rather than keep showing "not set up" for the rest of the session.
-          setUrlDraft(null);
-          clearTokenField();
-          config.reload();
-          reloadDoctor();
-        }}
-      />
-
-      <div className="mt-4 flex flex-wrap items-center gap-2">
-        <Button
-          size="sm"
-          variant="outline"
-          onClick={runTest}
-          // Nothing to test at all is the one state where this button would be
-          // decoration: no stored config and nothing typed.
-          disabled={busy !== "idle" || urlProblem !== null || (!dirty && !saved?.configured)}
-        >
-          {busy === "testing" ? "Testing…" : "Test connection"}
-        </Button>
-        <Button size="sm" onClick={save} disabled={busy !== "idle" || !dirty || urlProblem !== null}>
-          {busy === "saving" ? "Saving…" : "Save"}
-        </Button>
-        <Button
-          size="sm"
-          variant="ghost"
-          onClick={flush}
-          disabled={busy !== "idle" || saved?.configured !== true}
-          title={
-            saved?.configured === true
-              ? undefined
-              : "There is nowhere to send anything until this is set up."
-          }
-        >
-          {busy === "flushing" ? "Syncing…" : "Sync now"}
-        </Button>
-      </div>
     </SettingsCard>
   );
+}
+
+/**
+ * The warning for the OTHER credential pasted into this field.
+ *
+ * The two are no longer adjacent — the Cloudflare API token is in a different
+ * window entirely — so this is a second line of defence rather than the fix.
+ * It warns and never blocks; it renders before any request is made; and it
+ * never echoes the value.
+ */
+function WrongCredentialNote({
+  shape,
+  onSetUp,
+}: {
+  shape: CredentialShape;
+  onSetUp: () => void;
+}): React.ReactElement | null {
+  if (shape === "cloudflare-api-token") {
+    return (
+      <div data-slot="wrong-credential" data-shape={shape} className="text-xs text-destructive">
+        <p>
+          <b>That looks like a Cloudflare API token, not this Mac’s sync token.</b>
+        </p>
+        <p className="mt-1 text-muted-foreground">
+          They are two different credentials. A Cloudflare API token <i>creates</i> the
+          cloud; this Mac’s sync token is what the app uses afterwards, and it is 44
+          characters ending in “=”.
+        </p>
+        <p className="mt-1 text-muted-foreground">
+          If you have not set the cloud up yet, use <b>Set up cloud sync</b> instead.
+        </p>
+        <div className="mt-2">
+          <Button size="sm" variant="outline" onClick={onSetUp}>
+            Set up cloud sync…
+          </Button>
+        </div>
+      </div>
+    );
+  }
+  if (shape === "url") {
+    return (
+      <p data-slot="wrong-credential" data-shape={shape} className="text-xs text-destructive">
+        <b>That is a URL, not a token.</b> The Worker URL goes in the field above; this
+        needs the credential itself.
+      </p>
+    );
+  }
+  return null;
 }
 
 export default SyncSettings;

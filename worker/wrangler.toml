@@ -18,19 +18,14 @@ binding = "DB"
 database_name = "wwb"
 database_id = "REPLACE_AFTER_wrangler_d1_create"
 
-# ── NO SECRETS IN THIS FILE. ────────────────────────────────────────────────
-# The repo is public and CI fails the build if a credential-shaped string ever
-# appears in a tracked file. The four values the Worker reads at runtime are set
-# out of band and never written down here:
+# ── THIS WORKER READS NO SECRETS AND NO ENVIRONMENT VARIABLES. ──────────────
+# Its only binding is DB, above. Per-machine bearer tokens used to be
+# `secret_text` bindings; they are now rows in `machine_token` inside the
+# database itself, holding a SHA-256 and never a token. See worker/schema.sql
+# and worker/src/auth.ts.
 #
-#   wrangler secret put TOKEN_PERSONAL     # openssl rand -base64 32, piped in
-#   wrangler secret put TOKEN_WORK         # a second, independent 32-byte value
-#   wrangler secret put MACHINE_ID_PERSONAL  # that Mac's IOPlatformUUID
-#   wrangler secret put MACHINE_ID_WORK      # the other Mac's IOPlatformUUID
-#
-# MACHINE_ID_* are not secret in the confidentiality sense, but they are set the
-# same way so that bring-up is one uniform ritual with no file to forget. If
-# they are unset the Worker stamps the slot name ('personal' / 'work') instead,
-# so a fresh deploy is still coherent — see worker/src/auth.ts.
-#
-# Revoking one Mac is a single `wrangler secret put TOKEN_WORK` with a new value.
+# Consequences worth stating, because both used to be footguns:
+#   • An upload can no longer silently delete another Mac's credential. There is
+#     no binding to inherit and nothing for `?bindings_inherit=strict` to save.
+#   • Revoking a Mac is one UPDATE against D1, not a `wrangler secret put`, and
+#     it takes effect on that Mac's next request.

@@ -134,38 +134,43 @@ contents. It runs in CI's macOS job. `docs/IMPL_UI.md` §7.3 has the full list.
 
 ## The cloud half
 
-**Settings → Cloud sync → *Set up cloud sync…***, and paste one Cloudflare API
-token. That is the whole of it: no terminal, no `wrangler login`, no Node
-toolchain on the Mac being set up. `docs/CLOUDFLARE.md` has the three
-permissions the token needs and how to make one.
+**Menu-bar icon → *Set up cloud sync…***, and paste one Cloudflare API token.
+That is the whole of it: no terminal, no `wrangler login`, no Node toolchain on
+the Mac being set up. It is on the tray whenever sync is unconfigured, and in
+Settings → Cloud sync either way. `docs/CLOUDFLARE.md` has the three permissions
+the token needs and how to make one.
 
-It creates or **adopts** the D1 database, applies `worker/schema.sql`, deploys
-the Worker, turns on the workers.dev address, mints the two per-machine tokens,
-sets this Mac's machine id, stores this Mac's token in the Keychain, and shows
-the other Mac's token once. Pasting the token starts nothing — a read-only probe
-runs first and the next screen says what is already on the account. Safe to run
-again: an existing database is adopted rather than recreated, and the other Mac's
-token is left alone unless you ask for it to be replaced. Cloudflare cannot read
-a secret back, so a silent reset would take the other Mac offline with no error
-anywhere.
+Setup creates or **adopts** the D1 database, applies `worker/schema.sql`,
+**enrols this Mac**, deploys the Worker, turns on the workers.dev address, proves
+the Worker answers, and stores this Mac's token in the Keychain. Pasting the
+token starts nothing — a read-only probe runs first, and the next screen says
+what is already on the account, including which Macs are already enrolled.
+
+**Each Mac enrols itself, and only itself.** It mints its own token, keeps the
+plaintext in its own Keychain, and sends Cloudflare only the SHA-256 — recorded
+next to its own `IOPlatformUUID` in a `machine_token` table. So there is no slot
+to pick, no token to carry to the second Mac, and nothing to swap. Adding a
+machine is installing the app there and running the same setup.
+
+That matters because the old failure was silent. The Worker stamps `machine_id`
+from the credential and never from the request body — which is what stops a
+stolen token forging another machine's rows — and a mismatched id used to fail
+*invisibly*: both Macs synced, both mirrors converged, every total was right, and
+the per-machine breakdown credited the wrong laptop. Forever. A machine can now
+only ever enrol its own id, and only from the machine itself, so that outcome is
+not merely detected — it is unconstructible.
+
+Safe to run again: the database is adopted rather than recreated, and only *this*
+Mac's older tokens are retired, after the new one is stored. Revoking another Mac
+is one click on the review screen and takes effect on its next request.
 
 The API token is used for that one run and discarded — never written to a file,
-never logged. You can delete it in the dashboard as soon as setup finishes.
+never logged, never returned over IPC. You can delete it in the dashboard as soon
+as setup finishes.
 
-The shell version still exists, for a Mac where you would rather not create a
-token at all:
-
-```bash
-npx wrangler login
-npm run bringup:cloud -- --this personal    # or --this work
-```
-
-**Each token's machine id must be that Mac's `IOPlatformUUID`.** The Worker
-stamps `machine_id` from the token and never from the request body, which is what
-stops a stolen token forging the other machine's rows — and it means a swapped or
-unset id fails *invisibly*: both Macs sync, both mirrors converge, every total is
-right, and the per-machine breakdown credits the wrong laptop. Forever.
-[`docs/BRINGUP.md`](docs/BRINGUP.md) step 12 is that caveat in full.
+For a terminal escape hatch, see `docs/CLOUDFLARE.md` → *If the app cannot do
+it*. There is no longer a `bringup:cloud` script: it was where the two-slot model
+came from, and keeping it would have meant implementing enrolment twice.
 
 ## Before anything is built
 

@@ -23,6 +23,8 @@ import type {
   CloudProbeRequest,
   CloudProbeResult,
   CloudSetupResult,
+  CloudRevokeRequest,
+  CloudRevokeResult,
   CloudSetupRunRequest,
   InvokeChannel,
   InvokeContract,
@@ -180,7 +182,17 @@ export interface IpcDeps {
   readonly cloudSetup?: {
     probe(req: CloudProbeRequest): Promise<CloudProbeResult>;
     run(req: CloudSetupRunRequest): Promise<CloudSetupResult>;
+    revoke(req: CloudRevokeRequest): Promise<CloudRevokeResult>;
   };
+  /**
+   * Open Cloudflare's API-token page in the real browser.
+   *
+   * Absent in tests and in the smoke run. The URL is built in main — see
+   * `src/cloud/token-url.ts` — so a renderer can never choose where this goes.
+   */
+  readonly openTokenPage?: () => void;
+  /** Open the cloud-setup wizard window. */
+  readonly openCloudSetup?: () => void;
   /** Test seam so the 30 s keepalive can be driven by fake timers. */
   readonly setRepeating?: (fn: () => void, ms: number) => NodeJS.Timeout;
 }
@@ -305,19 +317,17 @@ export function registerIpcHandlers(runtime: AppRuntime, deps: IpcDeps): void {
     tokenValid: false,
     tokenStatus: "unknown",
     accounts: [],
+    scopes: null,
     deployment: null,
     error: "this build cannot set up cloud sync",
   });
 
-  const noCloudRun = (req: CloudSetupRunRequest): CloudSetupResult => ({
+  const noCloudRun = (): CloudSetupResult => ({
     steps: [],
     done: false,
     error: "this build cannot set up cloud sync",
     ok: false,
     workerUrl: null,
-    slot: req.slot,
-    otherSlot: req.slot === "personal" ? "work" : "personal",
-    otherMachineToken: null,
     unstoredToken: null,
   });
 
@@ -368,8 +378,24 @@ export function registerIpcHandlers(runtime: AppRuntime, deps: IpcDeps): void {
     return await deps.cloudSetup.probe(req);
   });
   handle("wwb:cloud:run", async (req) => {
-    if (deps.cloudSetup === undefined) return noCloudRun(req);
+    if (deps.cloudSetup === undefined) return noCloudRun();
     return await deps.cloudSetup.run(req);
+  });
+  handle("wwb:cloud:revoke", async (req) => {
+    if (deps.cloudSetup === undefined) {
+      return { ok: false, machines: [], error: "this build cannot set up cloud sync" };
+    }
+    return await deps.cloudSetup.revoke(req);
+  });
+  /**
+   * Takes no argument on purpose. The renderer asks to open "the token page",
+   * and main decides which page that is.
+   */
+  handle("wwb:cloud:openTokenPage", () => {
+    deps.openTokenPage?.();
+  });
+  handle("wwb:window:openCloudSetup", () => {
+    deps.openCloudSetup?.();
   });
 
   /**

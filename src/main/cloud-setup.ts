@@ -25,37 +25,59 @@
  * step, and every network call is awaited off the main thread's critical path.
  * `src/main/file-access.ts` records what happens when that rule is broken.
  */
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 
 import {
+  DEFAULT_DATABASE_NAME,
   createCloudflareApi,
   describeCloudError,
-  otherTokenPresent,
+  findDatabase,
   probeCloud,
+  readEnrolledMachines,
+  revokeMachine,
   runCloudSetup,
   type CloudSetupProgress,
+  type EnrolledMachineRow,
 } from "../cloud";
 import type {
   CloudProbeRequest,
   CloudProbeResult,
+  CloudRevokeRequest,
+  CloudRevokeResult,
   CloudSetupResult,
   CloudSetupRunRequest,
+  EnrolledMachine,
 } from "../shared/ipc-types";
 import type { SyncConfigGateway } from "./bootstrap";
 import { log } from "./log";
 
 /**
- * 32 cryptographically random bytes, base64 — the same shape and the same
- * entropy as `openssl rand -base64 32` in `scripts/bringup-cloud.sh`, so a
- * token minted here and one minted there are indistinguishable.
+ * 32 cryptographically random bytes, base64 — 44 characters ending in `=`.
+ *
+ * The plaintext exists in exactly two places: this Mac's Keychain, and the one
+ * screen that shows it if the Keychain refuses. Only its SHA-256 is ever sent
+ * anywhere.
  */
 export function mintMachineToken(): string {
   return randomBytes(32).toString("base64");
 }
 
+/**
+ * SHA-256, lowercase hex — the format `machine_token.token_sha256` stores.
+ *
+ * Lives in `src/main/` and is injected into `src/cloud/`, which imports nothing
+ * from `node:` and must keep it that way. The Worker computes the same digest
+ * with WebCrypto; a test pins that the two agree, because if they ever stopped
+ * agreeing every machine would 401 for ever with nothing in any log.
+ */
+export function hashMachineToken(token: string): string {
+  return createHash("sha256").update(token, "utf8").digest("hex");
+}
+
 export interface CloudSetupGateway {
   probe(req: CloudProbeRequest): Promise<CloudProbeResult>;
   run(req: CloudSetupRunRequest): Promise<CloudSetupResult>;
+  revoke(req: CloudRevokeRequest): Promise<CloudRevokeResult>;
 }
 
 export interface CloudSetupDeps {
@@ -84,6 +106,16 @@ export function createCloudSetupGateway(deps: CloudSetupDeps): CloudSetupGateway
       ...(deps.apiBaseUrl === undefined ? {} : { baseUrl: deps.apiBaseUrl }),
     });
 
+  /** Tag each registry row with whether it is the Mac this window is running on. */
+  const withThisMac = (rows: readonly EnrolledMachineRow[]): EnrolledMachine[] =>
+    rows.map((m) => ({
+      machineId: m.machineId,
+      label: m.label,
+      enrolledAtMs: m.enrolledAtMs,
+      lastSeenMs: m.lastSeenMs,
+      isThisMac: m.machineId === deps.machineId,
+    }));
+
   return {
     async probe(req) {
       const result = await probeCloud(
@@ -95,6 +127,7 @@ export function createCloudSetupGateway(deps: CloudSetupDeps): CloudSetupGateway
         tokenValid: result.tokenValid,
         tokenStatus: result.tokenStatus,
         accounts: result.accounts.map((a) => ({ id: a.id, name: a.name })),
+        scopes: result.scopes === null ? null : { ...result.scopes },
         deployment:
           d === null
             ? null
@@ -102,20 +135,64 @@ export function createCloudSetupGateway(deps: CloudSetupDeps): CloudSetupGateway
                 accountId: d.accountId,
                 databaseExists: d.databaseExists,
                 workerExists: d.workerExists,
-                verdict: d.verdict,
-                // Both slots, so the pane stays accurate while the owner is
-                // still choosing one. Names only — `bindingNames` never
-                // carries a value, and this reduces it further to two booleans.
-                slotsWithToken: (["personal", "work"] as const).filter((slot) =>
-                  // `otherTokenPresent` answers "does the OTHER slot have one",
-                  // so asking it about the other slot answers it about this one.
-                  otherTokenPresent(d.bindingNames, slot === "personal" ? "work" : "personal"),
-                ),
+                machines: withThisMac(d.machines),
                 accountSubdomain: d.accountSubdomain,
                 rowsInCloud: d.rowsInCloud,
               },
         error: result.error,
       };
+    },
+
+    async revoke(req) {
+      // Resolve the database by name rather than trusting a renderer-supplied
+      // id: the wizard is the only caller, and this keeps "which database" a
+      // fact main establishes rather than an argument it is handed.
+      const cf = api(req.apiToken);
+      try {
+        const database = findDatabase(
+          await cf.listDatabases(req.accountId),
+          DEFAULT_DATABASE_NAME,
+        );
+        if (database === null) {
+          return {
+            ok: false,
+            machines: [],
+            error: `there is no “${DEFAULT_DATABASE_NAME}” database on this account to revoke against.`,
+          };
+        }
+        if (req.machineId === deps.machineId) {
+          // Revoking the Mac you are standing on is what "Set up again" does,
+          // correctly and in the right order. Doing it here would take this Mac
+          // offline with no replacement token.
+          return {
+            ok: false,
+            machines: withThisMac(
+              await readEnrolledMachines(cf, req.accountId, database.uuid),
+            ),
+            error:
+              "that is this Mac. Run setup again instead — it mints a new token " +
+              "for this Mac and retires the old one in the right order.",
+          };
+        }
+        await revokeMachine({
+          api: cf,
+          accountId: req.accountId,
+          databaseId: database.uuid,
+          machineId: req.machineId,
+        });
+        log.info("cloud setup revoked a machine's token");
+        return {
+          ok: true,
+          machines: withThisMac(
+            await readEnrolledMachines(cf, req.accountId, database.uuid),
+          ),
+          error: null,
+        };
+      } catch (err) {
+        // Never throws at the renderer: the caller is a button, and a rejected
+        // invoke renders as a stack trace.
+        return { ok: false, machines: [], error: describeCloudError(err) };
+      }
     },
 
     async run(req) {
@@ -132,6 +209,7 @@ export function createCloudSetupGateway(deps: CloudSetupDeps): CloudSetupGateway
           api: api(req.apiToken),
           thisMachineId: deps.machineId,
           mintToken: deps.mintToken ?? mintMachineToken,
+          hashToken: hashMachineToken,
           ...(deps.fetchImpl ? { fetchImpl: deps.fetchImpl } : {}),
           ...(deps.sleep ? { sleep: deps.sleep } : {}),
           onProgress: emit,
@@ -141,20 +219,16 @@ export function createCloudSetupGateway(deps: CloudSetupDeps): CloudSetupGateway
         },
         {
           accountId: req.accountId,
-          slot: req.slot,
-          ...(req.rotateOtherToken === undefined
-            ? {}
-            : { rotateOtherToken: req.rotateOtherToken }),
           ...(req.subdomain === undefined ? {} : { subdomain: req.subdomain }),
         },
       );
 
-      // The URL is not a credential and is worth having in the log; the tokens
-      // are, and are not in `outcome.steps` — every detail string is written by
+      // The URL is not a credential and is worth having in the log; the token
+      // is, and is not in `outcome.steps` — every detail string is written by
       // `bringup.ts` from names and counts.
       log.info(
         `cloud setup ${outcome.ok ? "succeeded" : "did not finish"} ` +
-          `(slot ${outcome.slot}, url ${outcome.workerUrl ?? "none"})` +
+          `(url ${outcome.workerUrl ?? "none"})` +
           (outcome.error === null ? "" : `: ${describeCloudError(outcome.error)}`),
       );
 
@@ -164,9 +238,6 @@ export function createCloudSetupGateway(deps: CloudSetupDeps): CloudSetupGateway
         error: outcome.error,
         ok: outcome.ok,
         workerUrl: outcome.workerUrl,
-        slot: outcome.slot,
-        otherSlot: outcome.otherSlot,
-        otherMachineToken: outcome.otherMachineToken,
         unstoredToken: outcome.unstoredToken,
       };
     },

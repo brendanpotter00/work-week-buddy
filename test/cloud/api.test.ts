@@ -151,27 +151,76 @@ describe("secrets never come back", () => {
     expect(secret?.type).toBe("secret_text");
     expect(secret?.text).toBeNull();
 
-    // The plain_text one DOES come back, and that asymmetry is the entire
-    // reason slot detection is possible at all.
+    // A plain_text value DOES come back. Nothing depends on that any more —
+    // the app stores nothing in a binding but the database id — but the
+    // asymmetry is still what the endpoint promises, so it stays asserted.
     const machineId = bindings?.find((b) => b.name === "MACHINE_ID_PERSONAL");
     expect(machineId?.text).toBe("MACHINE-A");
-  });
-
-  it("lists secret names without values", async () => {
-    cloud.seedScript([
-      { type: "secret_text", name: "TOKEN_PERSONAL", text: "shhh" },
-      { type: "secret_text", name: "TOKEN_WORK", text: "also-shhh" },
-    ]);
-    expect((await api().listWorkerSecretNames(FAKE_ACCOUNT_ID, "wwb-sync")).sort()).toEqual([
-      "TOKEN_PERSONAL",
-      "TOKEN_WORK",
-    ]);
   });
 
   it("reports a missing script as null, not as an error", async () => {
     // No Worker yet is the ordinary first-run state.
     expect(await api().getWorkerBindings(FAKE_ACCOUNT_ID, "wwb-sync")).toBeNull();
-    expect(await api().listWorkerSecretNames(FAKE_ACCOUNT_ID, "wwb-sync")).toEqual([]);
+  });
+});
+
+describe("queryParams binds rather than interpolates", () => {
+  it("sends {sql, params} and leaves the placeholder in the SQL", async () => {
+    // The regression guard for a real bug: `query()` string-interpolates, which
+    // was harmless while every caller passed a constant and became an injection
+    // site the moment enrolment put a machine id in a statement.
+    const db = cloud.seedDatabase("wwb");
+    db.schemaApplied = true;
+    await api().queryParams(
+      FAKE_ACCOUNT_ID,
+      db.uuid,
+      "INSERT INTO machine_token (token_sha256, machine_id, enrolled_at_ms) VALUES (?, ?, ?)",
+      ["a".repeat(64), "MACHINE-A", "1760000000000"],
+    );
+    const body = cloud.lastQueryBody();
+    expect(body?.sql).toContain("?");
+    expect(body?.params).toEqual(["a".repeat(64), "MACHINE-A", "1760000000000"]);
+    // The values must not appear spliced into the statement itself.
+    expect(body?.sql).not.toContain("MACHINE-A");
+  });
+
+  it("does not send a params key at all on the constant-SQL path", async () => {
+    const db = cloud.seedDatabase("wwb");
+    await api().query(FAKE_ACCOUNT_ID, db.uuid, "SELECT 1;");
+    expect(cloud.lastQueryBody()?.params).toBeUndefined();
+  });
+});
+
+describe("probeScopes tries, because scopes cannot be read", () => {
+  it("reports ok for everything a full token can reach", async () => {
+    expect(await api().probeScopes(FAKE_ACCOUNT_ID)).toEqual({
+      d1: "ok",
+      workers: "ok",
+      accountRead: "ok",
+    });
+  });
+
+  it("reports the missing one as missing, for a 403", async () => {
+    cloud.denied.add("D1: Read");
+    const scopes = await api().probeScopes(FAKE_ACCOUNT_ID);
+    expect(scopes.d1).toBe("missing");
+    expect(scopes.workers).toBe("ok");
+  });
+
+  it("reports the missing one as missing when Cloudflare answers 401 instead", async () => {
+    // Cloudflare has answered a missing scope with BOTH statuses. The probe
+    // must not care which it got — see Rule A in errors.ts.
+    cloud.denied.add("D1: Read");
+    cloud.denyStatus = 401;
+    expect((await api().probeScopes(FAKE_ACCOUNT_ID)).d1).toBe("missing");
+  });
+
+  it("creates nothing and changes nothing", async () => {
+    await api().probeScopes(FAKE_ACCOUNT_ID);
+    const mutating = cloud.calls.filter(
+      (c) => c.method === "POST" || c.method === "PUT" || c.method === "DELETE",
+    );
+    expect(mutating).toEqual([]);
   });
 });
 

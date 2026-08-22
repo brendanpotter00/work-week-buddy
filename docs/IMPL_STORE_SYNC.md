@@ -242,32 +242,31 @@ Called on launch, on wake, and after each successful flush.
 
 ```ts
 export interface Env {
+  /** The only binding. Credentials are ROWS, not bindings — see below. */
   DB: D1Database;
-  TOKEN_PERSONAL: string;
-  TOKEN_WORK: string;
 }
 
-const MACHINE_BY_TOKEN = (env: Env) => [
-  { token: env.TOKEN_PERSONAL, machineId: "personal" },
-  { token: env.TOKEN_WORK, machineId: "work" },
-];
-
-async function timingSafeEqual(a: string, b: string): Promise<boolean> {
-  const enc = new TextEncoder();
-  const [x, y] = [enc.encode(a), enc.encode(b)];
-  if (x.byteLength !== y.byteLength) return false;
-  return crypto.subtle.timingSafeEqual(x, y);
+/** SHA-256, lowercase hex — the format `machine_token.token_sha256` stores. */
+async function sha256Hex(sV: string): Promise<string> {
+  const d = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(sV));
+  return [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-/** Returns the machine this token belongs to, or null.
- *  The machine id comes FROM THE TOKEN, never from the request body — so a
- *  stolen token cannot forge the other machine's rows. */
+/** Returns the machine this token IS, or null.
+ *  The machine id comes FROM THE CREDENTIAL, never from the request body — so a
+ *  stolen token cannot forge another machine's rows. Nothing is hardcoded to
+ *  two: the registry is a table, and a machine enrols itself.
+ *  A read failure throws `RegistryUnavailable`, which index.ts maps to 503 —
+ *  a Worker deployed without its schema must not answer "your token is wrong". */
 async function authenticate(req: Request, env: Env): Promise<string | null> {
   const header = req.headers.get("authorization") ?? "";
   const presented = header.startsWith("Bearer ") ? header.slice(7) : "";
   if (!presented) return null;
-  for (const { token, machineId } of MACHINE_BY_TOKEN(env)) {
-    if (token && await timingSafeEqual(presented, token)) return machineId;
+  const row = await env.DB.prepare(
+    `SELECT machine_id FROM machine_token
+      WHERE token_sha256 = ? AND revoked_at_ms IS NULL`,
+  ).bind(await sha256Hex(presented)).first<{ machine_id: string }>();
+  return row === null || row.machine_id === "" ? null : row.machine_id;
   }
   return null;
 }
@@ -373,7 +372,7 @@ database_name = "wwb"
 database_id = "REPLACE_AFTER_wrangler_d1_create"
 ```
 
-Secrets are set with `wrangler secret put TOKEN_PERSONAL` and `TOKEN_WORK`. **Never in `wrangler.toml`** — that file is committed and the repo is public.
+**The Worker reads no secrets and no environment variables.** Its only binding is `DB`. Per-machine bearer tokens used to be `secret_text` bindings; they are rows in `machine_token` inside the database, holding a SHA-256 and never a token. Two footguns went with them: an upload can no longer silently delete another Mac's credential (there is nothing to inherit), and revoking a Mac is one `UPDATE` rather than a `wrangler secret put`.
 
 **Client-side**, the token goes through Electron `safeStorage.encryptString` into a file in Application Support, which is backed by the macOS Keychain. Never a plist, never a dotfile, never the asar.
 
@@ -421,8 +420,12 @@ Four layers, no command ever typed. Layers 2 and 3 are **load-bearing**, not nic
 
 | Test | Assertion |
 |---|---|
-| `wrong token rejected` | 401 |
-| `machine_id cannot be forged` | body says `work`, token is personal ⇒ the stored row says `personal` |
+| `a token in no registry row` | 401, and nothing written |
+| `a REVOKED token` | 401 — the revocation guarantee, effective on the next request |
+| `registry empty` | `/health` 200, everything else 401 — fail closed |
+| `registry table missing` | `/health` 200, everything else **503**, never 401 |
+| `machine_id cannot be forged` | body claims another machine ⇒ the stored row carries the token's own id |
+| `the hash agrees across implementations` | `node:crypto` (enrolment) and WebCrypto (the Worker) produce the same digest |
 | `DELETE and UPDATE unreachable` | both ⇒ 404 |
 | `duplicate insert is a no-op` | same id twice ⇒ one row, and **both** responses report it present |
 | `bound-parameter cap` | 50 rows in one request ⇒ chunked, all land, no error |

@@ -55,7 +55,27 @@ function onboardingProbe(over: Partial<WindowProbe> = {}): WindowProbe {
   };
 }
 
-/** A clean run: both windows, both scenarios, and a jiggler click that landed. */
+function cloudSetupProbe(over: Partial<WindowProbe> = {}): WindowProbe {
+  return {
+    window: "cloud-setup",
+    scenario: "degraded",
+    view: "cloud-setup",
+    bounds: { width: WINDOW_SIZE.cloudSetup.width, height: WINDOW_SIZE.cloudSetup.height },
+    resizable: true,
+    innerWidth: 640,
+    innerHeight: 720,
+    scrollWidth: 640,
+    scrollHeight: 700,
+    innerScroll: null,
+    widest: null,
+    headings: ["Cloud sync"],
+    text: "Cloud sync second copy free plan Continue Cancel",
+    jiggler: null,
+    ...over,
+  };
+}
+
+/** A clean run: every window, both scenarios, and a jiggler click that landed. */
 function healthyReport(over: Partial<SmokeReport> = {}): SmokeReport {
   return {
     ranAtMs: Date.parse("2026-08-20T12:00:00Z"),
@@ -73,6 +93,7 @@ function healthyReport(over: Partial<SmokeReport> = {}): SmokeReport {
         innerScroll: { clientHeight: 507, scrollHeight: 507, contentHeight: 225 },
         jiggler: { present: true, disabled: false, checked: false },
       }),
+      cloudSetupProbe(),
     ],
     jigglerClick: { switchChecked: true, runtimeJiggler: true, error: null },
     screenshots: [],
@@ -293,12 +314,15 @@ describe("a run that did not happen is a failure, not a pass", () => {
     // The version of this test suite that matters most: an empty report must
     // never be green. That is exactly how a broken harness reports success.
     const fail = checkSmokeReport(healthyReport({ probes: [] }));
-    expect(fail.length).toBeGreaterThanOrEqual(4);
+    expect(fail.length).toBeGreaterThanOrEqual(5);
     for (const w of ["dashboard", "onboarding"]) {
       for (const s of ["degraded", "granted"]) {
         expect(fail.join("\n")).toContain(`no probe for the ${w} window in the ${s} scenario`);
       }
     }
+    // The fourth window is measured too — one that nothing measures is exactly
+    // the bug `Root.tsx` exists for.
+    expect(fail.join("\n")).toContain("no probe for the cloud-setup window");
   });
 
   it("rejects a run that skipped the granted scenario", () => {

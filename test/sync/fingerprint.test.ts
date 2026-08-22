@@ -19,7 +19,7 @@ import { pull } from "../../src/sync/pull";
 import { fingerprintSha256 as workerSha256 } from "../../worker/src/fingerprint.js";
 import { insertClosed } from "../../src/store/intervals";
 import { makeRow, openTestDb } from "../fakes/seed-db";
-import { BASE_URL, FakeCloud, TOKEN_PERSONAL } from "./fake-cloud";
+import { BASE_URL, FakeCloud, TOKEN_A } from "./fake-cloud";
 import { testFlusher } from "./flusher";
 
 /** The digest of the empty string. An empty table is a real value, not a case. */
@@ -42,7 +42,7 @@ function rows(db: ReturnType<typeof openTestDb>, ids: readonly string[]): void {
 function clientFor(cloud: FakeCloud) {
   return createWorkerClient({
     baseUrl: BASE_URL,
-    token: TOKEN_PERSONAL,
+    token: TOKEN_A,
     fetchImpl: cloud.fetch,
   });
 }
@@ -122,7 +122,7 @@ describe("reconcile", () => {
     rows(otherCloudRows, ["x", "y"]);
     const otherClient = createWorkerClient({
       baseUrl: BASE_URL,
-      token: TOKEN_PERSONAL,
+      token: TOKEN_A,
       fetchImpl: cloud.fetch,
     });
     await testFlusher({ db: otherCloudRows, client: otherClient }).flush();

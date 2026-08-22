@@ -45,21 +45,26 @@ export interface CloudflareErrorItem {
 /**
  * A Cloudflare API call that reached Cloudflare and was refused.
  *
- * `permission` is what a 403 on THIS call means is missing — set by the caller
- * from the operation's documented token group, because the API itself never
- * says which scope it wanted.
+ * `permission` is what a refusal on THIS call means is missing — set by the
+ * caller from the operation's documented token group, because the API itself
+ * never says which scope it wanted.
+ *
+ * `tokenVerified` is what makes the wording reliable. See `describeApiFailure`.
  */
 export class CloudflareApiError extends Error {
   readonly status: number;
   readonly errors: readonly CloudflareErrorItem[];
   readonly operation: string;
   readonly permission: PermissionName | null;
+  /** Did `GET /user/tokens/verify` already accept this token, in this run? */
+  readonly tokenVerified: boolean;
 
   constructor(opts: {
     operation: string;
     status: number;
     errors: readonly CloudflareErrorItem[];
     permission?: PermissionName | null;
+    tokenVerified?: boolean;
   }) {
     super(describeApiFailure(opts));
     this.name = "CloudflareApiError";
@@ -67,6 +72,7 @@ export class CloudflareApiError extends Error {
     this.errors = opts.errors;
     this.operation = opts.operation;
     this.permission = opts.permission ?? null;
+    this.tokenVerified = opts.tokenVerified ?? false;
   }
 }
 
@@ -98,6 +104,7 @@ function describeApiFailure(opts: {
   status: number;
   errors: readonly CloudflareErrorItem[];
   permission?: PermissionName | null;
+  tokenVerified?: boolean;
 }): string {
   const detail = opts.errors
     .map((e) => `${e.message} [${String(e.code)}]`)
@@ -105,20 +112,54 @@ function describeApiFailure(opts: {
   const tail = detail === "" ? "" : ` Cloudflare said: ${redactSecrets(detail)}`;
   const permission = opts.permission ?? null;
 
+  // ── RULE A — NEVER BRANCH ON THE STATUS CODE FOR A SCOPE PROBLEM ───────────
+  //
+  // This is the fix for the failure that cost an evening, and it contradicts
+  // the natural reading of that failure. The owner created a token with one of
+  // the three permissions and got:
+  //
+  //     "Cloudflare did not accept that API token while listing the D1
+  //      databases … Authentication error [10000]"
+  //
+  // which is the 401 branch below — so his missing-D1-permission call came back
+  // 401, not 403. Public reports and Cloudflare's own changelog describe a
+  // missing scope as 403. Both happen, and error code 10000 is overloaded
+  // across "no token", "wrong token" and "insufficient scope", so neither the
+  // status nor the code is evidence of anything here.
+  //
+  // What IS evidence: once GET /user/tokens/verify has answered `active` in
+  // this run, the string is a real Cloudflare API token. A token that verified
+  // cannot simultaneously be "not a token" — so any later 401 OR 403 is a
+  // permission problem. Fixing only the 403 branch would not have fired for the
+  // failure that was actually observed.
+  if (opts.tokenVerified === true && (opts.status === 401 || opts.status === 403)) {
+    return permission === null
+      ? `The API token is real — Cloudflare accepted it — but it is not allowed ` +
+          `to do this. Something it needs is missing from its permissions.${tail}`
+      : `The API token is real — Cloudflare accepted it — but it is missing the ` +
+          `“${permission}” permission, which is what ${opts.operation} needs. ` +
+          `Edit that token in the Cloudflare dashboard (My Profile → API Tokens), ` +
+          `add the permission at the Account level, and paste it again. Do not ` +
+          `create a new token: the one you have is fine.${tail}`;
+  }
+
   switch (opts.status) {
     case 400:
       return `Cloudflare rejected the request while ${opts.operation}.${tail}`;
     case 401:
-      // 401 is the credential itself being unacceptable — the string is not a
-      // token, or it was rolled. A permission list cannot fix this one, so do
-      // not offer one: sending someone to add a checkbox to a token that does
-      // not exist is worse than saying nothing.
+      // Now exclusively the case it is actually right for: the token never
+      // verified, so Cloudflare does not recognise the string at all. A
+      // permission list cannot fix this one, so do not offer one — sending
+      // someone to add a checkbox to a token that does not exist is worse than
+      // saying nothing.
       return (
         `Cloudflare did not accept that API token while ${opts.operation}. ` +
         `Check it was copied whole, and that it has not been rolled or deleted ` +
         `in the dashboard.${tail}`
       );
     case 403:
+      // Reachable only before the token has verified — i.e. the verify call
+      // itself was forbidden.
       return permission === null
         ? `Cloudflare refused that request while ${opts.operation}. The token is ` +
             `valid but is not allowed to do this.${tail}`

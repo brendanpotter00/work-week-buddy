@@ -37,6 +37,7 @@ import {
   wireWindowLifecycle,
 } from "./bootstrap";
 import { readCliMode } from "./cli";
+import { tokenCreateUrl } from "../cloud/token-url";
 import { createCloudSetupGateway } from "./cloud-setup";
 import { disposeIpc, pushAll, pushToAllWindows, registerIpcHandlers } from "./ipc";
 import { log, logToDirectory } from "./log";
@@ -49,6 +50,7 @@ import { TrayController } from "./tray";
 import {
   closeAllWindows,
   getOnboardingWindow,
+  showCloudSetup,
   showDashboard,
   showOnboarding,
   showSettings,
@@ -192,6 +194,29 @@ app.whenReady().then(async () => {
     () => void showSettings(settings.get("windowBackground")),
   );
 
+  /**
+   * IS SYNC SET UP? — CACHED, AND NEVER READ FROM THE KEYCHAIN ON DEMAND.
+   *
+   * The tray menu is rebuilt on the main thread, on a minute timer and on every
+   * open. `syncConfig.read()` calls `tokens.read()`, which calls
+   * `safeStorage.isEncryptionAvailable()` and `decryptString()` — and the
+   * Keychain answers a process whose code identity it does not recognise with a
+   * MODAL DIALOG, while holding the calling thread. Asking it from the tray
+   * would put that dialog on a path the user is waiting on, which is exactly
+   * how this app froze twice. See `CoreServices.unlockSync` and
+   * `src/main/file-access.ts`.
+   *
+   * So the answer is pushed to us instead, by the only two things that know it:
+   * `unlockSync()` after boot, and `onSyncConfigChange` on every write. Both
+   * are already paying the Keychain cost somewhere it is safe to pay it.
+   *
+   * Starts `false`, which is the honest answer before the keychain has been
+   * read: the tray offers setup for a moment on a configured Mac, rather than
+   * hiding it for a moment on an unconfigured one. Wrong in the direction that
+   * costs nothing.
+   */
+  let syncConfigured = false;
+
   const services = await createCoreServices({
     userDataDir: app.getPath("userData"),
     settings,
@@ -199,6 +224,14 @@ app.whenReady().then(async () => {
     isPackaged: app.isPackaged,
     vault: safeStorage,
     osVersion: process.getSystemVersion(),
+    // The wizard has its own window now, so a setup finishing in one window has
+    // to reach the Settings card in another. `write()` is the single funnel
+    // both the wizard's commit and the manual Save already pass through.
+    onSyncConfigChange: (state) => {
+      syncConfigured = state.configured;
+      tray?.refresh("sync-config");
+      pushAll("wwb:push:sync-config", state);
+    },
   });
   log.boot("core services created");
   const runtime = services.runtime;
@@ -223,10 +256,12 @@ app.whenReady().then(async () => {
     tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
     openPrivacyPane: (which) => void shell.openExternal(privacyPaneUrl(which)),
     syncConfig: services.syncConfig,
-    // Everything `npm run bringup:cloud` does, over the Cloudflare REST API and
-    // from the Settings window. It reuses `services.syncConfig.write` for the
-    // last step, so finishing setup is the same event as pasting a URL and a
-    // token by hand — including reconfiguring the flusher with no relaunch.
+    // The whole bring-up, over the Cloudflare REST API and from the wizard
+    // window. It reuses `services.syncConfig.write` for the last step, so
+    // finishing setup is the same event as pasting a URL and a token by hand —
+    // including reconfiguring the flusher with no relaunch.
+    openTokenPage: () => void shell.openExternal(tokenCreateUrl()),
+    openCloudSetup: () => void showCloudSetup(settings.get("windowBackground")),
     cloudSetup: createCloudSetupGateway({
       machineId: services.machineId,
       syncConfig: services.syncConfig,
@@ -254,6 +289,11 @@ app.whenReady().then(async () => {
     showDashboard: () => void showDashboard(settings.get("windowBackground")),
     showOnboarding: () => void showOnboarding(settings.get("windowBackground")),
     showSettings: () => void showSettings(settings.get("windowBackground")),
+    showCloudSetup: () => void showCloudSetup(settings.get("windowBackground")),
+    // The CACHED answer. Never `syncConfig.read()` here — that reaches the
+    // Keychain, and the Keychain can put a modal dialog on the thread the tray
+    // menu is being built on. See `syncConfigured` above.
+    syncConfigured: () => syncConfigured,
     openPrivacyPane: (which) => void shell.openExternal(privacyPaneUrl(which)),
     showErrorBox: (title, content) => dialog.showErrorBox(title, content),
     askJigglerPause: async () => {
@@ -329,7 +369,10 @@ app.whenReady().then(async () => {
 
   log.boot("boot complete — the app is usable from here");
   stall.mark("running");
-  afterBoot(services);
+  afterBoot(services, (configured) => {
+    syncConfigured = configured;
+    tray?.refresh("sync-config");
+  });
 }).catch((err: unknown) => {
   // A boot that fails halfway leaves a menu-bar app that measures nothing and
   // says nothing. Say something, then exit non-zero so a LaunchAgent restart
@@ -381,7 +424,10 @@ app.on("browser-window-created", () => {
  * and each one says how long it took — because "the keychain took 40 seconds"
  * is a sentence that explains everything and "it hung" is not.
  */
-function afterBoot(services: Awaited<ReturnType<typeof createCoreServices>>): void {
+function afterBoot(
+  services: Awaited<ReturnType<typeof createCoreServices>>,
+  onSyncKnown: (configured: boolean) => void,
+): void {
   // A tick, not a timer: `whenReady`'s continuation is still on the stack and
   // the first paint has not happened yet. One turn of the loop is all it takes
   // for the tray and the window to be real.
@@ -404,6 +450,9 @@ function afterBoot(services: Awaited<ReturnType<typeof createCoreServices>>): vo
               `answered. It no longer runs during boot; see src/main/bootstrap.ts.`,
           );
         }
+        // The first time anything knows this without asking the Keychain
+        // again. The tray's "Set up cloud sync…" item reads the cached answer.
+        onSyncKnown(unlocked.configured);
         log.info(
           `sync ${unlocked.configured ? "configured" : "not configured"}` +
             (unlocked.error === null ? "" : ` (${unlocked.error})`),

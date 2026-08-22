@@ -28,7 +28,7 @@ import { createWorkerClient, MAX_ROWS_PER_REQUEST } from "../../src/sync/client"
 import { getSyncState } from "../../src/store/sync-state";
 import { makeRow, openTestDb } from "../fakes/seed-db";
 import { insertClosed } from "../../src/store/intervals";
-import { BASE_URL, FakeCloud, TOKEN_PERSONAL } from "./fake-cloud";
+import { BASE_URL, FakeCloud, TOKEN_A } from "./fake-cloud";
 import { testFlusher } from "./flusher";
 
 /** A scheduler you can inspect: no wall-clock waiting anywhere in this file. */
@@ -128,7 +128,7 @@ function rig(overrides: Partial<FlusherDeps> = {}, fetchImpl?: typeof fetch): Ri
   const timers = new TestTimers();
   const client = createWorkerClient({
     baseUrl: BASE_URL,
-    token: TOKEN_PERSONAL,
+    token: TOKEN_A,
     fetchImpl: fetchImpl ?? cloud.fetch,
   });
   const flusher = testFlusher({

@@ -225,6 +225,17 @@ export function createSyncConfigGateway(deps: {
   settings: Pick<SettingsStore, "get" | "set">;
   tokens: TokenStore;
   sync: Pick<SyncService, "reconfigure">;
+  /**
+   * Fired after every successful `write()`, with the complete new state.
+   *
+   * This function is the SINGLE FUNNEL both paths already pass through — the
+   * wizard's commit and the manual Save — which is what makes it the right
+   * place to announce a change. It matters now because the wizard lives in its
+   * own window: without a push, the Settings card in a different window would
+   * go on saying "not set up" for the rest of the session. `index.ts` wires
+   * this to `pushAll`.
+   */
+  onChange?: (state: SyncConfigState) => void;
 }): SyncConfigGateway {
   const read = (): SyncConfigState => {
     const workerUrl = deps.settings.get("syncWorkerUrl");
@@ -263,7 +274,11 @@ export function createSyncConfigGateway(deps: {
       if (patch.token !== undefined) deps.tokens.write(patch.token);
       const resolved = resolveSyncConfig(deps.settings.get("syncWorkerUrl"), deps.tokens.read());
       await deps.sync.reconfigure(resolved.config, resolved.error);
-      return read();
+      const state = read();
+      // After the reconfigure, so a window that reacts to this is reacting to a
+      // service that is already live rather than to one that is about to be.
+      deps.onChange?.(state);
+      return state;
     },
   };
 }
@@ -299,6 +314,14 @@ export async function createCoreServices(opts: {
    */
   vault?: SecretVault | null;
   osVersion?: string;
+  /**
+   * Fired whenever the sync configuration changes, with the complete new state.
+   *
+   * Wired by `index.ts` to `pushAll("wwb:push:sync-config")`. It lives here
+   * rather than being attached afterwards so there is no window in which a
+   * write could land unannounced.
+   */
+  onSyncConfigChange?: (state: SyncConfigState) => void;
 }): Promise<CoreServices> {
   const dbPath = defaultDbPath(opts.userDataDir);
   const policy = policyFromSettings(opts.settings);
@@ -418,7 +441,14 @@ export async function createCoreServices(opts: {
     target: runtime,
     log: (message) => log.info(message),
   });
-  const syncConfig = createSyncConfigGateway({ settings: opts.settings, tokens, sync });
+  const syncConfig = createSyncConfigGateway({
+    settings: opts.settings,
+    tokens,
+    sync,
+    ...(opts.onSyncConfigChange === undefined
+      ? {}
+      : { onChange: opts.onSyncConfigChange }),
+  });
 
   /** The keychain read, moved off the boot path. See `CoreServices.unlockSync`. */
   const unlockSync = async (): Promise<SyncUnlockResult> => {

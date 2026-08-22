@@ -53,6 +53,8 @@ interface Fixture {
   writes: Array<{ workerUrl?: string; token?: string }>;
   tests: Array<{ workerUrl?: string; token?: string }>;
   settingsWrites: Array<Partial<UiSettings>>;
+  /** One entry per time the card asked main to open the wizard window. */
+  wizardOpens: number[];
   state: () => SyncConfigState;
 }
 
@@ -67,6 +69,7 @@ function mount(
   const writes: Fixture["writes"] = [];
   const tests: Fixture["tests"] = [];
   const settingsWrites: Fixture["settingsWrites"] = [];
+  const wizardOpens: number[] = [];
   let config = syncConfigState(over.config);
   let stored = uiSettings(over.settings);
 
@@ -115,10 +118,14 @@ function mount(
     }),
     "wwb:machine:rename": ({ label }) => appInfo({ machineLabel: label.trim() }),
     "wwb:window:openDashboard": () => undefined,
+    "wwb:window:openCloudSetup": () => {
+      wizardOpens.push(1);
+      return undefined;
+    },
   });
   installBridge(bridge);
   renderApp(<Settings />);
-  return { bridge, writes, tests, settingsWrites, state: () => config };
+  return { bridge, writes, tests, settingsWrites, wizardOpens, state: () => config };
 }
 
 /**
@@ -132,10 +139,29 @@ function card(id: string): HTMLElement {
   return el;
 }
 
-const urlField = (): HTMLInputElement =>
-  within(card("sync")).getByLabelText("Worker URL") as HTMLInputElement;
-const tokenField = (): HTMLInputElement =>
-  within(card("sync")).getByLabelText("This Mac’s token") as HTMLInputElement;
+/**
+ * Open the manual disclosure, if it is not already open.
+ *
+ * The two fields moved behind it: they only make sense for a setup that
+ * already exists, and having them on top of the thing that CREATES one is
+ * exactly the "sub menu" the owner complained about. The fields themselves did
+ * not change, so every test below reaches them through here.
+ */
+function openManual(): void {
+  const toggle = within(card("sync")).queryByRole("button", {
+    name: /enter them by hand|change the url/i,
+  });
+  if (toggle !== null) act(() => fireEvent.click(toggle));
+}
+
+const urlField = (): HTMLInputElement => {
+  openManual();
+  return within(card("sync")).getByLabelText("Worker URL") as HTMLInputElement;
+};
+const tokenField = (): HTMLInputElement => {
+  openManual();
+  return within(card("sync")).getByLabelText("This Mac’s token") as HTMLInputElement;
+};
 const button = (scope: HTMLElement, name: RegExp): HTMLButtonElement =>
   within(scope).getByRole("button", { name }) as HTMLButtonElement;
 const syncButton = (name: RegExp): HTMLButtonElement => button(card("sync"), name);
@@ -335,6 +361,145 @@ describe("test connection", () => {
     });
     expect(line.getAttribute("data-ok")).toBe("false");
     expect(line.textContent).toMatch(/rejected this token/);
+  });
+});
+
+describe("one primary path, and the expert fields behind a disclosure", () => {
+  const manualFields = (): Element | null =>
+    card("sync").querySelector('[data-slot="manual-fields"]');
+
+  it("unconfigured offers Set up, and hides the two fields until asked", async () => {
+    const f = mount();
+    await screen.findByText("Cloud sync");
+
+    // The thing that CREATES a setup is the primary action, not a link under
+    // two fields for a setup that does not exist.
+    expect(syncButton(/set up cloud sync/i)).not.toBeNull();
+    expect(manualFields()).toBeNull();
+    expect(within(card("sync")).queryByLabelText("Worker URL")).toBeNull();
+    expect(within(card("sync")).queryByLabelText("This Mac’s token")).toBeNull();
+
+    act(() => syncButton(/set up cloud sync/i).click());
+    await waitFor(() => expect(f.wizardOpens).toHaveLength(1));
+  });
+
+  it("opens the fields on request, and keeps them open", async () => {
+    mount();
+    await screen.findByText("Cloud sync");
+    openManual();
+    expect(manualFields()).not.toBeNull();
+    // One-way within a session: collapsing a panel holding a half-typed token
+    // would discard it silently, and the token lives in a DOM ref precisely so
+    // that it is never in state to restore from.
+    expect(
+      within(card("sync")).queryByRole("button", { name: /enter them by hand/i }),
+    ).toBeNull();
+  });
+
+  it("configured shows the URL, Test, Sync now and Set up again", async () => {
+    const f = mount({
+      config: { workerUrl: "https://x.workers.dev", tokenPresent: true, configured: true },
+    });
+    await screen.findByText("Cloud sync");
+
+    const primary = card("sync").querySelector('[data-slot="sync-primary"]');
+    expect(primary?.getAttribute("data-configured")).toBe("true");
+    expect(primary?.textContent).toContain("https://x.workers.dev");
+    expect(primary?.textContent).toContain("stored in the keychain");
+    expect(syncButton(/test connection/i)).not.toBeNull();
+    expect(syncButton(/sync now/i)).not.toBeNull();
+
+    act(() => syncButton(/set up again/i).click());
+    await waitFor(() => expect(f.wizardOpens).toHaveLength(1));
+  });
+
+  it("opens the fields BY ITSELF when only one half is present", async () => {
+    // A URL and no token, or the reverse, is the "finish this" state — and then
+    // the fields are the fix rather than the wizard.
+    mount({ config: { workerUrl: "https://x.workers.dev", tokenPresent: false } });
+    await screen.findByText("Cloud sync");
+    expect(manualFields()).not.toBeNull();
+  });
+
+  it("opens the fields BY ITSELF when the saved URL is not a URL", async () => {
+    mount({ config: { workerUrl: "not-a-url", error: "syncWorkerUrl is not a URL" } });
+    await screen.findByText("Cloud sync");
+    expect(manualFields()).not.toBeNull();
+  });
+
+  it("updates without a reload when main pushes a config change", async () => {
+    // The wizard is in another window now, so its finishing has to reach this
+    // card. `SyncConfigGateway.write()` pushes; this is the receiving half.
+    const f = mount();
+    await screen.findByText("Cloud sync");
+    expect(document.querySelector('[data-slot="sync-status"]')?.textContent).toBe("Not set up");
+
+    act(() => {
+      f.bridge.emit("wwb:push:sync-config", {
+        workerUrl: "https://wwb-sync.example.workers.dev",
+        tokenPresent: true,
+        configured: true,
+        error: null,
+        vaultAvailable: true,
+      });
+    });
+
+    await waitFor(() =>
+      expect(document.querySelector('[data-slot="sync-status"]')?.textContent).toBe("Syncing"),
+    );
+  });
+});
+
+describe("the wrong credential in the token field", () => {
+  it("warns when a Cloudflare API token is pasted in, and offers the wizard", async () => {
+    const f = mount();
+    await screen.findByText("Cloud sync");
+    // 40 URL-safe characters, no padding — a Cloudflare API token's shape.
+    type(tokenField(), "not-a-real-api-token".padEnd(40, "x"));
+
+    const note = card("sync").querySelector('[data-slot="wrong-credential"]');
+    expect(note).not.toBeNull();
+    expect(note?.textContent).toContain("Cloudflare API token, not this Mac’s sync token");
+    expect(note?.textContent).toContain("44 characters ending in");
+
+    // And the way out is offered right there.
+    act(() => button(note as HTMLElement, /set up cloud sync/i).click());
+    await waitFor(() => expect(f.wizardOpens).toHaveLength(1));
+  });
+
+  it("warns when a URL is pasted into the token field", async () => {
+    mount();
+    await screen.findByText("Cloud sync");
+    type(tokenField(), "https://wwb-sync.example.workers.dev");
+    expect(
+      card("sync").querySelector('[data-slot="wrong-credential"]')?.textContent,
+    ).toContain("That is a URL, not a token");
+  });
+
+  it("says nothing about a token of the right shape, and never blocks Save", async () => {
+    const f = mount();
+    await screen.findByText("Cloud sync");
+    type(urlField(), "https://wwb-sync.example.workers.dev");
+    // 44 characters ending in "=" — what `randomBytes(32).toString("base64")`
+    // produces, and what this field is for.
+    type(tokenField(), `${"A".repeat(43)}=`);
+    expect(card("sync").querySelector('[data-slot="wrong-credential"]')).toBeNull();
+
+    // A warning would never block anyway: it warns, it does not refuse.
+    act(() => syncButton(/^Save$/).click());
+    await waitFor(() => expect(f.writes).toHaveLength(1));
+  });
+
+  it("never echoes the value it is warning about", async () => {
+    // It runs on a live secret in a renderer. `classifyCredential` returns an
+    // enum; nothing here may put the value on screen.
+    const apiShaped = "not-a-real-api-token".padEnd(40, "x");
+    mount();
+    await screen.findByText("Cloud sync");
+    type(tokenField(), apiShaped);
+    expect(
+      card("sync").querySelector('[data-slot="wrong-credential"]')?.textContent ?? "",
+    ).not.toContain(apiShaped);
   });
 });
 

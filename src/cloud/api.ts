@@ -11,15 +11,16 @@
  *     multipart-upload-metadata page still shows is marked deprecated.
  *
  * ── THE ONE FLAG THAT MATTERS MOST ──────────────────────────────────────────
- * Uploading a Worker REPLACES its bindings, and the per-machine tokens ARE
- * bindings. Preserving the other Mac's token means sending an `inherit` binding
- * for it — and the schema says, verbatim: "Without this, unresolvable inherit
- * bindings are silently dropped."
+ * Uploading a Worker REPLACES its bindings. That used to be dangerous here:
+ * per-machine tokens WERE bindings, so preserving the other Mac's token meant
+ * sending an `inherit` for it, and the schema says verbatim "Without this,
+ * unresolvable inherit bindings are silently dropped" — a deploy that succeeds
+ * with a 200 and takes the other Mac offline with nothing anywhere saying so.
  *
- * So every upload goes out with `?bindings_inherit=strict`. Without it, the
- * failure mode is precisely the one this project keeps being bitten by: the
- * deploy succeeds, the response is a 200, and the other Mac's token is gone
- * with nothing anywhere saying so. `uploadWorker` cannot be called without it —
+ * Credentials now live in the `machine_token` table in D1, so there is no
+ * longer anything to inherit and nothing an upload can silently delete. The
+ * flag STAYS on every upload anyway: it costs nothing and it is the guarantee
+ * any future binding will want. `uploadWorker` cannot be called without it —
  * the query string is not a parameter.
  *
  * ── NOTHING HERE LOGS ───────────────────────────────────────────────────────
@@ -58,13 +59,43 @@ export interface TokenStatus {
   readonly status: string;
 }
 
+/** Whether one permission is present, absent, or could not be determined. */
+export type ScopeState = "ok" | "missing" | "unknown";
+
+/**
+ * What a token is actually allowed to do, discovered by TRYING.
+ *
+ * There is no way to ask. Verified against Cloudflare's OpenAPI schema:
+ * `GET /user/tokens/verify` returns only `{id, status}` and does NOT return
+ * permissions. `GET /user/tokens/{id}`, which does, needs `API Tokens Read` —
+ * a permission this app must never request, because it would let the app read
+ * the user's other tokens. `GET /user/tokens/permission_groups` is the same.
+ *
+ * KNOWN LIMITATION, and it is deliberate: a read probe proves Read, not Edit.
+ * `GET /accounts/{id}/d1/database` is documented as `["D1 Read","D1 Write"]`,
+ * so a token holding only `D1 · Read` passes this and then fails at
+ * `createDatabase` (`["D1 Write"]`). This preflight catches "no D1 permission
+ * AT ALL", which is the failure that was actually observed; the Read-only case
+ * is caught at the first write and named correctly there by Rule A in
+ * `errors.ts`.
+ */
+export interface CloudScopes {
+  /** `GET /accounts/{id}/d1/database` — `missing` means it cannot see D1 at all. */
+  readonly d1: ScopeState;
+  /** `GET /accounts/{id}/workers/subdomain`. */
+  readonly workers: ScopeState;
+  /** `GET /accounts` — optional; it only decides whether we can list accounts. */
+  readonly accountRead: ScopeState;
+}
+
 /**
  * One binding as it goes UP.
  *
  * `inherit` is how a value we cannot read survives a redeploy: it names a
- * binding on the previous version and carries it forward untouched. It is the
- * only way to keep the other Mac's token, because Cloudflare will not tell us
- * what that token is.
+ * binding on the previous version and carries it forward untouched. Nothing
+ * uses it any more — the Worker's only binding is `DB`, whose value we always
+ * know — but the variant stays because the strict-inherit contract in
+ * `uploadWorker` is only meaningful if an `inherit` can be expressed at all.
  */
 export type WorkerBinding =
   | { readonly type: "d1"; readonly name: string; readonly database_id: string }
@@ -76,10 +107,9 @@ export type WorkerBinding =
  * One binding as it comes BACK.
  *
  * `text` is present for `plain_text` and absent for `secret_text` — the schema
- * marks the secret variant's `text` write-only. That asymmetry is load-bearing
- * for `slot.ts`: it is exactly why the machine ids are stored as plain text and
- * the tokens are not. A machine id is not a secret, and one that can be read
- * back is the difference between detecting which Mac this is and guessing.
+ * marks the secret variant's `text` write-only. Read only to answer "does this
+ * Worker exist yet"; the app no longer stores anything in a binding but the
+ * database id, so there is nothing here worth interpreting.
  */
 export interface ReadBinding {
   readonly type: string;
@@ -110,12 +140,32 @@ export interface CloudflareApi {
   listAccounts(): Promise<CloudflareAccount[]>;
   listDatabases(accountId: string): Promise<D1DatabaseSummary[]>;
   createDatabase(accountId: string, name: string): Promise<D1DatabaseSummary>;
-  /** `POST .../query`. Multiple statements joined by semicolons run as a batch. */
+  /**
+   * `POST .../query` with a CONSTANT statement. Multiple statements joined by
+   * semicolons run as a batch.
+   *
+   * Use this only for SQL that contains no value from anywhere. Anything with a
+   * value in it goes through `queryParams`.
+   */
   query(accountId: string, databaseId: string, sql: string): Promise<unknown[][]>;
+  /**
+   * `POST .../query` with BOUND PARAMETERS. One statement, no semicolons.
+   *
+   * Added because `query()` string-interpolates. That was harmless while every
+   * caller passed a constant, but enrolment puts a machine id and a digest into
+   * a statement, and interpolating those is an injection site — and would break
+   * outright on any value containing a quote.
+   */
+  queryParams(
+    accountId: string,
+    databaseId: string,
+    sql: string,
+    params: readonly string[],
+  ): Promise<unknown[][]>;
+  /** Two tolerant GETs that create nothing and change nothing. See `CloudScopes`. */
+  probeScopes(accountId: string): Promise<CloudScopes>;
   /** The deployed script's bindings, or null when there is no such script. */
   getWorkerBindings(accountId: string, scriptName: string): Promise<ReadBinding[] | null>;
-  /** Secret binding NAMES. Documented to omit every value. */
-  listWorkerSecretNames(accountId: string, scriptName: string): Promise<string[]>;
   /** `PUT .../scripts/{name}?bindings_inherit=strict`. Creates a version and deploys it. */
   uploadWorker(accountId: string, upload: WorkerUpload): Promise<void>;
   /** The account's workers.dev subdomain, or null when none has been claimed. */
@@ -150,6 +200,16 @@ export function createCloudflareApi(cfg: CloudflareApiConfig): CloudflareApi {
   const base = (cfg.baseUrl ?? CLOUDFLARE_API_BASE).replace(/\/+$/, "");
   const doFetch = cfg.fetchImpl ?? globalThis.fetch;
   const timeoutMs = cfg.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+
+  /**
+   * Has `GET /user/tokens/verify` accepted this token during this run?
+   *
+   * Stamped onto every error so `describeApiFailure` can apply Rule A: a token
+   * that verified cannot also be "not a token", so any later 401 *or* 403 is a
+   * permission problem. This flag is the only evidence that survives; the
+   * status code is not. See the long comment in `errors.ts`.
+   */
+  let tokenVerified = false;
 
   /**
    * One call, one envelope, one answer.
@@ -203,9 +263,37 @@ export function createCloudflareApi(cfg: CloudflareApiConfig): CloudflareApi {
         status: res.status,
         errors: errorItems(body.errors),
         permission: opts.permission ?? null,
+        tokenVerified,
       });
     }
     return { status: res.status, result: body.result ?? null };
+  }
+
+  /**
+   * `GET /accounts`, tolerant of the token not being allowed to enumerate.
+   *
+   * A local function rather than a method so `probeScopes` can reuse it without
+   * going through `this` — the object below is destructured by callers, and a
+   * method that depended on its receiver would break the moment one did.
+   */
+  async function listAccountsImpl(): Promise<CloudflareAccount[]> {
+    // `per_page` has a documented minimum of 5 on this endpoint. 50 is the
+    // maximum and covers everyone.
+    const { status, result } = await call("GET", "/accounts?per_page=50", {
+      operation: "listing your Cloudflare accounts",
+      permission: PERMISSION.accountRead,
+      // Not an error. Cloudflare documents only API-key auth for this route,
+      // so a perfectly good token may simply not be allowed to enumerate
+      // accounts. The wizard asks for the id instead.
+      tolerate: [401, 403],
+    });
+    if (status === 401 || status === 403) return [];
+    return asArray(result)
+      .map((row) => {
+        const o = asRecord(row);
+        return { id: str(o["id"]) ?? "", name: str(o["name"]) ?? "" };
+      })
+      .filter((a) => a.id !== "");
   }
 
   return {
@@ -214,28 +302,15 @@ export function createCloudflareApi(cfg: CloudflareApiConfig): CloudflareApi {
         operation: "checking the API token",
       });
       const o = asRecord(result);
-      return { id: str(o["id"]) ?? "", status: str(o["status"]) ?? "unknown" };
+      const status = str(o["status"]) ?? "unknown";
+      // Only `active` counts. A token can verify 200 and be expired or
+      // disabled, and an expired token is not evidence that a later refusal is
+      // about permissions — it is evidence that the token is finished.
+      if (status === "active") tokenVerified = true;
+      return { id: str(o["id"]) ?? "", status };
     },
 
-    async listAccounts() {
-      // `per_page` has a documented minimum of 5 on this endpoint. Two Macs and
-      // one account is the shape here; 50 is the maximum and covers everyone.
-      const { status, result } = await call("GET", "/accounts?per_page=50", {
-        operation: "listing your Cloudflare accounts",
-        permission: PERMISSION.accountRead,
-        // Not an error. Cloudflare documents only API-key auth for this route,
-        // so a perfectly good token may simply not be allowed to enumerate
-        // accounts. The wizard asks for the id instead.
-        tolerate: [401, 403],
-      });
-      if (status === 401 || status === 403) return [];
-      return asArray(result)
-        .map((row) => {
-          const o = asRecord(row);
-          return { id: str(o["id"]) ?? "", name: str(o["name"]) ?? "" };
-        })
-        .filter((a) => a.id !== "");
-    },
+    listAccounts: listAccountsImpl,
 
     async listDatabases(accountId) {
       const { result } = await call(
@@ -281,15 +356,58 @@ export function createCloudflareApi(cfg: CloudflareApiConfig): CloudflareApi {
           json: { sql },
         },
       );
-      // One entry per statement in the batch. Each carries its OWN `success`,
-      // separate from the envelope's, and a statement can fail inside a 200.
-      return asArray(result).map((entry) => {
-        const o = asRecord(entry);
-        if (o["success"] === false) {
-          throw new Error(`a statement failed: ${str(o["error"]) ?? "no reason given"}`);
+      return statementResults(result);
+    },
+
+    async queryParams(accountId, databaseId, sql, params) {
+      const { result } = await call(
+        "POST",
+        `/accounts/${enc(accountId)}/d1/database/${enc(databaseId)}/query`,
+        {
+          operation: "running SQL against the D1 database",
+          permission: PERMISSION.d1Edit,
+          // The whole point: the values travel in `params`, never spliced into
+          // `sql`. Verified against Cloudflare's OpenAPI schema — the request
+          // body for this endpoint is `{ sql: string, params?: string[] }`.
+          json: { sql, params: [...params] },
+        },
+      );
+      return statementResults(result);
+    },
+
+    async probeScopes(accountId) {
+      // Two GETs the wizard already makes, issued tolerantly and read for their
+      // STATUS instead of thrown on. Creates nothing, changes nothing — there
+      // is no POST and no PUT on this path, and a test asserts that.
+      const read = async (path: string): Promise<ScopeState> => {
+        try {
+          const { status } = await call("GET", path, {
+            operation: "checking what this API token is allowed to do",
+            tolerate: [401, 403, 404],
+          });
+          // 404 is "nothing there", which still proves the token could look.
+          return status === 401 || status === 403 ? "missing" : "ok";
+        } catch {
+          // A network failure says nothing about the token's permissions, and
+          // guessing "missing" here would send someone to fix a token that is
+          // fine. The caller renders `unknown` as "could not check".
+          return "unknown";
         }
-        return asArray(o["results"]);
-      });
+      };
+
+      const [d1, workers] = await Promise.all([
+        read(`/accounts/${enc(accountId)}/d1/database?per_page=1`),
+        read(`/accounts/${enc(accountId)}/workers/subdomain`),
+      ]);
+
+      let accountRead: ScopeState;
+      try {
+        accountRead = (await listAccountsImpl()).length > 0 ? "ok" : "missing";
+      } catch {
+        accountRead = "unknown";
+      }
+
+      return { d1, workers, accountRead };
     },
 
     async getWorkerBindings(accountId, scriptName) {
@@ -313,22 +431,6 @@ export function createCloudflareApi(cfg: CloudflareApiConfig): CloudflareApi {
           text: str(b["text"]),
         };
       });
-    },
-
-    async listWorkerSecretNames(accountId, scriptName) {
-      const { status, result } = await call(
-        "GET",
-        `/accounts/${enc(accountId)}/workers/scripts/${enc(scriptName)}/secrets`,
-        {
-          operation: `listing the “${scriptName}” Worker's secrets`,
-          permission: PERMISSION.workersRead,
-          tolerate: [404],
-        },
-      );
-      if (status === 404) return [];
-      return asArray(result)
-        .map((raw) => str(asRecord(raw)["name"]) ?? "")
-        .filter((n) => n !== "");
     },
 
     async uploadWorker(accountId, upload) {
@@ -434,6 +536,23 @@ export function toSubdomainLabel(raw: string): string {
     .replace(/^-+|-+$/g, "")
     .slice(0, 63)
     .replace(/-+$/g, "");
+}
+
+/**
+ * One entry per statement in the batch.
+ *
+ * Each carries its OWN `success`, separate from the envelope's, and a statement
+ * can fail inside a 200 — so a run that ignored this would report a schema
+ * applied that never was.
+ */
+function statementResults(result: unknown): unknown[][] {
+  return asArray(result).map((entry) => {
+    const o = asRecord(entry);
+    if (o["success"] === false) {
+      throw new Error(`a statement failed: ${str(o["error"]) ?? "no reason given"}`);
+    }
+    return asArray(o["results"]);
+  });
 }
 
 function toDatabase(raw: unknown): D1DatabaseSummary | null {

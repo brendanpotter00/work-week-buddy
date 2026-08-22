@@ -64,6 +64,10 @@ describe("the URL main loads is the view the renderer mounts", () => {
       // did not match; adding a window without adding this line would be it.
       const set = locationOf(viewUrl(base, ROUTE.settings));
       expect(routeOf(set.hash, set.pathname)).toBe("settings");
+
+      // cloud-setup — the fourth window, same seam, same check.
+      const wiz = locationOf(viewUrl(base, ROUTE.cloudSetup));
+      expect(routeOf(wiz.hash, wiz.pathname)).toBe("cloudSetup");
     });
   }
 
@@ -178,6 +182,28 @@ describe("<Root /> mounts the view the hash names", () => {
 
     expect(container.querySelector('[data-view="settings"]')).not.toBeNull();
     expect(container.querySelector('[data-view="dashboard"]')).toBeNull();
+    expect(container.querySelector('[data-view="onboarding"]')).toBeNull();
+  });
+
+  it("mounts the cloud-setup wizard at #/cloud-setup, and nothing else", async () => {
+    // The fourth window, added the same way and checked the same way. A window
+    // that main opens and the renderer does not recognise renders the whole
+    // dashboard squeezed into it — the exact bug this file exists for.
+    installDomStubs();
+    setHash("#/cloud-setup");
+    installBridge(
+      makeBridge({
+        ...defaultHandlers(metricsBundle()),
+        "wwb:sync:config": () => syncConfigState(),
+      }),
+    );
+
+    const { container, findByText } = renderApp(<Root />);
+    await findByText(/Cloud sync/);
+
+    expect(container.querySelector('[data-view="cloud-setup"]')).not.toBeNull();
+    expect(container.querySelector('[data-view="dashboard"]')).toBeNull();
+    expect(container.querySelector('[data-view="settings"]')).toBeNull();
     expect(container.querySelector('[data-view="onboarding"]')).toBeNull();
   });
 

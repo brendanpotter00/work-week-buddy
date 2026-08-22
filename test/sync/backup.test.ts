@@ -27,7 +27,7 @@ import { openDb } from "../../src/store/db";
 import { countIntervals, insertClosed, pendingRows } from "../../src/store/intervals";
 import { setSyncState } from "../../src/store/sync-state";
 import { makeRow, openTestDb, t } from "../fakes/seed-db";
-import { BASE_URL, FakeCloud, TOKEN_PERSONAL } from "./fake-cloud";
+import { BASE_URL, FakeCloud, TOKEN_A } from "./fake-cloud";
 import { testFlusher } from "./flusher";
 
 const NOW = t("2026-08-19T12:00:00Z"); // a Wednesday
@@ -228,7 +228,7 @@ describe("restoring the NDJSON", () => {
       db: restored,
       client: createWorkerClient({
         baseUrl: BASE_URL,
-        token: TOKEN_PERSONAL,
+        token: TOKEN_A,
         fetchImpl: cloud.fetch,
       }),
     }).flush();
@@ -299,7 +299,7 @@ describe("the 72-hour silence alarm", () => {
       db,
       client: createWorkerClient({
         baseUrl: BASE_URL,
-        token: TOKEN_PERSONAL,
+        token: TOKEN_A,
         fetchImpl: cloud.fetch,
       }),
       nowMs: () => NOW,
@@ -327,7 +327,7 @@ describe("the weekly job", () => {
   function client(cloud: FakeCloud) {
     return createWorkerClient({
       baseUrl: BASE_URL,
-      token: TOKEN_PERSONAL,
+      token: TOKEN_A,
       fetchImpl: cloud.fetch,
     });
   }

@@ -113,8 +113,9 @@ export function resolveSyncConfig(workerUrl: string, token: string | null): Conf
  *  2. `GET /machines` is authenticated and reads nothing bigger than a handful
  *     of label rows. It is the only way to learn that the URL is perfect and
  *     the TOKEN is wrong — a distinction the owner cannot make from a single
- *     "it didn't work", and the most likely mistake of the two, because the
- *     Worker mints one token per Mac and swapping them looks identical.
+ *     "it didn't work". It also separates a rejected token (401/403) from a
+ *     Worker whose database has no registry at all (503), which are two
+ *     different problems with two different fixes.
  *
  * `/fingerprint` would also have proved the token, and it hashes every row id
  * in the database to do it. A button somebody presses while typing does not get
@@ -179,9 +180,22 @@ export async function probeSyncConfig(
       status,
       ms: nowMs() - started,
       error:
-        status === 401 || status === 403
-          ? "the Worker is reachable but rejected this token — each Mac gets its own, and swapping them fails exactly like this"
-          : `the Worker is reachable but the authenticated read failed: ${messageOf(err)}`,
+        status === 503
+          ? // The Worker is running and its URL is right; what is missing is
+            // the schema, so `machine_token` cannot be read. Saying "your token
+            // was rejected" here would send someone to re-copy a token that is
+            // perfect — the exact confusion this whole feature is about.
+            "the Worker is running, but its database has no machine registry yet — the " +
+            "schema was never applied. Run “Set up cloud sync” again; it applies the " +
+            "schema and changes nothing else"
+          : status === 401 || status === 403
+            ? // Names the SHAPE, because the commonest way to get here is
+              // pasting the Cloudflare API token into this field.
+              "the Worker is reachable but rejected this token. This Mac’s sync token is " +
+              "44 characters ending in “=”; if what you pasted is 40 characters with no " +
+              "“=”, that is a Cloudflare API token, which is a different credential. Run " +
+              "“Set up cloud sync” to mint this Mac’s own token"
+            : `the Worker is reachable but the authenticated read failed: ${messageOf(err)}`,
     };
   }
 

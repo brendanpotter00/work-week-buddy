@@ -27,6 +27,7 @@ const isDev = (): boolean => !!process.env["ELECTRON_RENDERER_URL"];
 let dashboard: BrowserWindow | null = null;
 let onboarding: BrowserWindow | null = null;
 let settings: BrowserWindow | null = null;
+let cloudSetup: BrowserWindow | null = null;
 
 function baseWebPreferences(): Electron.WebPreferences {
   return {
@@ -255,6 +256,48 @@ export async function showSettings(backgroundColor = "#FFFFFF"): Promise<Browser
   });
   await load(settings, ROUTE.settings, "settings");
   return settings;
+}
+
+/**
+ * The cloud-setup wizard — its own window because it is a TASK, not a setting.
+ *
+ * Reachable from the tray as well as from the Settings card, which is the point:
+ * a setup flow you can only get to by finding Settings and scrolling to a card
+ * is a setup flow that does not get run. Resizable, because its token screen
+ * carries a three-row permission checklist next to a paste field and nothing
+ * here is measured with a hard headroom requirement.
+ *
+ * Nothing opens this on first run. Cloud sync is optional — the local mirror is
+ * the product — and `showOnboarding` is a fixed box that could not hold this
+ * anyway.
+ */
+export async function showCloudSetup(backgroundColor = "#FFFFFF"): Promise<BrowserWindow> {
+  if (cloudSetup && !cloudSetup.isDestroyed()) {
+    cloudSetup.show();
+    cloudSetup.focus();
+    return cloudSetup;
+  }
+  cloudSetup = new BrowserWindow({
+    ...WINDOW_SIZE.cloudSetup,
+    show: false,
+    title: "Set up cloud sync",
+    titleBarStyle: "hiddenInset",
+    trafficLightPosition: TRAFFIC_LIGHT.cloudSetup,
+    backgroundColor,
+    webPreferences: baseWebPreferences(),
+  });
+  lockDownNavigation(cloudSetup);
+  reportLoadFailures(cloudSetup, "cloud-setup");
+  cloudSetup.once("ready-to-show", () => cloudSetup?.show());
+  cloudSetup.on("closed", () => {
+    cloudSetup = null;
+  });
+  await load(cloudSetup, ROUTE.cloudSetup, "cloud-setup");
+  return cloudSetup;
+}
+
+export function getCloudSetupWindow(): BrowserWindow | null {
+  return cloudSetup && !cloudSetup.isDestroyed() ? cloudSetup : null;
 }
 
 export function getSettingsWindow(): BrowserWindow | null {

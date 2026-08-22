@@ -18,7 +18,7 @@ import { fromCloudRow, toWireRow } from "../../src/sync/wire";
 import { parseNdjson } from "../../src/sync/restore";
 import { insertClosed } from "../../src/store/intervals";
 import { makeRow, openTestDb } from "../fakes/seed-db";
-import { BASE_URL, FakeCloud, TOKEN_PERSONAL } from "./fake-cloud";
+import { BASE_URL, FakeCloud, TOKEN_A } from "./fake-cloud";
 import { testFlusher } from "./flusher";
 
 const GOOD = toWireRow(
@@ -56,7 +56,7 @@ function pendingIntervals(count: number) {
 }
 
 function client(fetchImpl: typeof fetch) {
-  return createWorkerClient({ baseUrl: BASE_URL, token: TOKEN_PERSONAL, fetchImpl });
+  return createWorkerClient({ baseUrl: BASE_URL, token: TOKEN_A, fetchImpl });
 }
 
 describe("a cloud row that is missing something", () => {

@@ -29,6 +29,7 @@ import {
   FAKE_BASE,
   FakeCloudflare,
   THIS_MAC,
+  sha256Hex,
   workerFetchFor,
 } from "./fake-cloudflare";
 
@@ -117,7 +118,6 @@ describe("the Cloudflare API token is borrowed, never kept", () => {
     const result = await gateway.run({
       apiToken: FAKE_API_TOKEN,
       accountId: FAKE_ACCOUNT_ID,
-      slot: "personal",
     });
     expect(result.ok, result.error ?? "").toBe(true);
 
@@ -136,7 +136,6 @@ describe("the Cloudflare API token is borrowed, never kept", () => {
     const result = await gateway.run({
       apiToken: FAKE_API_TOKEN,
       accountId: FAKE_ACCOUNT_ID,
-      slot: "personal",
     });
     expect(result.ok).toBe(false);
     expect(allBytes(dir)).not.toContain(FAKE_API_TOKEN);
@@ -148,7 +147,6 @@ describe("the Cloudflare API token is borrowed, never kept", () => {
     await gateway.run({
       apiToken: FAKE_API_TOKEN,
       accountId: FAKE_ACCOUNT_ID,
-      slot: "personal",
     });
 
     const json = readFileSync(join(dir, "settings.json"), "utf8");
@@ -168,7 +166,6 @@ describe("the Cloudflare API token is borrowed, never kept", () => {
     await gateway.run({
       apiToken: FAKE_API_TOKEN,
       accountId: FAKE_ACCOUNT_ID,
-      slot: "personal",
     });
     log.info("a line after the run, so the sink is definitely live");
 
@@ -190,7 +187,6 @@ describe("the Cloudflare API token is borrowed, never kept", () => {
     const result = await gateway.run({
       apiToken: FAKE_API_TOKEN,
       accountId: FAKE_ACCOUNT_ID,
-      slot: "personal",
     });
 
     expect(JSON.stringify(probe)).not.toContain(FAKE_API_TOKEN);
@@ -207,7 +203,6 @@ describe("the Cloudflare API token is borrowed, never kept", () => {
     await gateway.run({
       apiToken: FAKE_API_TOKEN,
       accountId: FAKE_ACCOUNT_ID,
-      slot: "personal",
     });
 
     const state = syncConfig.read();
@@ -226,17 +221,51 @@ describe("the Worker token, by contrast, is stored properly", () => {
     await gateway.run({
       apiToken: FAKE_API_TOKEN,
       accountId: FAKE_ACCOUNT_ID,
-      slot: "personal",
     });
 
     const stored = tokens.read();
     expect(stored).not.toBeNull();
-    // It is the one Cloudflare is holding, or this Mac cannot sync.
-    expect(stored).toBe(cloud.bindingValue("TOKEN_PERSONAL"));
+    // Cloudflare holds this token's DIGEST, and only its digest. That is what
+    // makes a dump of the D1 database hand over nothing presentable.
+    expect(cloud.liveTokens().map((t) => t.tokenSha256)).toEqual([sha256Hex(stored ?? "")]);
 
     // Encrypted at rest: the plaintext is nowhere in the bytes.
     expect(readFileSync(join(dir, "settings.json"), "utf8")).not.toContain(stored);
     expect(readFileSync(join(dir, "wwb.log"), "utf8")).not.toContain(stored);
+  });
+
+  it("never reaches Cloudflare in plaintext — only its SHA-256 does", async () => {
+    const cloud = new FakeCloudflare();
+    const { gateway, tokens } = await wire(cloud);
+    await gateway.run({ apiToken: FAKE_API_TOKEN, accountId: FAKE_ACCOUNT_ID });
+
+    const stored = tokens.read() ?? "";
+    expect(stored).not.toBe("");
+    // Every body this run sent anywhere: the enrolment, the revoke, the upload,
+    // the schema apply. None of them may carry the token itself.
+    const sent = cloud.allRequestBodies();
+    expect(sent).not.toContain(stored);
+    // Nor in any encoding a careless serialiser might have reached for.
+    expect(sent).not.toContain(Buffer.from(stored, "utf8").toString("base64"));
+    // But the digest IS there — otherwise nothing was enrolled at all.
+    expect(sent).toContain(sha256Hex(stored));
+  });
+
+  it("is the token the deployed Worker actually accepts", async () => {
+    // The end-to-end version: main hashes with node:crypto, the Worker looks up
+    // with WebCrypto. If those disagreed, every machine would 401 for ever.
+    const cloud = new FakeCloudflare();
+    const { gateway, tokens } = await wire(cloud);
+    const result = await gateway.run({
+      apiToken: FAKE_API_TOKEN,
+      accountId: FAKE_ACCOUNT_ID,
+    });
+    expect(result.ok, result.error ?? "").toBe(true);
+
+    const res = await workerFetchFor(cloud)("https://wwb-sync.test/machines", {
+      headers: { authorization: `Bearer ${tokens.read() ?? ""}` },
+    });
+    expect(res.status).toBe(200);
   });
 
   it("makes sync live with no relaunch", async () => {
@@ -245,7 +274,6 @@ describe("the Worker token, by contrast, is stored properly", () => {
     await gateway.run({
       apiToken: FAKE_API_TOKEN,
       accountId: FAKE_ACCOUNT_ID,
-      slot: "personal",
     });
     // `syncConfig.write` reconfigures the live flusher. Without this the app
     // would say "not configured" for the rest of the session after configuring.

@@ -37,6 +37,21 @@ export const ROUTE = {
    * load this hash.
    */
   settings: "/settings",
+  /**
+   * The cloud-setup wizard is a FOURTH WINDOW because it is a TASK, not a
+   * setting. It has its own steps, its own progress list, its own error
+   * surface, and a natural "close = cancel" — and it needs room for the
+   * wayfinding screen that fixes the "I was looking at the Worker's page"
+   * failure, which is exactly what cramming it into a 680-px Settings card
+   * could not give it. It also lets the tray open setup directly, and the tray
+   * is where this app lives.
+   *
+   * NOT part of first-run onboarding, deliberately: that window is a fixed
+   * 560 x 640 `resizable: false` box measured by `npm run smoke` with 16 px of
+   * headroom, and cloud sync is genuinely optional — the local mirror is the
+   * product and the cloud is a second copy.
+   */
+  cloudSetup: "/cloud-setup",
 } as const;
 
 /**
@@ -64,9 +79,16 @@ export const WINDOW_SIZE = {
    * a size where the sync form is unreachable.
    */
   settings: { width: 680, height: 820, minWidth: 560, minHeight: 520 },
+  /**
+   * Roomier than Settings and resizable, because the wizard's token screen
+   * carries a three-row permission checklist that must stay legible next to a
+   * paste field. Not a fixed box like onboarding: nothing here is measured with
+   * a hard headroom requirement, so a person who wants it bigger may have it.
+   */
+  cloudSetup: { width: 640, height: 720, minWidth: 560, minHeight: 560 },
 } as const;
 
-/** The three windows, by the name both halves of the app call them. */
+/** The four windows, by the name both halves of the app call them. */
 export type AppWindow = keyof typeof WINDOW_SIZE;
 
 /**
@@ -91,6 +113,7 @@ export const TRAFFIC_LIGHT = {
   dashboard: { x: 18, y: 18 },
   onboarding: { x: 14, y: 14 },
   settings: { x: 14, y: 14 },
+  cloudSetup: { x: 14, y: 14 },
 } as const satisfies Record<AppWindow, { x: number; y: number }>;
 
 /**
@@ -118,6 +141,7 @@ export const TITLE_BAR_INSET = {
   dashboard: 40,
   onboarding: 32,
   settings: 32,
+  cloudSetup: 32,
 } as const satisfies Record<AppWindow, number>;
 
 /** Initial values for the settings rows. All are user-changeable later. */

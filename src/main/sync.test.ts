@@ -22,10 +22,10 @@ import { makeRow, openTestDb, t } from "../../test/fakes/seed-db";
 import {
   BASE_URL,
   FakeCloud,
-  MACHINE_PERSONAL,
-  MACHINE_WORK,
-  TOKEN_PERSONAL,
-  TOKEN_WORK,
+  MACHINE_A,
+  MACHINE_B,
+  TOKEN_A,
+  TOKEN_B,
 } from "../../test/sync/fake-cloud";
 import { fakeSettings } from "../../test/helpers/runtime";
 import { createMachineNaming, type MachineNaming } from "./device-name";
@@ -94,13 +94,13 @@ function make(
   const changes: string[] = [];
   const resolved = resolveSyncConfig(
     over.configured === false ? "" : BASE_URL,
-    over.configured === false ? null : (over.token ?? TOKEN_PERSONAL),
+    over.configured === false ? null : (over.token ?? TOKEN_A),
   );
   const service = createSyncService({
     db,
     config: resolved.config,
     configError: resolved.error,
-    machineId: MACHINE_PERSONAL,
+    machineId: MACHINE_A,
     machineLabel: over.label ?? (() => "Personal"),
     appVersion: "0.1.0-test",
     osVersion: "26.5.1",
@@ -177,7 +177,7 @@ describe("not configured", () => {
       db,
       config: resolved.config,
       configError: resolved.error,
-      machineId: MACHINE_PERSONAL,
+      machineId: MACHINE_A,
       appVersion: "0.1.0-test",
       backupDir: tmp(),
       now: () => NOW,
@@ -196,7 +196,7 @@ describe("not configured", () => {
     const { service, cloud } = make(db, { configured: false });
     expect((await service.flush()).ok).toBe(false);
 
-    const resolved = resolveSyncConfig(BASE_URL, TOKEN_PERSONAL);
+    const resolved = resolveSyncConfig(BASE_URL, TOKEN_A);
     // The service was built with a real `fetchImpl`, so reconfiguring reaches
     // the same fake cloud — this is the "paste the token into onboarding and
     // it just starts working" path.
@@ -239,12 +239,12 @@ describe("configured", () => {
     // A row written by the WORK machine, straight into the cloud.
     await cloud.fetch(`${BASE_URL}/intervals`, {
       method: "POST",
-      headers: { authorization: `Bearer ${TOKEN_WORK}`, "content-type": "application/json" },
+      headers: { authorization: `Bearer ${TOKEN_B}`, "content-type": "application/json" },
       body: JSON.stringify({
         rows: [
           {
             id: "from-work-mac",
-            machine_id: MACHINE_WORK,
+            machine_id: MACHINE_B,
             started_at_ms: t("2026-08-18T09:00:00Z"),
             ended_at_ms: t("2026-08-18T10:00:00Z"),
             duration_s: 3600,
@@ -482,7 +482,7 @@ describe("renaming and the cloud", () => {
     let tick = NOW;
     const naming = createMachineNaming({
       db,
-      machineId: MACHINE_PERSONAL,
+      machineId: MACHINE_A,
       settings: settings as unknown as SettingsStore,
       appVersion: "0.1.0-test",
       osVersion: "26.5.1",
@@ -497,7 +497,7 @@ describe("renaming and the cloud", () => {
   function cloudLabel(cloud: FakeCloud): string | null {
     const rows = cloud.d1.query<{ label: string | null }>(
       "SELECT label FROM machine WHERE machine_id = ?",
-      MACHINE_PERSONAL,
+      MACHINE_A,
     );
     return rows[0]?.label ?? null;
   }
@@ -552,7 +552,7 @@ describe("renaming and the cloud", () => {
 
     expect(readMachines(db)).toEqual([
       {
-        machineId: MACHINE_PERSONAL,
+        machineId: MACHINE_A,
         label: "The loft mini",
         osVersion: "26.5.1",
         appVersion: "0.1.0-test",
@@ -590,7 +590,7 @@ describe("probeSyncConfig", () => {
 
   it("says configured-and-working only when BOTH requests succeed", async () => {
     const cloud = new FakeCloud();
-    const r = await probe(BASE_URL, TOKEN_PERSONAL, cloud);
+    const r = await probe(BASE_URL, TOKEN_A, cloud);
     expect(r).toMatchObject({ ok: true, reachable: true, authorized: true, error: null });
     // /health first, then an authenticated read. /fingerprint would also have
     // proved the token and hashes every row id to do it; a button somebody
@@ -607,14 +607,45 @@ describe("probeSyncConfig", () => {
     expect(r.reachable).toBe(true);
     expect(r.authorized).toBe(false);
     expect(r.status).toBe(401);
-    // The sentence has to name the mistake that is actually likely.
-    expect(r.error).toMatch(/each Mac gets its own/i);
+    // The sentence has to name the mistake that is actually likely, and the
+    // likely one changed: there is no swapping any more, because each Mac
+    // mints its own token and nothing is ever carried between them. What IS
+    // likely is the Cloudflare API token pasted into this field, so the
+    // sentence names the two SHAPES.
+    expect(r.error).toMatch(/44 characters ending in/i);
+    expect(r.error).toMatch(/Cloudflare API token, which is a different credential/i);
+    expect(r.error).not.toMatch(/swapping them/i);
+  });
+
+  it("says the schema was never applied when the Worker answers 503", async () => {
+    // A Worker deployed without its schema cannot read the registry. Reporting
+    // that as "your token was rejected" would send someone to re-copy a token
+    // that is perfect — the exact confusion this whole feature is about.
+    // `/health` still answers — the Worker is running and the URL is right.
+    // Only the authenticated read 503s, because that is the one that reads the
+    // registry.
+    const cloud = new FakeCloud();
+    const r = await probeSyncConfig(BASE_URL, TOKEN_A, {
+      fetchImpl: async (input, init) => {
+        const url = new URL(typeof input === "string" ? input : String(input));
+        return url.pathname === "/health"
+          ? await cloud.fetch(input, init)
+          : new Response("machine registry unavailable", { status: 503 });
+      },
+      now: () => NOW,
+    });
+    expect(r.ok).toBe(false);
+    expect(r.reachable).toBe(true);
+    expect(r.status).toBe(503);
+    expect(r.error).toMatch(/no machine registry yet/i);
+    expect(r.error).toMatch(/schema was never applied/i);
+    expect(r.error).not.toMatch(/rejected this token/i);
   });
 
   it("blames the network — and names the proxy — when nothing answers", async () => {
     const cloud = new FakeCloud();
     cloud.offline = true;
-    const r = await probe(BASE_URL, TOKEN_PERSONAL, cloud);
+    const r = await probe(BASE_URL, TOKEN_A, cloud);
     expect(r).toMatchObject({ ok: false, reachable: false, authorized: false });
     // `/health` is unauthenticated precisely so bring-up can prove the work
     // Mac's proxy allows workers.dev. Say so where it will be read.
@@ -623,7 +654,7 @@ describe("probeSyncConfig", () => {
 
   it("says which half is missing rather than calling anything", async () => {
     const cloud = new FakeCloud();
-    expect(await probe("", TOKEN_PERSONAL, cloud)).toMatchObject({
+    expect(await probe("", TOKEN_A, cloud)).toMatchObject({
       ok: false,
       error: "enter the Worker URL first",
     });
@@ -638,7 +669,7 @@ describe("probeSyncConfig", () => {
 
   it("carries the same URL verdict as resolveSyncConfig, and never throws", async () => {
     const cloud = new FakeCloud();
-    const r = await probe("wwb-sync.example.workers.dev", TOKEN_PERSONAL, cloud);
+    const r = await probe("wwb-sync.example.workers.dev", TOKEN_A, cloud);
     expect(r.ok).toBe(false);
     expect(r.error).toMatch(/not a URL/);
     expect(cloud.calls).toEqual([]);
@@ -646,7 +677,7 @@ describe("probeSyncConfig", () => {
 
   it("trims a token pasted with a trailing newline instead of failing on it", async () => {
     const cloud = new FakeCloud();
-    const r = await probe(`  ${BASE_URL}  `, `\n${TOKEN_PERSONAL}\n`, cloud);
+    const r = await probe(`  ${BASE_URL}  `, `\n${TOKEN_A}\n`, cloud);
     expect(r.ok).toBe(true);
   });
 });
