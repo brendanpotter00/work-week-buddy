@@ -558,13 +558,26 @@ export async function runCloudSetup(
     // A plain INSERT, no ON CONFLICT. A 256-bit collision is not a case to
     // absorb quietly; if it ever happened the constraint error should fail the
     // run loudly, which is what this does.
-    await deps.api.queryParams(
-      req.accountId,
-      database.uuid,
-      `INSERT INTO machine_token (token_sha256, machine_id, enrolled_at_ms)
-       VALUES (?, ?, ?)`,
-      [thisHash, deps.thisMachineId, String(now())],
-    );
+    try {
+      await deps.api.queryParams(
+        req.accountId,
+        database.uuid,
+        `INSERT INTO machine_token (token_sha256, machine_id, enrolled_at_ms)
+         VALUES (?, ?, ?)`,
+        [thisHash, deps.thisMachineId, String(now())],
+      );
+    } catch (err) {
+      // Worth its own sentence rather than the bare Cloudflare one. Reaching
+      // here means the token was minted and NOT stored anywhere — not in the
+      // Keychain, not in Cloudflare — so the honest reassurance is that this
+      // changed nothing and can simply be run again. Without it, "enrol failed"
+      // reads like a half-built cloud somebody has to go and clean up.
+      throw new Error(
+        `this Mac could not be enrolled: ${describeCloudError(err)}. Nothing ` +
+          `else was changed, and nothing was stored on this Mac. Running setup ` +
+          `again is safe.`,
+      );
+    }
     tracker.done("enrol", "this Mac is enrolled — only its fingerprint was sent");
 
     // ── 6. the Worker ─────────────────────────────────────────────────────

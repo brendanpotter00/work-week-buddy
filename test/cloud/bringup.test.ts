@@ -636,6 +636,37 @@ describe("failures", () => {
     expect(committed).toEqual([]);
   });
 
+  it("says a failed enrolment changed nothing, rather than leaving it ambiguous", async () => {
+    // Reaching here means the token was minted and stored NOWHERE — not the
+    // Keychain, not Cloudflare — so "run it again" really is the whole fix, and
+    // saying so is the difference between a retry and a cleanup hunt.
+    // Fail ONLY the enrolment INSERT — a blanket D1 denial would stop at the
+    // schema apply and be testing a different step.
+    const real = freshApi();
+    const out = await runCloudSetup(
+      {
+        ...setup(),
+        api: {
+          ...real,
+          queryParams: async (a, b, sql, p) => {
+            if (sql.includes("INSERT INTO machine_token")) {
+              throw new Error("D1 said no");
+            }
+            return await real.queryParams(a, b, sql, p);
+          },
+        },
+      },
+      { accountId: FAKE_ACCOUNT_ID },
+    );
+
+    expect(out.ok).toBe(false);
+    expect(out.steps.find((s) => s.id === "enrol")?.state).toBe("failed");
+    expect(out.error).toContain("Nothing else was changed");
+    expect(out.error).toContain("Running setup again is safe");
+    expect(cloud.liveTokens()).toEqual([]);
+    expect(committed).toEqual([]);
+  });
+
   it("waits out the certificate a new workers.dev address has not been issued yet", async () => {
     // DNS resolves before TLS is ready — measured at about two minutes on the
     // first real setup. Reporting that as a failure would send someone
