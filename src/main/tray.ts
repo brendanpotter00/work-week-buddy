@@ -55,6 +55,8 @@ export type RefreshReason =
   | "rows-pulled"
   | "resume"
   | "unlock"
+  /** Sync was configured or unconfigured — the "Set up cloud sync…" item changes. */
+  | "sync-config"
   | "week-rollover";
 
 type IconName = "trayTemplate" | "trayIdleTemplate" | "trayAlertTemplate";

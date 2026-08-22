@@ -194,6 +194,29 @@ app.whenReady().then(async () => {
     () => void showSettings(settings.get("windowBackground")),
   );
 
+  /**
+   * IS SYNC SET UP? — CACHED, AND NEVER READ FROM THE KEYCHAIN ON DEMAND.
+   *
+   * The tray menu is rebuilt on the main thread, on a minute timer and on every
+   * open. `syncConfig.read()` calls `tokens.read()`, which calls
+   * `safeStorage.isEncryptionAvailable()` and `decryptString()` — and the
+   * Keychain answers a process whose code identity it does not recognise with a
+   * MODAL DIALOG, while holding the calling thread. Asking it from the tray
+   * would put that dialog on a path the user is waiting on, which is exactly
+   * how this app froze twice. See `CoreServices.unlockSync` and
+   * `src/main/file-access.ts`.
+   *
+   * So the answer is pushed to us instead, by the only two things that know it:
+   * `unlockSync()` after boot, and `onSyncConfigChange` on every write. Both
+   * are already paying the Keychain cost somewhere it is safe to pay it.
+   *
+   * Starts `false`, which is the honest answer before the keychain has been
+   * read: the tray offers setup for a moment on a configured Mac, rather than
+   * hiding it for a moment on an unconfigured one. Wrong in the direction that
+   * costs nothing.
+   */
+  let syncConfigured = false;
+
   const services = await createCoreServices({
     userDataDir: app.getPath("userData"),
     settings,
@@ -204,7 +227,11 @@ app.whenReady().then(async () => {
     // The wizard has its own window now, so a setup finishing in one window has
     // to reach the Settings card in another. `write()` is the single funnel
     // both the wizard's commit and the manual Save already pass through.
-    onSyncConfigChange: (state) => pushAll("wwb:push:sync-config", state),
+    onSyncConfigChange: (state) => {
+      syncConfigured = state.configured;
+      tray?.refresh("sync-config");
+      pushAll("wwb:push:sync-config", state);
+    },
   });
   log.boot("core services created");
   const runtime = services.runtime;
@@ -263,10 +290,10 @@ app.whenReady().then(async () => {
     showOnboarding: () => void showOnboarding(settings.get("windowBackground")),
     showSettings: () => void showSettings(settings.get("windowBackground")),
     showCloudSetup: () => void showCloudSetup(settings.get("windowBackground")),
-    // Reads the CONFIG, not the keychain: `read()` only asks whether a token
-    // exists, and the tray must never be the thing that puts a SecurityAgent
-    // dialog on screen.
-    syncConfigured: () => services.syncConfig.read().configured,
+    // The CACHED answer. Never `syncConfig.read()` here — that reaches the
+    // Keychain, and the Keychain can put a modal dialog on the thread the tray
+    // menu is being built on. See `syncConfigured` above.
+    syncConfigured: () => syncConfigured,
     openPrivacyPane: (which) => void shell.openExternal(privacyPaneUrl(which)),
     showErrorBox: (title, content) => dialog.showErrorBox(title, content),
     askJigglerPause: async () => {
@@ -342,7 +369,10 @@ app.whenReady().then(async () => {
 
   log.boot("boot complete — the app is usable from here");
   stall.mark("running");
-  afterBoot(services);
+  afterBoot(services, (configured) => {
+    syncConfigured = configured;
+    tray?.refresh("sync-config");
+  });
 }).catch((err: unknown) => {
   // A boot that fails halfway leaves a menu-bar app that measures nothing and
   // says nothing. Say something, then exit non-zero so a LaunchAgent restart
@@ -394,7 +424,10 @@ app.on("browser-window-created", () => {
  * and each one says how long it took — because "the keychain took 40 seconds"
  * is a sentence that explains everything and "it hung" is not.
  */
-function afterBoot(services: Awaited<ReturnType<typeof createCoreServices>>): void {
+function afterBoot(
+  services: Awaited<ReturnType<typeof createCoreServices>>,
+  onSyncKnown: (configured: boolean) => void,
+): void {
   // A tick, not a timer: `whenReady`'s continuation is still on the stack and
   // the first paint has not happened yet. One turn of the loop is all it takes
   // for the tray and the window to be real.
@@ -417,6 +450,9 @@ function afterBoot(services: Awaited<ReturnType<typeof createCoreServices>>): vo
               `answered. It no longer runs during boot; see src/main/bootstrap.ts.`,
           );
         }
+        // The first time anything knows this without asking the Keychain
+        // again. The tray's "Set up cloud sync…" item reads the cached answer.
+        onSyncKnown(unlocked.configured);
         log.info(
           `sync ${unlocked.configured ? "configured" : "not configured"}` +
             (unlocked.error === null ? "" : ` (${unlocked.error})`),

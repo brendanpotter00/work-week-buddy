@@ -237,7 +237,11 @@ export function checkSmokeReport(report: SmokeReport): string[] {
       if (!p.resizable) {
         fail.push(`${where} is not resizable; the wizard is deliberately not a fixed box.`);
       }
-      for (const needed of ["Cloud sync", "Continue"]) {
+      // "Cloud sync" is the title bar, which renders immediately. "Cancel" is
+      // on both entry screens and only appears once `wwb:sync:config` has come
+      // back and decided which one to open on — so together they separate "the
+      // window is up" from "the window is up and has something in it".
+      for (const needed of ["Cloud sync", "Cancel"]) {
         if (!p.text.includes(needed)) fail.push(`${where} never mentions "${needed}".`);
       }
     }

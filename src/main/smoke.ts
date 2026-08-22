@@ -244,11 +244,10 @@ async function waitForView(win: BrowserWindow, view: SmokeWindow): Promise<void>
   }
   // The first frame is the skeleton; every number arrives over IPC one tick
   // later. Measuring the skeleton would measure a page that never ships.
-  const marker = view === "dashboard" ? "This week" : "Input Monitoring";
-  await waitFor(`the ${view} window to render "${marker}"`, async () =>
+  await waitFor(`the ${view} window to render "${POPULATED_MARKER[view]}"`, async () =>
     Boolean(
       await win.webContents.executeJavaScript(
-        `(document.body.innerText || '').includes(${JSON.stringify(marker)})`,
+        `(document.body.innerText || '').includes(${JSON.stringify(POPULATED_MARKER[view])})`,
         true,
       ),
     ),
@@ -256,6 +255,26 @@ async function waitForView(win: BrowserWindow, view: SmokeWindow): Promise<void>
   // One more paint, so getBoundingClientRect() reflects the populated tree.
   await sleep(250);
 }
+
+/**
+ * The string that proves a window is POPULATED, not merely mounted.
+ *
+ * A table rather than a ternary, because a ternary is how the fourth window got
+ * added and then waited for onboarding's marker: `view === "dashboard" ? … : …`
+ * silently gave `cloud-setup` a string it can never render, and the smoke run
+ * timed out saying the window never rendered "Input Monitoring". A
+ * `Record<SmokeWindow, …>` makes a fifth window a compile error instead.
+ *
+ * Each marker has to be something that only appears AFTER the first IPC
+ * snapshot lands: the wizard renders nothing but its title bar until
+ * `wwb:sync:config` comes back and decides which screen to open on, so "Cancel"
+ * — which both of its entry screens carry — is the honest signal here.
+ */
+const POPULATED_MARKER: Record<SmokeWindow, string> = {
+  dashboard: "This week",
+  onboarding: "Input Monitoring",
+  "cloud-setup": "Cancel",
+};
 
 async function screenshot(win: BrowserWindow, dir: string, name: string): Promise<string> {
   const image = await win.webContents.capturePage();
