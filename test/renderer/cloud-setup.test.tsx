@@ -11,11 +11,10 @@
  *  2. PASTING DOES NOT START ANYTHING. The first thing a token does is a
  *     read-only probe, and the account is live: a wizard that began creating on
  *     paste would be a second `wwb` database on the wrong account.
- *  3. The slot is shown, and only asked about when the evidence cannot decide.
- *     Getting it wrong is silent and permanent, so the screen has to say what
- *     it concluded and why, whichever it did.
- *  4. The other Mac's token is shown ONCE, with the warning, and only when one
- *     was actually minted.
+ *  3. NOTHING ASKS WHICH MAC THIS IS. Each install enrols itself, so the whole
+ *     slot question — and the screen it needed — is gone.
+ *  4. This Mac's token is shown ONCE, with the warning, and only when the
+ *     keychain refused to store it.
  */
 import { beforeEach, describe, expect, it } from "vitest";
 import { act, fireEvent, screen, waitFor } from "@testing-library/react";
@@ -26,7 +25,6 @@ import type {
   CloudProbeResult,
   CloudSetupResult,
   CloudSetupRunRequest,
-  CloudSlotVerdict,
   CloudStep,
   CloudStepId,
 } from "@/shared/ipc-types";
@@ -44,6 +42,7 @@ function steps(state: CloudStep["state"] = "done"): CloudStep[] {
     "account",
     "database",
     "schema",
+    "enrol",
     "deploy",
     "url",
     "verify",
@@ -57,12 +56,12 @@ function probeResult(over: Partial<CloudProbeResult> = {}): CloudProbeResult {
     tokenValid: true,
     tokenStatus: "active",
     accounts: [ACCOUNT],
+    scopes: { d1: "ok", workers: "ok", accountRead: "ok" },
     deployment: {
       accountId: ACCOUNT.id,
       databaseExists: false,
       workerExists: false,
-      verdict: { kind: "assumed", slot: "personal", because: "nothing is deployed yet." },
-      slotsWithToken: [],
+      machines: [],
       accountSubdomain: "someones-subdomain",
       rowsInCloud: null,
     },
@@ -78,9 +77,6 @@ function runResult(over: Partial<CloudSetupResult> = {}): CloudSetupResult {
     error: null,
     ok: true,
     workerUrl: "https://wwb-sync.someones-subdomain.workers.dev",
-    slot: "personal",
-    otherSlot: "work",
-    otherMachineToken: OTHER_TOKEN,
     unstoredToken: null,
     ...over,
   };
@@ -236,79 +232,6 @@ async function runToDone(f: Fixture): Promise<void> {
   await waitFor(() => expect(panel(f.container).dataset["phase"]).toBe("done"));
 }
 
-describe("the slot", () => {
-  async function confirmWith(verdict: CloudSlotVerdict): Promise<Fixture> {
-    const f = mount({
-      probe: probeResult({
-        deployment: { ...probeResult().deployment!, verdict },
-      }),
-    });
-    open();
-    typeToken();
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: /check the token/i }));
-    });
-    await waitFor(() => expect(panel(f.container).dataset["phase"]).toBe("confirm"));
-    return f;
-  }
-
-  it("is stated, with its reasoning, when it was decided", async () => {
-    const f = await confirmWith({
-      kind: "certain",
-      slot: "work",
-      because: "the personal slot is registered to a different Mac, so this one takes work.",
-    });
-    const verdict = f.container.querySelector<HTMLElement>('[data-slot="slot-verdict"]');
-    expect(verdict?.dataset["kind"]).toBe("certain");
-    expect(verdict?.textContent).toContain("work Mac");
-    expect(verdict?.textContent).toContain("registered to a different Mac");
-    // No picker: it was not a question.
-    expect(f.container.querySelector('[data-slot="slot-picker"]')).toBeNull();
-  });
-
-  it("always warns what getting it wrong costs, even when it is certain", async () => {
-    const f = await confirmWith({
-      kind: "certain",
-      slot: "personal",
-      because: "this Mac's hardware UUID is already set as MACHINE_ID_PERSONAL.",
-    });
-    const text = f.container.querySelector('[data-slot="slot-verdict"]')?.textContent ?? "";
-    // The failure is silent — no error, correct totals, wrong attribution — so
-    // the screen has to be the thing that says so.
-    expect(text).toContain("does not fail");
-    expect(text).toContain("permanently");
-  });
-
-  it("asks, and blocks the run, when the evidence cannot decide", async () => {
-    const f = await confirmWith({
-      kind: "ask",
-      suggested: null,
-      because: "both slots already have a machine id.",
-    });
-    expect(f.container.querySelector('[data-slot="slot-picker"]')).not.toBeNull();
-    expect(goButton().disabled).toBe(true);
-
-    fireEvent.click(screen.getByRole("button", { name: /this is my work mac/i }));
-    await waitFor(() => expect(goButton().disabled).toBe(false));
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: /set it up/i }));
-    });
-    expect(f.runs[0]?.slot).toBe("work");
-  });
-
-  it("pre-selects a suggestion but still asks", async () => {
-    const f = await confirmWith({
-      kind: "ask",
-      suggested: "work",
-      because: "this Mac has never synced.",
-    });
-    // Pre-selected, so the run is not blocked — but the picker is on screen and
-    // the reasoning is beside it.
-    expect(goButton().disabled).toBe(false);
-    expect(f.container.querySelector('[data-slot="slot-picker"]')).not.toBeNull();
-  });
-});
-
 describe("what setup says it will do", () => {
   it("says ADOPT, with the row count, when a database already exists", async () => {
     const f = mount({
@@ -318,7 +241,6 @@ describe("what setup says it will do", () => {
           databaseExists: true,
           workerExists: true,
           rowsInCloud: 4812,
-          slotsWithToken: ["work"],
         },
       }),
     });
@@ -333,62 +255,10 @@ describe("what setup says it will do", () => {
     expect(plan).toContain("Adopt");
     expect(plan).toContain("4812");
     expect(plan).toContain("Redeploy");
-    expect(plan).toContain("Leave the other Mac");
-  });
-
-  it("offers to replace the other Mac's token only when it has one, and off by default", async () => {
-    const f = mount({
-      probe: probeResult({
-        deployment: { ...probeResult().deployment!, slotsWithToken: ["work"] },
-      }),
-    });
-    open();
-    typeToken();
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: /check the token/i }));
-    });
-    await waitFor(() => expect(panel(f.container).dataset["phase"]).toBe("confirm"));
-
-    const rotate = f.container.querySelector<HTMLInputElement>('[data-slot="rotate-other"]');
-    expect(rotate).not.toBeNull();
-    expect(rotate?.checked).toBe(false);
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: /set it up/i }));
-    });
-    // Absent, not false: a re-run must never reset the other Mac's token.
-    expect(f.runs[0]?.rotateOtherToken).toBeUndefined();
-  });
-
-  it("does not promise a token it will not mint while the slot is unchosen", async () => {
-    // Both slots hold a token, and the verdict cannot decide which Mac this is.
-    // Whichever slot is picked, the other one is left alone — so the plan must
-    // not say "mint a token for the other Mac" before there IS an other Mac.
-    const f = mount({
-      probe: probeResult({
-        deployment: {
-          ...probeResult().deployment!,
-          workerExists: true,
-          databaseExists: true,
-          slotsWithToken: ["personal", "work"],
-          verdict: { kind: "ask", suggested: null, because: "both slots have a machine id." },
-        },
-      }),
-    });
-    open();
-    typeToken();
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: /check the token/i }));
-    });
-    await waitFor(() => expect(panel(f.container).dataset["phase"]).toBe("confirm"));
-
-    const plan = () => f.container.querySelector('[data-slot="cloud-plan"]')?.textContent ?? "";
-    expect(plan()).not.toContain("Mint a token");
-    expect(plan()).toContain("Choose which Mac this is");
-
-    // Once a slot is picked, the plan becomes specific — and correct.
-    fireEvent.click(screen.getByRole("button", { name: /this is my work mac/i }));
-    await waitFor(() => expect(plan()).toContain("Leave the other Mac"));
-    expect(plan()).not.toContain("Mint a token");
+    // The plan always says the same thing about credentials now: this Mac
+    // enrols itself, and nothing is minted for anybody else.
+    expect(plan).toContain("Enrol this Mac");
+    expect(plan).toContain("Nothing is minted for any other Mac");
   });
 
   it("asks for a workers.dev subdomain only when the account has none", async () => {
@@ -417,38 +287,29 @@ describe("what setup says it will do", () => {
   });
 });
 
-describe("the other Mac's token, shown once", () => {
-  it("is displayed with a warning that it cannot be recovered", async () => {
+describe("this Mac's token, shown once, only if the keychain refused", () => {
+  it("shows NO token on an ordinary successful run", async () => {
+    // The happy path reveals nothing at all now: this Mac's token went into
+    // this Mac's keychain, and nothing is minted for anybody else.
     const f = mount();
-    await runToDone(f);
-
-    const reveal = f.container.querySelector('[data-slot="token-reveal"]');
-    expect(reveal).not.toBeNull();
-    expect(
-      f.container.querySelector('[data-slot="token-value"]')?.textContent,
-    ).toBe(OTHER_TOKEN);
-    const text = reveal?.textContent ?? "";
-    expect(text).toContain("only time it will ever be shown");
-    expect(text).toContain("work Mac");
-    // Rendered as element text, not as an input's value — nothing autofills a
-    // <code>, and it is not an attribute anywhere.
-    expect(
-      f.container.querySelector<HTMLElement>('[data-slot="token-value"]')?.tagName,
-    ).toBe("CODE");
-  });
-
-  it("shows nothing when the other Mac's token was left alone", async () => {
-    const f = mount({ run: runResult({ otherMachineToken: null }) });
     await runToDone(f);
     expect(f.container.querySelector('[data-slot="token-reveal"]')).toBeNull();
     expect(f.container.textContent).toContain("Sync is on");
+  });
+
+  it("explains how to add another Mac, and offers nothing to copy", async () => {
+    const f = mount();
+    await runToDone(f);
+    const text = f.container.textContent ?? "";
+    expect(text).toContain("run this same setup");
+    expect(text).toContain("nothing to copy across");
+    expect(f.container.querySelector('[data-slot="token-value"]')).toBeNull();
   });
 
   it("hands over THIS Mac's token when the keychain refused it", async () => {
     const f = mount({
       run: runResult({
         ok: false,
-        otherMachineToken: null,
         unstoredToken: "this-macs-token-that-could-not-be-stored",
         error: "this system has no available safeStorage backend",
       }),
@@ -456,10 +317,17 @@ describe("the other Mac's token, shown once", () => {
     await runToDone(f);
     // The cloud half is real; reporting a flat failure would send someone to
     // re-run a deployment that is already correct.
+    const reveal = f.container.querySelector('[data-slot="token-reveal"]');
+    expect(reveal).not.toBeNull();
     expect(f.container.querySelector('[data-slot="token-value"]')?.textContent).toBe(
       "this-macs-token-that-could-not-be-stored",
     );
     expect(f.container.textContent).toContain("keychain would not store");
+    // Rendered as element text, not as an input's value — nothing autofills a
+    // <code>, and it is not an attribute anywhere.
+    expect(
+      f.container.querySelector<HTMLElement>('[data-slot="token-value"]')?.tagName,
+    ).toBe("CODE");
   });
 
   it("tells the sync card to reload, so it stops saying “not set up”", async () => {
@@ -469,7 +337,13 @@ describe("the other Mac's token, shown once", () => {
   });
 
   it("drops the shown token from the tree when the wizard is closed", async () => {
-    const f = mount();
+    const f = mount({
+      run: runResult({
+        ok: false,
+        unstoredToken: "this-macs-token-that-could-not-be-stored",
+        error: "this system has no available safeStorage backend",
+      }),
+    });
     await runToDone(f);
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: /^done$/i }));
@@ -493,7 +367,7 @@ describe("progress", () => {
     await runToDone(f);
 
     const rows = f.container.querySelectorAll('[data-slot="cloud-steps"] li');
-    expect(rows).toHaveLength(8);
+    expect(rows).toHaveLength(9);
     expect(
       f.container.querySelector<HTMLElement>('[data-step="account"]')?.dataset["state"],
     ).toBe("failed");

@@ -465,20 +465,12 @@ export interface SyncTestResult {
 
 // ── in-app cloud setup ──────────────────────────────────────────────────────
 
-/**
- * Which of the Worker's two token slots a Mac holds.
- *
- * Mirrors `MachineSlot` in `src/cloud/slot.ts`, restated here because this file
- * imports nothing — that is what makes "the renderer never touches the machine"
- * structural. `test/cloud/slot.test.ts` asserts the two stay in step.
- */
-export type CloudSlot = "personal" | "work";
-
 export type CloudStepId =
   | "token"
   | "account"
   | "database"
   | "schema"
+  | "enrol"
   | "deploy"
   | "url"
   | "verify"
@@ -503,11 +495,38 @@ export interface CloudSetupProgress {
   error: string | null;
 }
 
-/** Certain enough to act on, safe enough to assume, or genuinely ambiguous. */
-export type CloudSlotVerdict =
-  | { kind: "certain"; slot: CloudSlot; because: string }
-  | { kind: "assumed"; slot: CloudSlot; because: string }
-  | { kind: "ask"; suggested: CloudSlot | null; because: string };
+/** Whether one permission is present, absent, or could not be determined. */
+export type CloudScopeState = "ok" | "missing" | "unknown";
+
+/**
+ * What the pasted API token is actually allowed to do.
+ *
+ * Discovered by trying, because there is no way to ask: `/user/tokens/verify`
+ * returns only `{id, status}`, and the endpoints that DO return a token's
+ * permissions all require `API Tokens Read` — which this app must never
+ * request, since it would let the app read the user's other tokens.
+ *
+ * A read probe proves Read, not Edit. This catches "no D1 permission at all",
+ * which is the failure that was actually observed; a Read-only token is caught
+ * at the first write and named correctly there.
+ */
+export interface CloudScopes {
+  d1: CloudScopeState;
+  workers: CloudScopeState;
+  /** Optional — it only decides whether setup can list accounts. */
+  accountRead: CloudScopeState;
+}
+
+/** One Mac already in the registry. */
+export interface EnrolledMachine {
+  machineId: string;
+  /** Null until that Mac's first heartbeat reaches the cloud. */
+  label: string | null;
+  enrolledAtMs: number;
+  lastSeenMs: number | null;
+  /** True when this row is the Mac the wizard is running on. */
+  isThisMac: boolean;
+}
 
 /**
  * What is already on the account, read before anything is changed.
@@ -520,16 +539,11 @@ export interface CloudDeployment {
   accountId: string;
   databaseExists: boolean;
   workerExists: boolean;
-  verdict: CloudSlotVerdict;
   /**
-   * Which slots already hold a token that a re-run must not disturb.
-   *
-   * Both slots rather than "does the other one have one", because when the
-   * verdict is `ask` there is no "other one" yet — and a screen that promised
-   * to mint a token before the slot was chosen would be describing something
-   * that then does not happen.
+   * The Macs already enrolled, so the review screen can show what exists
+   * rather than make the owner guess. Empty before the first enrolment.
    */
-  slotsWithToken: CloudSlot[];
+  machines: EnrolledMachine[];
   accountSubdomain: string | null;
   rowsInCloud: number | null;
 }
@@ -545,6 +559,13 @@ export interface CloudProbeResult {
   tokenValid: boolean;
   tokenStatus: string;
   accounts: Array<{ id: string; name: string }>;
+  /** Null until an account has been chosen. */
+  scopes: CloudScopes | null;
+  /**
+   * Null when there is no account yet, when the probe failed — and, notably,
+   * when a permission is missing: inspecting a deployment the token may not
+   * read is pointless, and `scopes` is what the screen renders instead.
+   */
   deployment: CloudDeployment | null;
   error: string | null;
 }
@@ -552,18 +573,13 @@ export interface CloudProbeResult {
 export interface CloudSetupResult extends CloudSetupProgress {
   ok: boolean;
   workerUrl: string | null;
-  slot: CloudSlot;
-  otherSlot: CloudSlot;
   /**
-   * The OTHER Mac's token, minted by this run and shown exactly once.
+   * This Mac's token, surfaced ONLY when the keychain refused to store it.
    *
-   * This is the only secret that ever crosses this boundary outwards, and it
-   * has to: the whole point is that a person copies it to the other laptop. It
-   * is never stored, never logged, and cannot be read back out of Cloudflare.
-   * Null when that Mac already had one and it was left alone.
+   * The one secret that ever crosses this boundary outwards, and the only token
+   * this app ever renders. Nothing is minted for any other machine — each Mac
+   * enrols itself — so there is nothing to carry anywhere.
    */
-  otherMachineToken: string | null;
-  /** This Mac's token, surfaced ONLY when the keychain refused to store it. */
   unstoredToken: string | null;
 }
 
@@ -581,11 +597,27 @@ export interface CloudProbeRequest {
 export interface CloudSetupRunRequest {
   apiToken: string;
   accountId: string;
-  slot: CloudSlot;
-  /** Replace the other Mac's token too. Off unless explicitly asked for. */
-  rotateOtherToken?: boolean;
   /** Only used when the account has no workers.dev subdomain at all. */
   subdomain?: string;
+}
+
+/**
+ * Stop one Mac syncing. Requires the API token, i.e. the wizard.
+ *
+ * There is deliberately no Worker route for this: one would let a stolen bearer
+ * token take every other Mac offline. Nothing already recorded is deleted.
+ */
+export interface CloudRevokeRequest {
+  apiToken: string;
+  accountId: string;
+  machineId: string;
+}
+
+export interface CloudRevokeResult {
+  ok: boolean;
+  /** The registry as it stands afterwards, so the screen never has to guess. */
+  machines: EnrolledMachine[];
+  error: string | null;
 }
 
 // ── the contract ────────────────────────────────────────────────────────────
@@ -639,6 +671,20 @@ export interface InvokeContract {
    * `wwb:push:cloud-setup`, so nothing about this waits on the UI or vice versa.
    */
   "wwb:cloud:run": { req: CloudSetupRunRequest; res: CloudSetupResult };
+  /**
+   * Revoke one Mac's token. Never throws at the renderer — the result carries
+   * the reason, because the caller is a button.
+   */
+  "wwb:cloud:revoke": { req: CloudRevokeRequest; res: CloudRevokeResult };
+  /**
+   * Open Cloudflare's API-token page in the real browser.
+   *
+   * It has to be an IPC channel rather than an `<a href>`: `lockDownNavigation`
+   * preventDefaults any non-app origin on `will-navigate`, so a plain link is
+   * inert. Takes no argument — the URL is built in main from
+   * `src/cloud/token-url.ts` so a renderer can never choose where this goes.
+   */
+  "wwb:cloud:openTokenPage": { req: void; res: void };
   "wwb:machine:rename": { req: { label: string }; res: AppInfo };
   "wwb:settings:get": { req: void; res: UiSettings };
   "wwb:settings:set": { req: Partial<UiSettings>; res: UiSettings };
@@ -649,6 +695,14 @@ export interface InvokeContract {
    * navigating itself and losing the dashboard.
    */
   "wwb:window:openSettings": { req: void; res: void };
+  /**
+   * Open the cloud-setup wizard window.
+   *
+   * The wizard is a TASK, not a setting, so it has its own window — and the
+   * tray can therefore open it directly. A setup flow reachable only by finding
+   * Settings and scrolling to a card is a setup flow that does not get run.
+   */
+  "wwb:window:openCloudSetup": { req: void; res: void };
   /**
    * Double-click on the title bar — zoom, the way every macOS title bar does.
    *
@@ -667,6 +721,17 @@ export interface PushContract {
   "wwb:push:status": LiveStatus;
   /** Cloud setup progress, a complete snapshot per step. See `CloudSetupProgress`. */
   "wwb:push:cloud-setup": CloudSetupProgress;
+  /**
+   * Sync configuration changed. A COMPLETE snapshot, like every other push here.
+   *
+   * The wizard lives in its own window now, so it cannot reload the Settings
+   * card in place the way the in-card version could. Rather than re-read on
+   * focus — fragile, and stale in the common case where both windows are
+   * visible at once — the single funnel every write already passes through
+   * (`SyncConfigGateway.write`) pushes. That makes the manual Save path push
+   * too, so the dashboard updates without a reload either.
+   */
+  "wwb:push:sync-config": SyncConfigState;
   "wwb:push:toggles": Toggles;
   "wwb:push:permissions": PermissionSnapshot;
   "wwb:push:metrics-stale": { reason: "interval-close" | "rows-pulled" };
@@ -696,11 +761,14 @@ export const INVOKE_CHANNELS = [
   "wwb:sync:test",
   "wwb:cloud:probe",
   "wwb:cloud:run",
+  "wwb:cloud:revoke",
+  "wwb:cloud:openTokenPage",
   "wwb:machine:rename",
   "wwb:settings:get",
   "wwb:settings:set",
   "wwb:window:openDashboard",
   "wwb:window:openSettings",
+  "wwb:window:openCloudSetup",
   "wwb:window:zoom",
 ] as const satisfies readonly InvokeChannel[];
 
@@ -711,6 +779,7 @@ export const PUSH_CHANNELS = [
   "wwb:push:metrics-stale",
   "wwb:push:doctor",
   "wwb:push:cloud-setup",
+  "wwb:push:sync-config",
 ] as const satisfies readonly PushChannel[];
 
 export const DEFAULT_METRICS_POLICY: MetricsPolicy = {

@@ -1,12 +1,25 @@
 /**
- * `scripts/bringup-cloud.sh`, as something the app does.
+ * Setting the cloud half up, from inside the app.
  *
- * The shell script is the specification and this is the port of it: create or
- * ADOPT the D1 database, apply the schema, deploy the Worker, mint the
- * per-machine tokens, and print the one that has to be carried to the other
- * Mac. What changes is only the mechanism — the Cloudflare REST API instead of
- * `npx wrangler`, which means no terminal, no `wrangler login`, and no Node
- * toolchain on a Mac that only ever wanted to know how many hours it worked.
+ * Create or ADOPT the D1 database, apply the schema, ENROL THIS MAC, deploy the
+ * Worker, and turn sync on here — over the Cloudflare REST API, which means no
+ * terminal, no `wrangler login`, and no Node toolchain on a Mac that only ever
+ * wanted to know how many hours it worked.
+ *
+ * ── THIS MAC ENROLS ITSELF, AND ONLY ITSELF ─────────────────────────────────
+ * There are no slots and nothing to carry between machines. Each install mints
+ * its own token, writes the SHA-256 of it next to its own IOPlatformUUID in the
+ * `machine_token` table, and keeps the plaintext in its own Keychain. A machine
+ * can only ever enrol its own id, and only from the machine itself, so the
+ * failure the old slot detection existed to prevent — both Macs syncing, every
+ * total right, every hour filed under the wrong laptop for ever — is not merely
+ * detected, it is unconstructible.
+ *
+ * Enrolment and revocation go over the D1 REST query endpoint rather than a
+ * Worker route. A `POST /enrol` route would let any valid token mint itself a
+ * second identity, and a `POST /revoke` would let a stolen token take every
+ * other Mac offline. Both instead need the Cloudflare API token — the
+ * credential that can already destroy the whole database.
  *
  * ── RE-RUNNING MUST BE FREE ─────────────────────────────────────────────────
  * Every step below is idempotent, and that is the design constraint rather than
@@ -18,19 +31,14 @@
  *              not a fallback — two `wwb` databases means half your history is
  *              in the one nothing is pointed at.
  *   schema     CREATE TABLE IF NOT EXISTS throughout. Free to reapply.
- *   deploy     an upload replaces the script; the tokens are carried across.
+ *   enrol      a new row for THIS machine; older rows for this machine only are
+ *              revoked afterwards. Never touches another machine's row.
+ *   deploy     an upload replaces the script. There is nothing left to lose:
+ *              the Worker's only binding is DB.
  *   subdomain  claimed only when the account has none.
  *   save       the local half is written LAST, once the deployed Worker has
  *              answered on the URL with the token — never on the strength of a
  *              200 from the upload.
- *
- * ── THE SECRET THAT CANNOT BE READ BACK ─────────────────────────────────────
- * Uploading a Worker replaces its bindings, and the other Mac's token is a
- * binding whose value Cloudflare will not disclose. It survives because the
- * upload carries `{type:"inherit", name:"TOKEN_WORK"}` and goes out with
- * `?bindings_inherit=strict`, so an inherit that cannot be resolved FAILS the
- * upload instead of being silently dropped. Silently dropping it would take the
- * other Mac offline with a green tick on this screen. See `api.ts`.
  *
  * ── NOTHING HERE BLOCKS, LOGS, OR PERSISTS THE API TOKEN ────────────────────
  * Every step is async I/O and reports progress as it goes, so the window
@@ -38,23 +46,20 @@
  * object this module is handed and is never written down: not to
  * `settings.json`, not to the keychain, not to `wwb.log`, and not into any
  * string that reaches a screen — `errors.ts` redacts as a backstop.
+ *
+ * ── THE MINTED SYNC TOKEN NEVER LEAVES THIS MAC ─────────────────────────────
+ * Only its SHA-256 is sent to Cloudflare. A dump of the D1 database therefore
+ * hands over nothing that can be presented as a credential, and Cloudflare
+ * stops holding a live credential it never needed.
  */
 import {
   workersDevUrl,
+  type CloudScopes,
   type CloudflareApi,
   type D1DatabaseSummary,
-  type ReadBinding,
   type WorkerBinding,
 } from "./api";
 import { describeCloudError } from "./errors";
-import {
-  OTHER_SLOT,
-  SLOT_BINDING,
-  detectSlot,
-  type MachineSlot,
-  type SlotEvidence,
-  type SlotVerdict,
-} from "./slot";
 import {
   WORKER_BUNDLE,
   WORKER_COMPATIBILITY_DATE,
@@ -74,6 +79,7 @@ export type CloudStepId =
   | "account"
   | "database"
   | "schema"
+  | "enrol"
   | "deploy"
   | "url"
   | "verify"
@@ -84,6 +90,7 @@ export const STEP_LABEL: Record<CloudStepId, string> = {
   account: "Find the Cloudflare account",
   database: "Create or adopt the database",
   schema: "Apply the schema",
+  enrol: "Enrol this Mac",
   deploy: "Deploy the Worker",
   url: "Turn on the workers.dev address",
   verify: "Check it answers",
@@ -95,11 +102,23 @@ export const STEP_ORDER: readonly CloudStepId[] = [
   "account",
   "database",
   "schema",
+  "enrol",
   "deploy",
   "url",
   "verify",
   "save",
 ];
+
+/**
+ * The two shapes enrolment is allowed to send, checked before anything is bound.
+ *
+ * A bind is not a licence to send junk. Nothing else — not a label, not a
+ * device name, no free text of any kind — ever appears in enrolment SQL; a
+ * machine's name lives on the `machine` table and gets there via the heartbeat.
+ */
+const HEX64 = /^[0-9a-f]{64}$/;
+/** An IOPlatformUUID, or `bootstrap.ts`'s persisted `randomUUID()` fallback. */
+const MACHINE_ID = /^[0-9A-Za-z-]{1,64}$/;
 
 export type StepState = "pending" | "running" | "done" | "failed";
 
@@ -121,24 +140,24 @@ export interface CloudSetupProgress {
 export interface CloudSetupOutcome extends CloudSetupProgress {
   readonly ok: boolean;
   readonly workerUrl: string | null;
-  readonly slot: MachineSlot;
-  readonly otherSlot: MachineSlot;
-  /**
-   * The OTHER Mac's token, minted this run.
-   *
-   * Null when that Mac already had one and it was left alone — which is the
-   * ordinary second-run answer, and the reason re-running here does not knock
-   * the other Mac offline. When it IS set, this is the only time it exists
-   * anywhere outside Cloudflare: it is not stored, not logged, and cannot be
-   * read back. The screen says so.
-   */
-  readonly otherMachineToken: string | null;
   /**
    * This Mac's token — set ONLY when it could not be stored locally, which on
    * macOS means the keychain refused. Then the owner can paste it into the
    * Cloud sync form by hand rather than being told setup half-worked.
+   *
+   * The ONLY token this app ever renders. Nothing is ever minted for any other
+   * machine, so there is nothing to carry anywhere.
    */
   readonly unstoredToken: string | null;
+}
+
+/** One machine already in the registry. */
+export interface EnrolledMachineRow {
+  readonly machineId: string;
+  /** Null until that Mac's first heartbeat reaches the cloud. */
+  readonly label: string | null;
+  readonly enrolledAtMs: number;
+  readonly lastSeenMs: number | null;
 }
 
 /** What is out there, before anything is changed. */
@@ -147,6 +166,8 @@ export interface CloudProbe {
   readonly tokenStatus: string;
   /** Empty when the token may not enumerate accounts — then ask for the id. */
   readonly accounts: ReadonlyArray<{ id: string; name: string }>;
+  /** Null until an account has been chosen. See `CloudScopes`. */
+  readonly scopes: CloudScopes | null;
   readonly deployment: CloudDeploymentState | null;
   readonly error: string | null;
 }
@@ -155,16 +176,8 @@ export interface CloudDeploymentState {
   readonly accountId: string;
   readonly databaseExists: boolean;
   readonly workerExists: boolean;
-  readonly verdict: SlotVerdict;
-  /**
-   * Binding NAMES on the deployed script — never a value.
-   *
-   * Carried out whole rather than reduced to a boolean here, because whether
-   * "the other Mac already has a token" depends on which slot this Mac ends up
-   * taking, and that is not settled until the owner has seen the verdict. The
-   * caller asks `otherTokenPresent(names, slot)` once it is.
-   */
-  readonly bindingNames: readonly string[];
+  /** Machines already in the registry. Empty before the first enrolment. */
+  readonly machines: readonly EnrolledMachineRow[];
   /**
    * The account's workers.dev subdomain, or null when it has never claimed one.
    *
@@ -184,6 +197,17 @@ export interface BringupDeps {
   /** 32 cryptographically random bytes, base64 — `randomBytes(32)` in main. */
   readonly mintToken: () => string;
   /**
+   * SHA-256 of a token, lowercase hex — the format `machine_token` stores.
+   *
+   * Injected rather than computed here so `src/cloud/` keeps its zero `node:`
+   * imports. Main supplies `node:crypto`; the Worker verifies with WebCrypto.
+   * Those two agreeing is pinned by a test, because if they ever disagreed
+   * every machine would 401 for ever with nothing in any log.
+   */
+  readonly hashToken: (token: string) => string;
+  /** Epoch ms. Injected so a test can assert what was written. */
+  readonly now?: () => number;
+  /**
    * Persist this Mac's token through `safeStorage` and set `syncWorkerUrl`, so
    * sync is live with no relaunch. Throws when there is no keychain, which is
    * the one failure the outcome answers by showing the token instead.
@@ -200,16 +224,6 @@ export interface BringupDeps {
 
 export interface CloudSetupRequest {
   readonly accountId: string;
-  readonly slot: MachineSlot;
-  /**
-   * Mint a new token for the OTHER Mac even though it already has one.
-   *
-   * Off by default and deliberately opt-in: a re-run that quietly reset the
-   * other Mac's token would take it offline with no error anywhere until
-   * somebody noticed its row count had stopped moving. The same rule
-   * `bringup-cloud.sh` keeps with `--rotate`.
-   */
-  readonly rotateOtherToken?: boolean;
   /**
    * A workers.dev subdomain to claim, used ONLY when the account has none.
    *
@@ -225,8 +239,13 @@ export interface CloudSetupRequest {
  *
  * Runs before the wizard offers to do anything, so the screen that asks for
  * confirmation can say what already exists rather than what it intends. It is
- * also what decides the slot, and it is entirely read-only: a probe that
- * created something would make "cancel" a lie.
+ * entirely read-only: a probe that created something would make "cancel" a lie.
+ *
+ * It is also the SCOPE PREFLIGHT. A missing permission is caught here, before
+ * anything is created, and arrives as structured data the screen can render
+ * properly — not as a red banner using the words for a different failure. That
+ * is the fast path; Rule A in `errors.ts` is the safety net for anything that
+ * slips through.
  */
 export async function probeCloud(
   deps: Pick<BringupDeps, "api" | "thisMachineId" | "databaseName" | "workerName">,
@@ -243,6 +262,7 @@ export async function probeCloud(
       tokenValid: false,
       tokenStatus: "unknown",
       accounts: [],
+      scopes: null,
       deployment: null,
       error: describeCloudError(err),
     };
@@ -252,6 +272,7 @@ export async function probeCloud(
       tokenValid: false,
       tokenStatus,
       accounts: [],
+      scopes: null,
       deployment: null,
       // A token can verify with a 200 and still be unusable. Saying which of
       // the two it is saves a round of "but it says the token is fine".
@@ -267,6 +288,7 @@ export async function probeCloud(
       tokenValid: true,
       tokenStatus,
       accounts: [],
+      scopes: null,
       deployment: null,
       error: describeCloudError(err),
     };
@@ -277,7 +299,24 @@ export async function probeCloud(
   // and a Worker created on an account the owner did not intend to bill.
   const chosen = accountId ?? (accounts.length === 1 ? accounts[0]?.id : undefined);
   if (chosen === undefined || chosen === "") {
-    return { tokenValid: true, tokenStatus, accounts, deployment: null, error: null };
+    return {
+      tokenValid: true,
+      tokenStatus,
+      accounts,
+      scopes: null,
+      deployment: null,
+      error: null,
+    };
+  }
+
+  const scopes = await deps.api.probeScopes(chosen);
+  if (scopes.d1 === "missing" || scopes.workers === "missing") {
+    // Deliberately `deployment: null` with `error: null`. Inspecting a
+    // deployment the token is not allowed to read is pointless, and the missing
+    // permission must reach the screen as data it can render as a named
+    // permission — not as an error banner, which is the wording that sent the
+    // owner off to re-copy a perfectly good token.
+    return { tokenValid: true, tokenStatus, accounts, scopes, deployment: null, error: null };
   }
 
   try {
@@ -285,12 +324,12 @@ export async function probeCloud(
       tokenValid: true,
       tokenStatus,
       accounts,
+      scopes,
       deployment: await inspectDeployment({
         api: deps.api,
         accountId: chosen,
         dbName,
         workerName,
-        thisMachineId: deps.thisMachineId,
       }),
       error: null,
     };
@@ -299,6 +338,7 @@ export async function probeCloud(
       tokenValid: true,
       tokenStatus,
       accounts,
+      scopes,
       deployment: null,
       error: describeCloudError(err),
     };
@@ -310,91 +350,122 @@ async function inspectDeployment(o: {
   accountId: string;
   dbName: string;
   workerName: string;
-  thisMachineId: string;
 }): Promise<CloudDeploymentState> {
   const api = o.api;
   const database = findDatabase(await api.listDatabases(o.accountId), o.dbName);
   const bindings = await api.getWorkerBindings(o.accountId, o.workerName);
-  const workerExists = bindings !== null;
-  // Secret NAMES come from the dedicated endpoint, which is documented to omit
-  // every value. The settings response also lists them, but the schema leaves
-  // it ambiguous whether a secret's `text` is redacted there — so the names are
-  // taken from the endpoint that promises nothing sensitive comes back.
-  const secretNames = workerExists
-    ? await api.listWorkerSecretNames(o.accountId, o.workerName)
-    : [];
-  const bindingNames = [
-    ...new Set([...(bindings ?? []).map((b) => b.name), ...secretNames]),
-  ];
 
-  // Only asked for when it can decide something: the stamped ids matter solely
-  // to the rule that covers a deployment `bringup-cloud.sh` configured, and
-  // there is no database to ask before the first run.
-  const stamped: { ids: string[]; rows: number | null } =
+  const registry =
     database === null
-      ? { ids: [], rows: null }
-      : await readStampedMachineIds(api, o.accountId, database.uuid);
-
-  const evidence: SlotEvidence = {
-    thisMachineId: o.thisMachineId,
-    readableMachineIdPersonal: readablePlainText(bindings, SLOT_BINDING.personal.machineId),
-    readableMachineIdWork: readablePlainText(bindings, SLOT_BINDING.work.machineId),
-    bindingNames,
-    stampedMachineIds: stamped.ids,
-    workerExists,
-  };
+      ? { machines: [] as EnrolledMachineRow[], rows: null }
+      : await readRegistry(api, o.accountId, database.uuid);
 
   return {
     accountId: o.accountId,
     databaseExists: database !== null,
-    workerExists,
-    verdict: detectSlot(evidence),
-    bindingNames,
+    workerExists: bindings !== null,
+    machines: registry.machines,
     accountSubdomain: await o.api.getAccountSubdomain(o.accountId),
-    rowsInCloud: stamped.rows,
+    rowsInCloud: registry.rows,
   };
 }
 
 /**
- * The machine ids the cloud has actually stamped, and how many rows exist.
+ * Who is enrolled, and how many intervals are already here.
  *
- * Both come out of one query. The row count is shown on the confirmation screen
- * because "this database already has 4,812 intervals in it" is the sentence
- * that stops someone clicking through a wizard that is about to point at the
- * wrong account.
+ * LEFT JOIN, because a Mac that has enrolled but not yet sent its first
+ * heartbeat has no `machine` row and must still appear — as its bare id, which
+ * is honest. The label is joined rather than stored on `machine_token` for the
+ * reason AGENTS.md gives about `work_interval`: a machine's name has exactly
+ * one home, and a second copy is a rename that can half-fail.
+ *
+ * The row count is shown on the confirmation screen because "this database
+ * already has 4,812 intervals in it" is the sentence that stops someone
+ * clicking through a wizard that is about to point at the wrong account.
  */
-async function readStampedMachineIds(
+async function readRegistry(
   api: CloudflareApi,
   accountId: string,
   databaseId: string,
-): Promise<{ ids: string[]; rows: number | null }> {
+): Promise<{ machines: EnrolledMachineRow[]; rows: number | null }> {
   try {
-    const [machines, intervals, counted] = await api.query(
+    const [enrolled, counted] = await api.query(
       accountId,
       databaseId,
-      "SELECT machine_id FROM machine;" +
-        "SELECT DISTINCT machine_id FROM work_interval;" +
+      `SELECT t.machine_id AS machine_id, t.enrolled_at_ms AS enrolled_at_ms,
+              m.label AS label, m.last_seen_ms AS last_seen_ms
+         FROM machine_token t
+         LEFT JOIN machine m ON m.machine_id = t.machine_id
+        WHERE t.revoked_at_ms IS NULL
+        ORDER BY t.enrolled_at_ms;` +
         "SELECT COUNT(*) AS n FROM work_interval;",
     );
-    const ids = [...(machines ?? []), ...(intervals ?? [])]
-      .map((row) => stringField(row, "machine_id"))
-      .filter((v): v is string => v !== null && v !== "");
+    const machines = (enrolled ?? [])
+      .map((row): EnrolledMachineRow | null => {
+        const machineId = stringField(row, "machine_id");
+        if (machineId === null || machineId === "") return null;
+        return {
+          machineId,
+          label: stringField(row, "label"),
+          enrolledAtMs: numberField(row, "enrolled_at_ms") ?? 0,
+          lastSeenMs: numberField(row, "last_seen_ms"),
+        };
+      })
+      .filter((m): m is EnrolledMachineRow => m !== null);
     const first = counted?.[0];
     const n = first === undefined ? null : numberField(first, "n");
-    return { ids: [...new Set(ids)], rows: n };
+    return { machines, rows: n };
   } catch {
     // The tables do not exist until the schema has been applied, and a
     // first run is exactly when that is true. No evidence is not an error.
-    return { ids: [], rows: null };
+    return { machines: [], rows: null };
   }
 }
 
-/** Does the other slot already hold a token that must be left alone? */
-export function otherTokenPresent(
-  bindingNames: readonly string[],
-  slot: MachineSlot,
-): boolean {
-  return bindingNames.includes(SLOT_BINDING[OTHER_SLOT[slot]].token);
+/**
+ * Read the registry for a screen that already knows the database.
+ *
+ * Exposed so the review screen can refresh the machine list after a revoke
+ * without re-running the whole probe.
+ */
+export async function readEnrolledMachines(
+  api: CloudflareApi,
+  accountId: string,
+  databaseId: string,
+): Promise<EnrolledMachineRow[]> {
+  return (await readRegistry(api, accountId, databaseId)).machines;
+}
+
+/**
+ * Stop one machine syncing, immediately.
+ *
+ * Nothing it has already recorded is touched — its hours stay in the cloud and
+ * on that Mac, and anything it has not yet sent waits in its outbox. Effective
+ * on that machine's very next request. Rows are never deleted here for the same
+ * reason they are never deleted from `work_interval`: who could write, and
+ * when, is history.
+ *
+ * Requires the Cloudflare API token, i.e. the wizard. There is deliberately no
+ * Worker route for this — one would let a stolen bearer token take every other
+ * Mac offline.
+ */
+export async function revokeMachine(o: {
+  api: CloudflareApi;
+  accountId: string;
+  databaseId: string;
+  machineId: string;
+  now?: () => number;
+}): Promise<void> {
+  if (!MACHINE_ID.test(o.machineId)) {
+    throw new Error(`refusing to revoke: “${o.machineId}” is not a machine id`);
+  }
+  await o.api.queryParams(
+    o.accountId,
+    o.databaseId,
+    `UPDATE machine_token SET revoked_at_ms = ?
+      WHERE machine_id = ? AND revoked_at_ms IS NULL`,
+    [String((o.now ?? Date.now)()), o.machineId],
+  );
 }
 
 /**
@@ -411,26 +482,10 @@ export async function runCloudSetup(
 ): Promise<CloudSetupOutcome> {
   const dbName = deps.databaseName ?? DEFAULT_DATABASE_NAME;
   const workerName = deps.workerName ?? DEFAULT_WORKER_NAME;
-  const otherSlot = OTHER_SLOT[req.slot];
+  const now = deps.now ?? Date.now;
   const tracker = new StepTracker(deps.onProgress);
 
   let workerUrl: string | null = null;
-  let otherMachineToken: string | null = null;
-  /**
-   * Has the OTHER Mac's minted token actually reached Cloudflare?
-   *
-   * The token is minted before the upload and the upload can fail, so these are
-   * two different facts and only one of them makes it safe to show. From
-   * `scripts/bringup-cloud.sh`, which learned this first: "A token printed by a
-   * run that did not upload it is worse than no token: it looks exactly like
-   * the real thing, and pasting it into the app produces 401s that read as a
-   * broken Worker."
-   *
-   * After a SUCCESSFUL upload the opposite is true and it must be shown even if
-   * a later step fails — it is in Cloudflare, it cannot be read back, and a
-   * re-run would replace it rather than recover it.
-   */
-  let otherTokenUploaded = false;
   let unstoredToken: string | null = null;
 
   try {
@@ -470,45 +525,58 @@ export async function runCloudSetup(
     await deps.api.query(req.accountId, database.uuid, WORKER_SCHEMA_SQL);
     tracker.done("schema", "applied (CREATE TABLE IF NOT EXISTS throughout)");
 
-    // ── 5. the Worker ─────────────────────────────────────────────────────
-    tracker.start("deploy");
-    const bindings = await deps.api.getWorkerBindings(req.accountId, workerName);
-    const secretNames =
-      bindings === null ? [] : await deps.api.listWorkerSecretNames(req.accountId, workerName);
-    const existingNames = new Set([
-      ...(bindings ?? []).map((b) => b.name),
-      ...secretNames,
-    ]);
-
+    // ── 5. enrol THIS Mac ─────────────────────────────────────────────────
+    // Mint a token for this machine only, and send Cloudflare its SHA-256. The
+    // plaintext never leaves this Mac.
+    tracker.start("enrol");
+    if (deps.thisMachineId === "") {
+      // Unreachable in production — `src/main/bootstrap.ts` falls back to a
+      // persisted randomUUID() when ioreg cannot be read — but it must never be
+      // silently written if it ever becomes reachable. Every hour would be
+      // filed under a blank name, which is the exact silent misattribution this
+      // whole design exists to prevent.
+      throw new Error(
+        "this Mac's hardware UUID could not be read, so setup cannot say whose " +
+          "hours these are — every hour would be filed under a blank name. " +
+          "`ioreg` is what reports it. Cloud sync should wait until that is " +
+          "working; nothing you have already recorded is affected.",
+      );
+    }
+    if (!MACHINE_ID.test(deps.thisMachineId)) {
+      throw new Error(
+        `this Mac's id is not a shape setup will send (${String(deps.thisMachineId.length)} characters).`,
+      );
+    }
     const thisToken = deps.mintToken();
-    const otherHasToken = existingNames.has(SLOT_BINDING[otherSlot].token);
-    // Minted only when the other Mac has none, or when replacing it was asked
-    // for explicitly. Anything else and its token is inherited untouched.
-    const mintOther = !otherHasToken || req.rotateOtherToken === true;
-    otherMachineToken = mintOther ? deps.mintToken() : null;
+    const thisHash = deps.hashToken(thisToken);
+    if (!HEX64.test(thisHash)) {
+      throw new Error(
+        "the token fingerprint came out in an unexpected format, so nothing " +
+          "was sent. Nothing was changed and running setup again is safe.",
+      );
+    }
+    // A plain INSERT, no ON CONFLICT. A 256-bit collision is not a case to
+    // absorb quietly; if it ever happened the constraint error should fail the
+    // run loudly, which is what this does.
+    await deps.api.queryParams(
+      req.accountId,
+      database.uuid,
+      `INSERT INTO machine_token (token_sha256, machine_id, enrolled_at_ms)
+       VALUES (?, ?, ?)`,
+      [thisHash, deps.thisMachineId, String(now())],
+    );
+    tracker.done("enrol", "this Mac is enrolled — only its fingerprint was sent");
 
+    // ── 6. the Worker ─────────────────────────────────────────────────────
+    tracker.start("deploy");
     await deps.api.uploadWorker(req.accountId, {
       scriptName: workerName,
       script: WORKER_BUNDLE,
       mainModule: WORKER_MAIN_MODULE,
       compatibilityDate: WORKER_COMPATIBILITY_DATE,
-      bindings: buildBindings({
-        databaseId: database.uuid,
-        slot: req.slot,
-        thisToken,
-        thisMachineId: deps.thisMachineId,
-        otherToken: otherMachineToken,
-        existingNames,
-      }),
+      bindings: buildBindings({ databaseId: database.uuid }),
     });
-    // Only now is the minted token a real credential rather than a string.
-    otherTokenUploaded = mintOther;
-    tracker.done(
-      "deploy",
-      mintOther
-        ? `deployed; minted a token for the ${otherSlot} Mac`
-        : `deployed; the ${otherSlot} Mac's token was left alone`,
-    );
+    tracker.done("deploy", "deployed, pointed at this database");
 
     // ── 6. the address ────────────────────────────────────────────────────
     tracker.start("url");
@@ -561,11 +629,12 @@ export async function runCloudSetup(
     tracker.start("save");
     try {
       await deps.commit({ workerUrl, token: thisToken });
-      tracker.done("save", "sync is on — no relaunch needed");
     } catch (err) {
       // The cloud half is real and correct; only the keychain refused. Handing
       // the token over is strictly better than reporting a failure for a
-      // deployment that actually works.
+      // deployment that actually works. The older tokens are deliberately NOT
+      // revoked here: the new one is not stored, so an older one may still be
+      // the only working credential this Mac has.
       unstoredToken = thisToken;
       tracker.fail("save", describeCloudError(err));
       return {
@@ -575,40 +644,47 @@ export async function runCloudSetup(
         ),
         ok: false,
         workerUrl,
-        slot: req.slot,
-        otherSlot,
-        otherMachineToken,
         unstoredToken,
       };
     }
 
-    return {
-      ...tracker.snapshot(null),
-      ok: true,
-      workerUrl,
-      slot: req.slot,
-      otherSlot,
-      otherMachineToken,
-      unstoredToken: null,
-    };
+    // ── Retire this Mac's OLDER tokens — and only now ─────────────────────
+    //
+    // THE ORDERING IS THE DESIGN. Do not tidy these two statements into one.
+    //
+    //  • Insert before revoke. If this UPDATE fails, the machine has TWO live
+    //    tokens — harmless, because both stamp the same machine_id, and the
+    //    next run clears it. Revoke-first would leave a machine with ZERO live
+    //    tokens on a partial failure: offline, silently.
+    //  • Revoke after the Keychain write. Until the new token is stored and
+    //    proven, the old one is the only working credential this Mac has.
+    //    Revoking earlier means a run that fails at the save step leaves the
+    //    Mac unable to sync until setup is run again.
+    //  • `machine_id = ?` scopes it to THIS Mac. No other machine's row is ever
+    //    touched by a setup run.
+    //  • A failed revoke does not fail the run. An extra live token for the
+    //    same machine is not worth failing a setup that otherwise worked.
+    let revokeNote = "sync is on — no relaunch needed";
+    try {
+      await deps.api.queryParams(
+        req.accountId,
+        database.uuid,
+        `UPDATE machine_token SET revoked_at_ms = ?
+          WHERE machine_id = ? AND token_sha256 <> ? AND revoked_at_ms IS NULL`,
+        [String(now()), deps.thisMachineId, thisHash],
+      );
+    } catch {
+      revokeNote =
+        "sync is on — an older token for this Mac could not be revoked; " +
+        "run setup again to clear it";
+    }
+    tracker.done("save", revokeNote);
+
+    return { ...tracker.snapshot(null), ok: true, workerUrl, unstoredToken: null };
   } catch (err) {
     const message = describeCloudError(err);
     tracker.failCurrent(message);
-    return {
-      ...tracker.snapshot(message),
-      ok: false,
-      workerUrl,
-      slot: req.slot,
-      otherSlot,
-      // ONLY IF THE UPLOAD LANDED IT. After a successful upload it must be
-      // shown even though a later step failed — it is in Cloudflare, it cannot
-      // be read back, and a re-run replaces it rather than recovering it.
-      // Before one, it is a string that has never been a credential, and
-      // showing it would produce 401s on the other Mac that read as a broken
-      // Worker. See `otherTokenUploaded`.
-      otherMachineToken: otherTokenUploaded ? otherMachineToken : null,
-      unstoredToken,
-    };
+    return { ...tracker.snapshot(message), ok: false, workerUrl, unstoredToken };
   }
 }
 
@@ -616,54 +692,17 @@ export async function runCloudSetup(
  * The bindings the upload carries — the whole set, because an upload replaces
  * every one of them.
  *
- * Four rules, and the third is the one that keeps two Macs working:
- *
- *   DB                     always, pointed at the database adopted above
- *   this Mac's token       always freshly minted; nothing can read the old one
- *   this Mac's machine id  PLAIN TEXT, on purpose — see `slot.ts`. It is not a
- *                          secret, and one that can be read back is what makes
- *                          the next run on either Mac able to tell which is
- *                          which instead of asking.
- *   the other Mac's pair   `inherit` when present and not being rotated, so its
- *                          token survives an upload that cannot read it; a new
- *                          `secret_text` when there was none or a rotation was
- *                          asked for; and OMITTED when it has never existed —
- *                          `inherit` on a name the previous version does not
- *                          have would fail the upload under `strict`.
+ * There is exactly one now. Per-machine tokens used to be `secret_text`
+ * bindings, which is why this function once had to carry the other Mac's token
+ * forward with `{type:"inherit"}` and why every upload had to go out under
+ * `?bindings_inherit=strict` — an inherit that cannot be resolved is otherwise
+ * DROPPED behind a 200, and that is the other Mac offline with a green tick.
+ * Credentials now live in D1, so there is nothing to inherit and nothing an
+ * upload can silently delete. The flag stays on the request anyway: it costs
+ * nothing and it is the guarantee any future binding will want.
  */
-export function buildBindings(o: {
-  databaseId: string;
-  slot: MachineSlot;
-  thisToken: string;
-  thisMachineId: string;
-  otherToken: string | null;
-  existingNames: ReadonlySet<string>;
-}): WorkerBinding[] {
-  const mine = SLOT_BINDING[o.slot];
-  const theirs = SLOT_BINDING[OTHER_SLOT[o.slot]];
-  const out: WorkerBinding[] = [
-    { type: "d1", name: DB_BINDING, database_id: o.databaseId },
-    { type: "secret_text", name: mine.token, text: o.thisToken },
-  ];
-
-  // An unreadable machine id is worse than none: the Worker falls back to the
-  // slot name, which is coherent, whereas an empty string would be stamped onto
-  // every row this Mac ever writes.
-  if (o.thisMachineId !== "") {
-    out.push({ type: "plain_text", name: mine.machineId, text: o.thisMachineId });
-  } else if (o.existingNames.has(mine.machineId)) {
-    out.push({ type: "inherit", name: mine.machineId });
-  }
-
-  if (o.otherToken !== null) {
-    out.push({ type: "secret_text", name: theirs.token, text: o.otherToken });
-  } else if (o.existingNames.has(theirs.token)) {
-    out.push({ type: "inherit", name: theirs.token });
-  }
-  if (o.existingNames.has(theirs.machineId)) {
-    out.push({ type: "inherit", name: theirs.machineId });
-  }
-  return out;
+export function buildBindings(o: { databaseId: string }): WorkerBinding[] {
+  return [{ type: "d1", name: DB_BINDING, database_id: o.databaseId }];
 }
 
 /**
@@ -745,15 +784,24 @@ async function assertAuthorized(o: {
     });
     if (res.ok) return;
     status = res.status;
-    // Only an auth failure is worth waiting on — it is the one a not-yet-live
-    // version produces. Anything else is a real answer from a real Worker.
-    if (status !== 401 && status !== 403) break;
+    // 401/403 and 503 are both worth waiting on, for the same reason: a version
+    // that is not live everywhere yet. 503 specifically is the old Worker
+    // answering before the new schema reached it.
+    if (status !== 401 && status !== 403 && status !== 503) break;
+  }
+  if (status === 503) {
+    throw new Error(
+      `the Worker is running, but its database has no machine registry yet — ` +
+        `the schema was never applied. Run “Set up cloud sync” again; it applies ` +
+        `the schema and changes nothing else.`,
+    );
   }
   if (status === 401 || status === 403) {
     throw new Error(
-      `the Worker is reachable but kept rejecting the token this setup just ` +
-        `uploaded. Everything in the cloud is in place — run setup again, which ` +
-        `will mint a fresh token for this Mac.`,
+      `the Worker is reachable but did not accept the token this setup just ` +
+        `enrolled. The database row is in place, so the likeliest cause is that ` +
+        `the Worker is pointed at a different D1 database than the one setup ` +
+        `wrote to. Running setup again is safe — it will re-check and re-point it.`,
     );
   }
   throw new Error(
@@ -779,15 +827,6 @@ export function findDatabase(
   name: string,
 ): D1DatabaseSummary | null {
   return databases.find((d) => d.name === name) ?? null;
-}
-
-function readablePlainText(
-  bindings: readonly ReadBinding[] | null,
-  name: string,
-): string | null {
-  const hit = bindings?.find((b) => b.name === name);
-  if (hit === undefined || hit.type !== "plain_text") return null;
-  return hit.text === null || hit.text === "" ? null : hit.text;
 }
 
 function stringField(row: unknown, key: string): string | null {

@@ -30,30 +30,25 @@
  * (`src/main/cloud-setup.ts`), and `test/cloud/secrecy.test.ts` proves it
  * reaches no file, no log and nothing the doctor reads.
  *
- * The OTHER Mac's token is the one exception on this screen, and it is
- * deliberate: it is rendered as text because the entire point is that a person
- * copies it to the other laptop. It is never stored, cannot be read back out of
- * Cloudflare, and is dropped from state the moment the wizard closes.
+ * This Mac's own token is the one exception, and only when the Keychain refuses
+ * to store it: then it is rendered once so it can be pasted in by hand.
  *
- * ── THE SLOT IS DETECTED, NOT ASKED ─────────────────────────────────────────
- * `src/cloud/slot.ts` decides which of the Worker's two token slots this Mac
- * takes, and the screen only asks when the evidence genuinely cannot say. Its
- * reasoning is shown either way, because getting it wrong is silent: both Macs
- * sync, every total stays right, and every hour is filed under the wrong laptop
- * for ever.
+ * ── NOTHING ASKS WHICH MAC THIS IS ──────────────────────────────────────────
+ * Each install enrols itself against its own IOPlatformUUID, so there is no
+ * slot to choose and no token to carry anywhere. The failure the old slot
+ * detection existed to catch — both Macs syncing, every total right, every hour
+ * filed under the wrong laptop for ever — is now unconstructible.
  */
 import * as React from "react";
 
 import { AlertBanner } from "@/renderer/components/alert-banner";
 import { Field, inputClass } from "@/renderer/components/settings-ui";
-import { Badge } from "@/renderer/components/ui/badge";
 import { Button } from "@/renderer/components/ui/button";
 import { ipc, messageOf, useCloudSetupProgress } from "@/renderer/lib/ipc";
 import type {
   CloudDeployment,
   CloudProbeResult,
   CloudSetupResult,
-  CloudSlot,
   CloudStep,
 } from "@/shared/ipc-types";
 
@@ -75,11 +70,6 @@ export const REQUIRED_PERMISSIONS: ReadonlyArray<{ name: string; why: string }> 
 
 type Phase = "closed" | "token" | "account" | "confirm" | "running" | "done";
 
-const SLOT_LABEL: Record<CloudSlot, string> = {
-  personal: "personal Mac",
-  work: "work Mac",
-};
-
 export function CloudSetupWizard({
   onFinished,
 }: {
@@ -91,8 +81,6 @@ export function CloudSetupWizard({
   const [error, setError] = React.useState<string | null>(null);
   const [probe, setProbe] = React.useState<CloudProbeResult | null>(null);
   const [accountId, setAccountId] = React.useState("");
-  const [slot, setSlot] = React.useState<CloudSlot | null>(null);
-  const [rotateOther, setRotateOther] = React.useState(false);
   const [subdomain, setSubdomain] = React.useState("");
   const [result, setResult] = React.useState<CloudSetupResult | null>(null);
   const [progress, setProgress] = useCloudSetupProgress();
@@ -128,8 +116,6 @@ export function CloudSetupWizard({
     setProgress(null);
     setError(null);
     setAccountId("");
-    setSlot(null);
-    setRotateOther(false);
     setSubdomain("");
   };
 
@@ -160,11 +146,6 @@ export function CloudSetupWizard({
           }
           setAccountId(r.deployment.accountId);
           setSubdomain(r.deployment.accountSubdomain ?? "");
-          setSlot(
-            r.deployment.verdict.kind === "ask"
-              ? r.deployment.verdict.suggested
-              : r.deployment.verdict.slot,
-          );
           setPhase("confirm");
         },
         (e: unknown) => {
@@ -176,7 +157,7 @@ export function CloudSetupWizard({
 
   const run = (): void => {
     const apiToken = readToken();
-    if (apiToken === "" || slot === null || accountId === "") return;
+    if (apiToken === "" || accountId === "") return;
     setBusy(true);
     setError(null);
     setProgress(null);
@@ -185,8 +166,6 @@ export function CloudSetupWizard({
       .runCloudSetup({
         apiToken,
         accountId,
-        slot,
-        ...(rotateOther ? { rotateOtherToken: true } : {}),
         ...(subdomain.trim() === "" ? {} : { subdomain: subdomain.trim() }),
       })
       .then(
@@ -265,12 +244,8 @@ export function CloudSetupWizard({
       {phase === "confirm" && probe?.deployment != null ? (
         <ConfirmStep
           deployment={probe.deployment}
-          slot={slot}
-          rotateOther={rotateOther}
           subdomain={subdomain}
           busy={busy}
-          onSlot={setSlot}
-          onRotateOther={setRotateOther}
           onSubdomain={setSubdomain}
           onRun={run}
           onCancel={reset}
@@ -432,36 +407,21 @@ function AccountStep({
 
 function ConfirmStep({
   deployment,
-  slot,
-  rotateOther,
   subdomain,
   busy,
-  onSlot,
-  onRotateOther,
   onSubdomain,
   onRun,
   onCancel,
 }: {
   deployment: CloudDeployment;
-  slot: CloudSlot | null;
-  rotateOther: boolean;
   subdomain: string;
   busy: boolean;
-  onSlot: (s: CloudSlot) => void;
-  onRotateOther: (v: boolean) => void;
   onSubdomain: (v: string) => void;
   onRun: () => void;
   onCancel: () => void;
 }): React.ReactElement {
-  const { verdict } = deployment;
-  const mustAsk = verdict.kind === "ask";
   const needsSubdomain = deployment.accountSubdomain === null;
-  const ready = slot !== null && (!needsSubdomain || subdomain.trim() !== "");
-  // Recomputed from the slot currently chosen, so the plan stays true while the
-  // owner is still picking one. Promising to mint a token and then not minting
-  // it is a small lie, and this screen's whole job is to be believed.
-  const otherSlot: CloudSlot | null = slot === null ? null : slot === "personal" ? "work" : "personal";
-  const otherHasToken = otherSlot !== null && deployment.slotsWithToken.includes(otherSlot);
+  const ready = !needsSubdomain || subdomain.trim() !== "";
 
   return (
     <div className="flex flex-col gap-3">
@@ -497,53 +457,29 @@ function ConfirmStep({
             )}
           </li>
           <li>
-            {slot === null ? (
-              <>Choose which Mac this is, below, to see what happens to the tokens.</>
-            ) : otherHasToken ? (
-              <>
-                <b>Leave the other Mac’s token alone.</b> It keeps working, and it cannot
-                be shown again.
-              </>
-            ) : (
-              <>
-                <b>Mint a token for the other Mac</b> and show it once, at the end.
-              </>
-            )}
+            <b>Enrol this Mac</b> — mint a token for this Mac only, store it in this
+            Mac’s keychain, and record its fingerprint in the database.{" "}
+            <b>Nothing is minted for any other Mac.</b>
           </li>
         </ul>
       </div>
 
-      <div
-        data-slot="slot-verdict"
-        data-kind={verdict.kind}
-        className="rounded-md border border-border bg-background px-3 py-2"
-      >
-        <div className="flex items-center gap-2">
-          <Badge variant={mustAsk ? "destructive" : "secondary"}>
-            {mustAsk ? "Needs an answer" : `This is the ${SLOT_LABEL[verdict.slot]}`}
-          </Badge>
-        </div>
-        <p className="mt-1.5 text-xs text-muted-foreground">{verdict.because}</p>
-        <p className="mt-1.5 text-xs text-muted-foreground">
-          Every hour this Mac records is filed under whichever of the two it is. Choosing
-          the wrong one does not fail — both Macs sync and every total stays right — it
-          just files this Mac’s work under the other laptop, permanently.
-        </p>
-        {mustAsk ? (
-          <div data-slot="slot-picker" className="mt-2 flex items-center gap-2">
-            {(["personal", "work"] as const).map((s) => (
-              <Button
-                key={s}
-                size="sm"
-                variant={slot === s ? "default" : "outline"}
-                onClick={() => onSlot(s)}
-              >
-                This is my {SLOT_LABEL[s]}
-              </Button>
+      {deployment.machines.length === 0 ? null : (
+        <div
+          data-slot="enrolled-machines"
+          className="rounded-md border border-border bg-background px-3 py-2"
+        >
+          <p className="text-xs font-medium">Machines already enrolled</p>
+          <ul className="mt-1.5 flex flex-col gap-1 text-xs text-muted-foreground">
+            {deployment.machines.map((m) => (
+              <li key={m.machineId} data-this-mac={m.isThisMac ? "yes" : "no"}>
+                <b>{m.label ?? m.machineId}</b>
+                {m.isThisMac ? " (this Mac) — re-running replaces this Mac’s token" : null}
+              </li>
             ))}
-          </div>
-        ) : null}
-      </div>
+          </ul>
+        </div>
+      )}
 
       {needsSubdomain ? (
         <Field
@@ -562,23 +498,6 @@ function ConfirmStep({
             onChange={(e) => onSubdomain(e.target.value)}
           />
         </Field>
-      ) : null}
-
-      {otherHasToken ? (
-        <label className="flex items-start gap-2 text-xs">
-          <input
-            type="checkbox"
-            data-slot="rotate-other"
-            className="mt-0.5"
-            checked={rotateOther}
-            onChange={(e) => onRotateOther(e.target.checked)}
-          />
-          <span>
-            Replace the other Mac’s token too — only if it has been lost.{" "}
-            <b>That Mac stops syncing until the new token is pasted into it.</b> Its
-            recorded hours are not lost; they wait in its outbox.
-          </span>
-        </label>
       ) : null}
 
       <div className="flex items-center gap-2">
@@ -646,24 +565,18 @@ function DoneStep({
 
       {result.ok ? (
         <p data-slot="cloud-done" className="text-xs">
-          Sync is on. This Mac is the <b>{SLOT_LABEL[result.slot]}</b> and will start
-          uploading from the next interval it closes — no relaunch.
+          Sync is on. This Mac will start uploading from the next interval it closes — no
+          relaunch. <b>To add another Mac:</b> install the app there and run this same
+          setup. It will find this database and this Worker and enrol itself. There is
+          nothing to copy across.
         </p>
       ) : null}
 
       {result.unstoredToken === null ? null : (
         <TokenReveal
-          slot="this Mac"
+          owner="this Mac"
           token={result.unstoredToken}
           note="Everything in the cloud is set up, but this Mac’s keychain would not store its token. Paste it into “This Mac’s token” above."
-        />
-      )}
-
-      {result.otherMachineToken === null ? null : (
-        <TokenReveal
-          slot={`the ${SLOT_LABEL[result.otherSlot]}`}
-          token={result.otherMachineToken}
-          note="Put it in 1Password now, then paste it into that Mac’s Settings → Cloud sync. Each Mac gets its own — swapping them files every hour under the wrong laptop."
         />
       )}
 
@@ -686,11 +599,11 @@ function DoneStep({
  * not give a secret back.
  */
 function TokenReveal({
-  slot,
+  owner,
   token,
   note,
 }: {
-  slot: string;
+  owner: string;
   token: string;
   note: string;
 }): React.ReactElement {
@@ -700,7 +613,7 @@ function TokenReveal({
       data-slot="token-reveal"
       className="rounded-md border border-destructive/40 bg-background px-3 py-2"
     >
-      <p className="text-xs font-medium">Token for {slot} — shown once</p>
+      <p className="text-xs font-medium">Token for {owner} — shown once</p>
       <code
         data-slot="token-value"
         className="mt-1.5 block break-all rounded bg-muted px-2 py-1.5 text-xs"

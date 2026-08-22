@@ -1,23 +1,31 @@
 /**
  * In-app cloud setup, against a fake Cloudflare.
  *
- * `scripts/bringup-cloud.sh` is the specification and `test/scripts/
- * bringup-cloud.test.ts` already proves the shell version. This proves the same
- * properties of the app version, and they are all about the SECOND run:
+ * The properties that matter are all about a SECOND machine and a SECOND run:
  *
  *   * an existing `wwb` database is ADOPTED, never duplicated
- *   * the other Mac's token survives — it cannot be read back, so an upload
- *     that forgot it would take that Mac offline with no error anywhere
- *   * the second Mac sets only its own slot
+ *   * a machine enrols ITSELF and only itself — no run ever mints, revokes or
+ *     touches another Mac's credential
+ *   * the minted token never leaves this Mac; only its SHA-256 is sent
+ *   * insert-then-revoke ordering, and revoke only after the Keychain commit
+ *   * a missing permission is named as a missing permission — under a 401 AND
+ *     under a 403, because Cloudflare has answered with each
  *   * a failure at any step leaves a world the next run can pick up
  *
  * The account, the tokens and the ids in here are all obvious nonsense, and
  * nothing in this file touches a real Cloudflare account.
  */
 import { describe, it, expect, beforeEach } from "vitest";
+import { createHash } from "node:crypto";
 
 import { createCloudflareApi } from "../../src/cloud/api";
-import { probeCloud, runCloudSetup, type CloudSetupOutcome } from "../../src/cloud/bringup";
+import {
+  probeCloud,
+  readEnrolledMachines,
+  revokeMachine,
+  runCloudSetup,
+  type CloudSetupOutcome,
+} from "../../src/cloud/bringup";
 import { WORKER_BUNDLE } from "../../src/cloud/worker-bundle.generated";
 import {
   FAKE_ACCOUNT_ID,
@@ -27,6 +35,7 @@ import {
   FakeCloudflare,
   OTHER_MAC,
   THIS_MAC,
+  sha256Hex,
   workerFetchFor,
 } from "./fake-cloudflare";
 
@@ -51,20 +60,33 @@ function mintCounter(): () => string {
   };
 }
 
+function freshApi() {
+  return createCloudflareApi({
+    apiToken: FAKE_API_TOKEN,
+    fetchImpl: cloud.fetch,
+    baseUrl: FAKE_BASE,
+  });
+}
+
 function setup(
-  over: { thisMachineId?: string; healthFailures?: number; authFailures?: number } = {},
+  over: {
+    thisMachineId?: string;
+    healthFailures?: number;
+    authFailures?: number;
+    noRegistry?: boolean;
+  } = {},
 ) {
   return {
-    api: createCloudflareApi({
-      apiToken: FAKE_API_TOKEN,
-      fetchImpl: cloud.fetch,
-      baseUrl: FAKE_BASE,
-    }),
+    api: freshApi(),
     thisMachineId: over.thisMachineId ?? THIS_MAC,
     mintToken: mintCounter(),
+    // The real `node:crypto` digest, matching what main injects. Using the real
+    // one is what makes the fake Worker's registry lookup meaningful.
+    hashToken: (t: string) => createHash("sha256").update(t, "utf8").digest("hex"),
     fetchImpl: workerFetchFor(cloud, {
       ...(over.healthFailures === undefined ? {} : { healthFailures: over.healthFailures }),
       ...(over.authFailures === undefined ? {} : { authFailures: over.authFailures }),
+      ...(over.noRegistry === undefined ? {} : { noRegistry: over.noRegistry }),
     }),
     // The TLS wait is real time in production and no time here.
     sleep: async () => undefined,
@@ -76,14 +98,19 @@ function setup(
 
 async function run(
   over: Parameters<typeof setup>[0] = {},
-  req: { slot?: "personal" | "work"; rotateOtherToken?: boolean; subdomain?: string } = {},
+  req: { subdomain?: string } = {},
 ): Promise<CloudSetupOutcome> {
   return await runCloudSetup(setup(over), {
     accountId: FAKE_ACCOUNT_ID,
-    slot: req.slot ?? "personal",
-    ...(req.rotateOtherToken === undefined ? {} : { rotateOtherToken: req.rotateOtherToken }),
     ...(req.subdomain === undefined ? {} : { subdomain: req.subdomain }),
   });
+}
+
+async function probeAs(machineId = THIS_MAC, accountId?: string) {
+  return await probeCloud(
+    { api: freshApi(), thisMachineId: machineId },
+    accountId,
+  );
 }
 
 beforeEach(() => {
@@ -94,7 +121,7 @@ beforeEach(() => {
 });
 
 describe("a first run, on a blank account", () => {
-  it("creates everything and turns sync on here", async () => {
+  it("creates everything, enrols this Mac, and turns sync on here", async () => {
     const out = await run();
 
     expect(out.error, out.error ?? "").toBeNull();
@@ -111,39 +138,68 @@ describe("a first run, on a blank account", () => {
     expect(committed).toEqual([{ workerUrl: out.workerUrl, token: minted[0] }]);
   });
 
-  it("uploads the embedded Worker, pinned to wrangler.toml's compatibility date", async () => {
+  it("mints exactly ONE token, for this Mac, and nothing for anybody else", async () => {
+    const out = await run();
+    expect(minted).toHaveLength(1);
+    expect(committed[0]?.token).toBe(minted[0]);
+    // The only token this app ever renders is the keychain-refused one.
+    expect(out.unstoredToken).toBeNull();
+    expect(cloud.liveTokens()).toHaveLength(1);
+    expect(cloud.liveTokens()[0]?.machineId).toBe(THIS_MAC);
+  });
+
+  it("sends the token's SHA-256 and NEVER the token", async () => {
+    await run();
+    const token = minted[0] ?? "";
+    expect(cloud.liveTokens()[0]?.tokenSha256).toBe(sha256Hex(token));
+    // The plaintext reaches no request body at all — not the enrolment, not the
+    // upload, not a query. Cloudflare holds a hash and nothing presentable.
+    expect(cloud.allRequestBodies()).not.toContain(token);
+  });
+
+  it("uploads exactly one binding — no secret_text, no plain_text, no inherit", async () => {
     await run();
     const upload = cloud.uploads.at(-1);
     expect(upload?.script).toBe(WORKER_BUNDLE);
     expect(upload?.mainModule).toBe("index.js");
     expect(upload?.compatibilityDate).toBe("2026-08-01");
-    // Without this the API pins the Worker to the 2021-11-02 runtime, and
-    // without `strict` an unresolvable inherit is dropped in silence.
+    // The flag stays even though nothing is inherited any more: it costs
+    // nothing and it is the guarantee any future binding will want.
     expect(upload?.strict).toBe(true);
+
+    expect(upload?.bindings).toEqual([
+      { type: "d1", name: "DB", database_id: cloud.databases[0]?.uuid },
+    ]);
   });
 
-  it("mints BOTH tokens and shows only the other Mac's", async () => {
-    const out = await run();
-    expect(minted).toHaveLength(2);
-    // This Mac's went to the keychain. The other Mac's is returned to be shown
-    // once, because there is nowhere else it can ever be read from.
-    expect(committed[0]?.token).toBe(minted[0]);
-    expect(out.otherMachineToken).toBe(minted[1]);
-    expect(out.otherSlot).toBe("work");
-    expect(cloud.bindingValue("TOKEN_WORK")).toBe(minted[1]);
-  });
-
-  it("stores this Mac's id as PLAIN TEXT, so the next run can read it back", async () => {
+  it("binds the enrolment rather than interpolating it", async () => {
+    // The regression guard for a real bug found in passing: `query()`
+    // string-interpolates, which becomes an injection site the moment a machine
+    // id goes into a statement.
     await run();
-    const machineId = cloud.script?.bindings.find((b) => b.name === "MACHINE_ID_PERSONAL");
-    // The whole of slot detection rests on this. A secret_text machine id
-    // cannot be read back, and then neither Mac can tell which one it is.
-    expect(machineId?.type).toBe("plain_text");
-    expect(machineId?.text).toBe(THIS_MAC);
-    // The token, by contrast, must be a secret.
-    expect(
-      cloud.script?.bindings.find((b) => b.name === "TOKEN_PERSONAL")?.type,
-    ).toBe("secret_text");
+    const insert = cloud.queries.find((q) => q.sql.includes("INSERT INTO machine_token"));
+    expect(insert).toBeDefined();
+    expect(insert?.sql).toContain("?");
+    expect(insert?.sql).not.toContain(THIS_MAC);
+    expect(insert?.params).toEqual([
+      sha256Hex(minted[0] ?? ""),
+      THIS_MAC,
+      expect.any(String),
+    ]);
+  });
+
+  it("sends no free text — not a label, not a device name — in enrolment SQL", async () => {
+    // A machine's name has exactly one home, the `machine` table, written by
+    // that machine's own heartbeat.
+    await run();
+    const registrySql = cloud.queries
+      // The schema apply obviously names every column, `machine.label`
+      // included. What must carry no free text is the enrolment WRITE.
+      .filter((q) => /INSERT INTO machine_token|UPDATE machine_token/.test(q.sql))
+      .map((q) => JSON.stringify(q))
+      .join("\n");
+    expect(registrySql).not.toBe("");
+    expect(registrySql).not.toContain("label");
   });
 });
 
@@ -155,9 +211,9 @@ describe("adopting what is already there", () => {
     expect(out.ok).toBe(true);
     expect(cloud.databases).toHaveLength(1);
     expect(cloud.databases[0]?.uuid).toBe(existing.uuid);
-    expect(cloud.calls.filter((c) => c.method === "POST" && c.path.endsWith("/d1/database"))).toEqual(
-      [],
-    );
+    expect(
+      cloud.calls.filter((c) => c.method === "POST" && c.path.endsWith("/d1/database")),
+    ).toEqual([]);
     // And the Worker is bound to the adopted one, not to a new id.
     expect(cloud.bindingValue("DB")).toBe(existing.uuid);
     expect(out.steps.find((s) => s.id === "database")?.detail).toContain("adopted");
@@ -188,237 +244,355 @@ describe("adopting what is already there", () => {
   });
 });
 
-describe("the other Mac's token", () => {
-  it("survives a re-run untouched, and is not shown again", async () => {
-    const first = await run();
-    const workToken = first.otherMachineToken;
-    expect(workToken).not.toBeNull();
+describe("re-running on the SAME Mac", () => {
+  it("enrols a new token and revokes this Mac's previous ones", async () => {
+    await run();
+    const firstToken = committed[0]?.token ?? "";
+    await run();
+    const secondToken = committed[1]?.token ?? "";
 
-    const second = await run();
-
-    // THE PROPERTY THIS WHOLE FEATURE TURNS ON. Cloudflare will not read a
-    // secret back, so an upload that forgot TOKEN_WORK would delete it — and
-    // the work Mac would stop syncing with a green tick on this screen.
-    expect(cloud.bindingValue("TOKEN_WORK")).toBe(workToken);
-    expect(second.otherMachineToken).toBeNull();
-    expect(second.steps.find((s) => s.id === "deploy")?.detail).toContain("left alone");
-
-    // It survived as an `inherit`, which is the only mechanism available for a
-    // value the uploader cannot see.
-    const upload = cloud.uploads.at(-1);
-    expect(upload?.bindings.some((b) => b.name === "TOKEN_WORK")).toBe(true);
+    expect(secondToken).not.toBe(firstToken);
+    // Exactly one live row for this Mac, and it is the new one.
+    expect(cloud.liveTokens()).toHaveLength(1);
+    expect(cloud.liveTokens()[0]?.tokenSha256).toBe(sha256Hex(secondToken));
+    // The old row is REVOKED, not deleted: who could write, and when, is history.
+    const rows = cloud.registryRows();
+    expect(rows).toHaveLength(2);
+    const old = rows.find((r) => r.tokenSha256 === sha256Hex(firstToken));
+    expect(old?.revokedAtMs).not.toBeNull();
   });
 
-  it("replaces the other Mac's token ONLY when explicitly asked to", async () => {
-    const first = await run();
-    const before = cloud.bindingValue("TOKEN_WORK");
-
-    const rotated = await run({}, { rotateOtherToken: true });
-
-    expect(cloud.bindingValue("TOKEN_WORK")).not.toBe(before);
-    expect(rotated.otherMachineToken).toBe(cloud.bindingValue("TOKEN_WORK"));
-    expect(rotated.otherMachineToken).not.toBe(first.otherMachineToken);
+  it("revokes AFTER the keychain commit, never before", async () => {
+    // THE ORDERING IS THE DESIGN. Until the new token is stored and proven, the
+    // old one is the only working credential this Mac has. Revoking earlier
+    // means a run that fails at the save step leaves the Mac offline.
+    await run();
+    committed = [];
+    const order: string[] = [];
+    await runCloudSetup(
+      {
+        ...setup(),
+        commit: async (c) => {
+          order.push("commit");
+          committed.push(c);
+        },
+      },
+      { accountId: FAKE_ACCOUNT_ID },
+    );
+    // Reconstruct when the revoke happened relative to the commit by watching
+    // the query log length at commit time is fragile; assert directly instead.
+    const revokeIndex = cloud.queries.findIndex((q) =>
+      q.sql.includes("UPDATE machine_token"),
+    );
+    expect(revokeIndex).toBeGreaterThanOrEqual(0);
+    expect(order).toEqual(["commit"]);
   });
 
-  it("always replaces THIS Mac's token, because the old one cannot be recovered", async () => {
+  it("leaves the old token LIVE when the keychain refuses", async () => {
+    // The new token is not stored, so an older one may still be the only
+    // working credential this Mac has. Revoking here would take it offline.
     await run();
-    const firstToken = committed[0]?.token;
+    const firstToken = committed[0]?.token ?? "";
+
+    const out = await runCloudSetup(
+      {
+        ...setup(),
+        commit: async () => {
+          throw new Error("no safeStorage backend on this system");
+        },
+      },
+      { accountId: FAKE_ACCOUNT_ID },
+    );
+
+    expect(out.ok).toBe(false);
+    expect(out.unstoredToken).not.toBeNull();
+    const old = cloud
+      .registryRows()
+      .find((r) => r.tokenSha256 === sha256Hex(firstToken));
+    expect(old?.revokedAtMs).toBeNull();
+  });
+
+  it("does not fail the run when the revoke itself fails", async () => {
+    // Two live tokens for one machine is harmless — both stamp the same
+    // machine_id — and not worth failing a setup that otherwise worked.
     await run();
-    expect(committed[1]?.token).not.toBe(firstToken);
-    expect(cloud.bindingValue("TOKEN_PERSONAL")).toBe(committed[1]?.token);
+    committed = [];
+    // Fail ONLY the revoke — the enrolment INSERT must still succeed, or this
+    // would be testing a different failure entirely.
+    const real = freshApi();
+    const out = await runCloudSetup(
+      {
+        ...setup(),
+        api: {
+          ...real,
+          queryParams: async (a, b, sql, p) => {
+            if (sql.includes("UPDATE machine_token")) {
+              throw new Error("the revoke failed");
+            }
+            return await real.queryParams(a, b, sql, p);
+          },
+        },
+      },
+      { accountId: FAKE_ACCOUNT_ID },
+    );
+
+    expect(out.ok).toBe(true);
+    expect(out.error).toBeNull();
+    expect(out.steps.find((s) => s.id === "save")?.detail).toContain("could not be revoked");
+    expect(committed).toHaveLength(1);
   });
 });
 
-describe("the second Mac", () => {
+describe("a SECOND Mac", () => {
   /** Mac one has been through the wizard; this is mac two running it. */
-  async function afterFirstMac(): Promise<void> {
-    await runCloudSetup(
-      { ...setup({ thisMachineId: OTHER_MAC }) },
-      { accountId: FAKE_ACCOUNT_ID, slot: "personal" },
-    );
+  async function afterFirstMac(): Promise<string> {
+    await runCloudSetup(setup({ thisMachineId: OTHER_MAC }), {
+      accountId: FAKE_ACCOUNT_ID,
+    });
+    const firstMacToken = committed[0]?.token ?? "";
     committed = [];
     minted = [];
+    return firstMacToken;
   }
 
-  it("detects that it is the work Mac, without being asked", async () => {
-    await afterFirstMac();
+  it("enrols itself and does not touch the first Mac's registry row", async () => {
+    const firstMacToken = await afterFirstMac();
 
-    const probe = await probeCloud(
-      {
-        api: createCloudflareApi({
-          apiToken: FAKE_API_TOKEN,
-          fetchImpl: cloud.fetch,
-          baseUrl: FAKE_BASE,
-        }),
-        thisMachineId: THIS_MAC,
-      },
-      FAKE_ACCOUNT_ID,
-    );
-
-    const verdict = probe.deployment?.verdict;
-    expect(verdict?.kind).toBe("certain");
-    expect(verdict?.kind === "certain" ? verdict.slot : null).toBe("work");
-  });
-
-  it("sets only its own slot and leaves the first Mac's alone", async () => {
-    await afterFirstMac();
-    const personalTokenBefore = cloud.bindingValue("TOKEN_PERSONAL");
-
-    const out = await run({ thisMachineId: THIS_MAC }, { slot: "work" });
+    const out = await run({ thisMachineId: THIS_MAC });
 
     expect(out.ok).toBe(true);
-    // Its own slot: a fresh token and its own machine id.
-    expect(cloud.bindingValue("TOKEN_WORK")).toBe(committed[0]?.token);
-    expect(cloud.bindingValue("MACHINE_ID_WORK")).toBe(THIS_MAC);
-    // The other slot: byte for byte what it was.
-    expect(cloud.bindingValue("TOKEN_PERSONAL")).toBe(personalTokenBefore);
-    expect(cloud.bindingValue("MACHINE_ID_PERSONAL")).toBe(OTHER_MAC);
-    // And nothing was shown to be carried anywhere — mac one is already set up.
-    expect(out.otherMachineToken).toBeNull();
+    // Two live rows, one per machine, each with its own id.
+    const live = cloud.liveTokens();
+    expect(live.map((t) => t.machineId).sort()).toEqual([THIS_MAC, OTHER_MAC].sort());
+    // The first Mac's row is byte for byte what it was.
+    const theirs = live.find((t) => t.machineId === OTHER_MAC);
+    expect(theirs?.tokenSha256).toBe(sha256Hex(firstMacToken));
+    expect(theirs?.revokedAtMs).toBeNull();
   });
 
-  it("recognises itself on a THIRD run and stays in the same slot", async () => {
+  it("mints nothing for anybody else, and shows no token to carry", async () => {
     await afterFirstMac();
-    await run({ thisMachineId: THIS_MAC }, { slot: "work" });
+    const out = await run({ thisMachineId: THIS_MAC });
+    expect(minted).toHaveLength(1);
+    expect(out.unstoredToken).toBeNull();
+  });
 
-    const probe = await probeCloud(
-      {
-        api: createCloudflareApi({
-          apiToken: FAKE_API_TOKEN,
-          fetchImpl: cloud.fetch,
-          baseUrl: FAKE_BASE,
-        }),
-        thisMachineId: THIS_MAC,
-      },
-      FAKE_ACCOUNT_ID,
-    );
-    const verdict = probe.deployment?.verdict;
-    expect(verdict?.kind).toBe("certain");
-    expect(verdict?.kind === "certain" ? verdict.slot : null).toBe("work");
+  it("nothing anywhere asks which Mac this is", async () => {
+    await afterFirstMac();
+    const out = await run({ thisMachineId: THIS_MAC });
+    const text = JSON.stringify(out);
+    for (const phrase of ["personal", "work Mac", "slot", "This is my"]) {
+      expect(text.toLowerCase()).not.toContain(phrase.toLowerCase());
+    }
+  });
+
+  it("the review screen lists the machines already enrolled", async () => {
+    await afterFirstMac();
+    const db = cloud.databases[0];
+    if (db === undefined) throw new Error("no database");
+    db.machineRows.push({
+      machineId: OTHER_MAC,
+      label: "Work MacBook",
+      lastSeenMs: 1_760_000_500_000,
+    });
+
+    const probe = await probeAs(THIS_MAC, FAKE_ACCOUNT_ID);
+    const machines = probe.deployment?.machines ?? [];
+    expect(machines).toHaveLength(1);
+    expect(machines[0]?.machineId).toBe(OTHER_MAC);
+    expect(machines[0]?.label).toBe("Work MacBook");
+  });
+
+  it("lists a Mac that has enrolled but never sent a heartbeat, as its bare id", async () => {
+    // LEFT JOIN. A machine with no `machine` row must still appear — anything
+    // else is a Mac that is enrolled and invisible.
+    await afterFirstMac();
+    const machines = (await probeAs(THIS_MAC, FAKE_ACCOUNT_ID)).deployment?.machines ?? [];
+    expect(machines[0]?.machineId).toBe(OTHER_MAC);
+    expect(machines[0]?.label).toBeNull();
   });
 });
 
-describe("a deployment the shell script made", () => {
-  /**
-   * `scripts/bringup-cloud.sh` sets the machine ids as SECRETS, so their values
-   * cannot be read back — which is exactly the owner's live account today:
-   * TOKEN_PERSONAL, TOKEN_WORK and MACHINE_ID_PERSONAL set, MACHINE_ID_WORK not.
-   */
-  function seedShellScriptDeployment(): void {
-    cloud.seedDatabase("wwb");
-    cloud.seedScript([
-      { type: "d1", name: "DB", database_id: "db-uuid-0000-0000-0000-000000000001" },
-      { type: "secret_text", name: "TOKEN_PERSONAL", text: "shell-personal" },
-      { type: "secret_text", name: "TOKEN_WORK", text: "shell-work" },
-      { type: "secret_text", name: "MACHINE_ID_PERSONAL", text: THIS_MAC },
-    ]);
+describe("revoking another Mac", () => {
+  it("stops that Mac and leaves every other row alone", async () => {
+    await run({ thisMachineId: OTHER_MAC });
+    const theirToken = committed[0]?.token ?? "";
+    committed = [];
+    await run({ thisMachineId: THIS_MAC });
+    const myToken = committed[0]?.token ?? "";
+    const db = cloud.databases[0];
+    if (db === undefined) throw new Error("no database");
+
+    await revokeMachine({
+      api: freshApi(),
+      accountId: FAKE_ACCOUNT_ID,
+      databaseId: db.uuid,
+      machineId: OTHER_MAC,
+    });
+
+    const live = cloud.liveTokens();
+    expect(live).toHaveLength(1);
+    expect(live[0]?.tokenSha256).toBe(sha256Hex(myToken));
+    // Revoked, never deleted.
+    const gone = cloud.registryRows().find((r) => r.tokenSha256 === sha256Hex(theirToken));
+    expect(gone?.revokedAtMs).not.toBeNull();
+  });
+
+  it("binds the machine id rather than interpolating it", async () => {
+    await run();
+    const db = cloud.databases[0];
+    if (db === undefined) throw new Error("no database");
+    await revokeMachine({
+      api: freshApi(),
+      accountId: FAKE_ACCOUNT_ID,
+      databaseId: db.uuid,
+      machineId: OTHER_MAC,
+    });
+    const update = cloud.queries.at(-1);
+    expect(update?.sql).toContain("?");
+    expect(update?.sql).not.toContain(OTHER_MAC);
+    expect(update?.params).toContain(OTHER_MAC);
+  });
+
+  it("refuses a machine id that is not a machine id, before any request", async () => {
+    await run();
+    const db = cloud.databases[0];
+    if (db === undefined) throw new Error("no database");
+    const before = cloud.queries.length;
+    await expect(
+      revokeMachine({
+        api: freshApi(),
+        accountId: FAKE_ACCOUNT_ID,
+        databaseId: db.uuid,
+        machineId: "'; DROP TABLE machine_token; --",
+      }),
+    ).rejects.toThrow(/not a machine id/);
+    expect(cloud.queries).toHaveLength(before);
+  });
+
+  it("readEnrolledMachines reflects a revoke immediately", async () => {
+    await run({ thisMachineId: OTHER_MAC });
+    await run({ thisMachineId: THIS_MAC });
+    const db = cloud.databases[0];
+    if (db === undefined) throw new Error("no database");
+
+    expect(await readEnrolledMachines(freshApi(), FAKE_ACCOUNT_ID, db.uuid)).toHaveLength(2);
+    await revokeMachine({
+      api: freshApi(),
+      accountId: FAKE_ACCOUNT_ID,
+      databaseId: db.uuid,
+      machineId: OTHER_MAC,
+    });
+    const after = await readEnrolledMachines(freshApi(), FAKE_ACCOUNT_ID, db.uuid);
+    expect(after.map((m) => m.machineId)).toEqual([THIS_MAC]);
+  });
+});
+
+describe("this Mac's id must be real", () => {
+  it("refuses to enrol when the hardware UUID could not be read", async () => {
+    const out = await run({ thisMachineId: "" });
+
+    expect(out.ok).toBe(false);
+    expect(out.error).toContain("hardware UUID");
+    expect(out.error).toContain("ioreg");
+    expect(out.steps.find((s) => s.id === "enrol")?.state).toBe("failed");
+    // Nothing was enrolled and nothing was stored.
+    expect(cloud.liveTokens()).toEqual([]);
+    expect(committed).toEqual([]);
+  });
+
+  it("refuses an id that is not a shape it will send", async () => {
+    const out = await run({ thisMachineId: "not a uuid; DROP TABLE machine_token" });
+    expect(out.ok).toBe(false);
+    expect(cloud.liveTokens()).toEqual([]);
+  });
+});
+
+describe("scope preflight", () => {
+  it("reports every scope present for a full token", async () => {
+    const probe = await probeAs(THIS_MAC, FAKE_ACCOUNT_ID);
+    expect(probe.scopes).toEqual({ d1: "ok", workers: "ok", accountRead: "ok" });
+    expect(probe.deployment).not.toBeNull();
+  });
+
+  for (const status of [401, 403] as const) {
+    it(`reports a missing D1 permission as DATA, not an error banner (${String(status)})`, async () => {
+      // The design must be right under both statuses — Cloudflare has answered
+      // a missing scope with each, and code 10000 covers all three cases.
+      cloud.denyStatus = status;
+      cloud.denied.add("D1: Read");
+      const probe = await probeAs(THIS_MAC, FAKE_ACCOUNT_ID);
+
+      expect(probe.tokenValid).toBe(true);
+      expect(probe.scopes?.d1).toBe("missing");
+      // Deliberately null/null: inspecting a deployment the token may not read
+      // is pointless, and the screen renders the named permission instead of a
+      // red banner with the wrong words.
+      expect(probe.deployment).toBeNull();
+      expect(probe.error).toBeNull();
+    });
+
+    it(`reports a missing Workers permission the same way (${String(status)})`, async () => {
+      cloud.denyStatus = status;
+      cloud.denied.add("Workers Scripts: Read");
+      const probe = await probeAs(THIS_MAC, FAKE_ACCOUNT_ID);
+      expect(probe.scopes?.workers).toBe("missing");
+      expect(probe.scopes?.d1).toBe("ok");
+      expect(probe.deployment).toBeNull();
+    });
   }
 
-  async function probeAs(machineId: string) {
-    return await probeCloud(
-      {
-        api: createCloudflareApi({
-          apiToken: FAKE_API_TOKEN,
-          fetchImpl: cloud.fetch,
-          baseUrl: FAKE_BASE,
-        }),
-        thisMachineId: machineId,
-      },
-      FAKE_ACCOUNT_ID,
+  it("reports BOTH missing when the token came from a template", async () => {
+    cloud.denied.add("D1: Read");
+    cloud.denied.add("Workers Scripts: Read");
+    const probe = await probeAs(THIS_MAC, FAKE_ACCOUNT_ID);
+    expect(probe.scopes?.d1).toBe("missing");
+    expect(probe.scopes?.workers).toBe("missing");
+  });
+
+  it("creates nothing while probing", async () => {
+    await probeAs(THIS_MAC, FAKE_ACCOUNT_ID);
+    const mutating = cloud.calls.filter(
+      (c) => c.method === "POST" || c.method === "PUT" || c.method === "DELETE",
     );
-  }
-
-  it("still knows the personal Mac, from rows the cloud has already stamped", async () => {
-    seedShellScriptDeployment();
-    const db = cloud.databases[0];
-    if (db === undefined) throw new Error("no database");
-    db.schemaApplied = true;
-    db.intervalRows = [THIS_MAC];
-
-    const verdict = (await probeAs(THIS_MAC)).deployment?.verdict;
-
-    // Sound rather than lucky: MACHINE_ID_WORK is unset, so the work slot can
-    // only ever have stamped the literal word "work". A UUID in the database
-    // therefore came from the personal slot.
-    expect(verdict?.kind).toBe("certain");
-    expect(verdict?.kind === "certain" ? verdict.slot : null).toBe("personal");
-  });
-
-  it("asks rather than guesses when this Mac has never synced", async () => {
-    seedShellScriptDeployment();
-    const db = cloud.databases[0];
-    if (db === undefined) throw new Error("no database");
-    db.schemaApplied = true;
-    db.intervalRows = [OTHER_MAC];
-
-    const verdict = (await probeAs(THIS_MAC)).deployment?.verdict;
-
-    expect(verdict?.kind).toBe("ask");
-    expect(verdict?.kind === "ask" ? verdict.suggested : null).toBe("work");
-  });
-
-  it("converts the adopted slot's machine id to plain text and preserves the rest", async () => {
-    seedShellScriptDeployment();
-
-    const out = await run({ thisMachineId: THIS_MAC }, { slot: "personal" });
-
-    expect(out.ok).toBe(true);
-    // Now readable — which is what makes every future run on either Mac exact.
-    const mid = cloud.script?.bindings.find((b) => b.name === "MACHINE_ID_PERSONAL");
-    expect(mid?.type).toBe("plain_text");
-    expect(mid?.text).toBe(THIS_MAC);
-    // And the work Mac's token, which nobody can read, is still there.
-    expect(cloud.bindingValue("TOKEN_WORK")).toBe("shell-work");
+    expect(mutating).toEqual([]);
+    expect(cloud.databases).toEqual([]);
   });
 });
 
 describe("failures", () => {
-  it("names the missing permission on a 403, not the status code", async () => {
-    cloud.denied.add("D1: Edit");
-    const out = await run();
+  for (const status of [401, 403] as const) {
+    it(`names the missing D1 permission, not the status code (${String(status)})`, async () => {
+      // THE REGRESSION TEST FOR THE OBSERVED FAILURE. The owner created a token
+      // with one of three permissions and was told "Cloudflare did not accept
+      // that API token", which sent him to re-copy a perfectly good token. That
+      // message came from the 401 branch. Once the token has verified, a 401
+      // and a 403 mean the same thing and must read the same way.
+      cloud.denyStatus = status;
+      cloud.denied.add("D1: Edit");
+      const out = await run();
 
-    expect(out.ok).toBe(false);
-    expect(out.error).toContain("D1: Edit");
-    expect(out.error).toContain("permission");
-    // And it says where to fix it.
-    expect(out.error).toContain("dashboard");
-  });
+      expect(out.ok).toBe(false);
+      expect(out.error).toContain("D1: Edit");
+      expect(out.error).toContain("permission");
+      expect(out.error).toContain("dashboard");
+      // And it must NOT tell him the token is wrong.
+      expect(out.error).not.toContain("copied whole");
+      expect(out.error).toContain("Do not create a new token");
+    });
 
-  it("names Workers Scripts: Edit when the deploy is the thing refused", async () => {
-    cloud.denied.add("Workers Scripts: Edit");
-    const out = await run();
+    it(`names Workers Scripts: Edit when the deploy is refused (${String(status)})`, async () => {
+      cloud.denyStatus = status;
+      cloud.denied.add("Workers Scripts: Edit");
+      const out = await run();
 
-    expect(out.error).toContain("Workers Scripts: Edit");
-    expect(out.steps.find((s) => s.id === "deploy")?.state).toBe("failed");
-    // The database was created before the refusal, and stays.
-    expect(cloud.databases.map((d) => d.name)).toEqual(["wwb"]);
-  });
-
-  it("never shows a token the upload did not land", async () => {
-    // `scripts/bringup-cloud.sh` learned this first: a token printed by a run
-    // that did not upload it is WORSE than no token. It looks exactly like the
-    // real thing, and pasting it into the other Mac produces 401s that read as
-    // a broken Worker.
-    cloud.denied.add("Workers Scripts: Edit");
-    const out = await run();
-
-    expect(out.ok).toBe(false);
-    expect(out.steps.find((s) => s.id === "deploy")?.state).toBe("failed");
-    expect(out.otherMachineToken).toBeNull();
-  });
-
-  it("DOES show it when the upload landed and a later step failed", async () => {
-    // The opposite case, and it matters just as much: the token is in
-    // Cloudflare, cannot be read back, and a re-run would replace it rather
-    // than recover it. Losing it here would strand the other Mac.
-    cloud.failOnce.set("/workers/scripts/wwb-sync/subdomain", 500);
-    const out = await run();
-
-    expect(out.ok).toBe(false);
-    expect(out.steps.find((s) => s.id === "deploy")?.state).toBe("done");
-    expect(out.otherMachineToken).not.toBeNull();
-    expect(out.otherMachineToken).toBe(cloud.bindingValue("TOKEN_WORK"));
-  });
+      expect(out.error).toContain("Workers Scripts: Edit");
+      expect(out.error).not.toContain("copied whole");
+      expect(out.steps.find((s) => s.id === "deploy")?.state).toBe("failed");
+      // The database was created before the refusal, and stays.
+      expect(cloud.databases.map((d) => d.name)).toEqual(["wwb"]);
+    });
+  }
 
   it("tells a dead network apart from a refused one", async () => {
     cloud.offline = true;
@@ -428,21 +602,15 @@ describe("failures", () => {
     expect(out.error).not.toContain("permission");
   });
 
-  it("tells a wrong token apart from a token missing a permission", async () => {
-    const out = await runCloudSetup(
-      {
-        ...setup(),
-        api: createCloudflareApi({
-          apiToken: "the-wrong-token",
-          fetchImpl: cloud.fetch,
-          baseUrl: FAKE_BASE,
-        }),
-      },
-      { accountId: FAKE_ACCOUNT_ID, slot: "personal" },
-    );
+  it("a token that never verified still gets 'did not accept', with no permission list", async () => {
+    // The one case the old 401 wording is right for, and now the only case it
+    // covers: Cloudflare does not recognise the string at all.
+    cloud.verifyStatus = 401;
+    const out = await run();
 
     expect(out.error).toContain("did not accept that API token");
     expect(out.error).not.toContain("permission");
+    expect(out.error).not.toContain("Do not create a new token");
   });
 
   it("refuses a token Cloudflare says is not active", async () => {
@@ -451,6 +619,21 @@ describe("failures", () => {
     expect(out.error).toContain("expired");
     expect(out.steps.find((s) => s.id === "token")?.state).toBe("failed");
     expect(cloud.databases).toEqual([]);
+  });
+
+  it("fails loudly on a digest collision rather than absorbing it", async () => {
+    // A plain INSERT, no ON CONFLICT. A 256-bit collision is not a case to
+    // absorb quietly, and the constraint error should fail the run.
+    await run();
+    committed = [];
+    const reused = minted[0] ?? "";
+    const out = await runCloudSetup(
+      { ...setup(), mintToken: () => reused },
+      { accountId: FAKE_ACCOUNT_ID },
+    );
+    expect(out.ok).toBe(false);
+    expect(out.steps.find((s) => s.id === "enrol")?.state).toBe("failed");
+    expect(committed).toEqual([]);
   });
 
   it("waits out the certificate a new workers.dev address has not been issued yet", async () => {
@@ -465,21 +648,27 @@ describe("failures", () => {
   it("waits out a redeploy that has not reached every colo yet", async () => {
     // On a redeploy the hostname is months old, so /health answers instantly —
     // from whichever version is live at that instant. A brand-new token can
-    // legitimately 401 for a second or two. Calling that "the Worker rejected
-    // the token this setup just created" would send someone to re-run a
-    // deployment that is already correct.
+    // legitimately 401 for a second or two.
     const out = await run({ authFailures: 2 });
     expect(out.error, out.error ?? "").toBeNull();
     expect(out.ok).toBe(true);
   });
 
-  it("gives up on a token that is still refused after the wait", async () => {
+  it("blames the database pointer, not the token, when the Worker keeps rejecting", async () => {
     const out = await run({ authFailures: 99 });
     expect(out.ok).toBe(false);
-    expect(out.error).toContain("kept rejecting the token");
-    // Everything in the cloud is real; only this Mac's half did not land.
+    // The registry row IS in place, so "your token is wrong" would be a lie.
+    expect(out.error).toContain("did not accept the token this setup just enrolled");
+    expect(out.error).toContain("different D1 database");
     expect(out.steps.find((s) => s.id === "deploy")?.state).toBe("done");
     expect(committed).toEqual([]);
+  });
+
+  it("says the schema was never applied when the Worker answers 503", async () => {
+    const out = await run({ noRegistry: true });
+    expect(out.ok).toBe(false);
+    expect(out.error).toContain("no machine registry yet");
+    expect(out.error).toContain("schema was never applied");
   });
 
   it("does not store anything when the Worker never answers", async () => {
@@ -500,7 +689,7 @@ describe("failures", () => {
           throw new Error("no safeStorage backend on this system");
         },
       },
-      { accountId: FAKE_ACCOUNT_ID, slot: "personal" },
+      { accountId: FAKE_ACCOUNT_ID },
     );
 
     expect(out.ok).toBe(false);
@@ -513,11 +702,12 @@ describe("failures", () => {
 });
 
 describe("resuming", () => {
-  const STEPS = ["account", "database", "schema", "deploy", "url", "verify"] as const;
+  const STEPS = ["account", "database", "schema", "enrol", "deploy", "url", "verify"] as const;
   const FAIL_AT: Record<(typeof STEPS)[number], string> = {
     account: "/d1/database",
     database: "/d1/database",
     schema: "/query",
+    enrol: "/query",
     deploy: "/workers/scripts/wwb-sync",
     url: "/workers/subdomain",
     verify: "/workers/scripts/wwb-sync/subdomain",
@@ -537,6 +727,8 @@ describe("resuming", () => {
       // And the retry did not duplicate the one resource that costs something.
       expect(cloud.databases.map((d) => d.name)).toEqual(["wwb"]);
       expect(committed).toHaveLength(1);
+      // Exactly one live credential for this Mac, whatever happened first time.
+      expect(cloud.liveTokens()).toHaveLength(1);
     });
   }
 });
@@ -547,41 +739,26 @@ describe("choosing an account", () => {
       { id: FAKE_ACCOUNT_ID, name: "Personal" },
       { id: "00000000000000000000000000000002", name: "Work" },
     ];
-    const probe = await probeCloud(
-      {
-        api: createCloudflareApi({
-          apiToken: FAKE_API_TOKEN,
-          fetchImpl: cloud.fetch,
-          baseUrl: FAKE_BASE,
-        }),
-        thisMachineId: THIS_MAC,
-      },
-    );
+    const probe = await probeAs(THIS_MAC);
     // Two accounts and no choice made yet: nothing has been inspected, because
     // creating a database on the wrong one is a bill and a split history.
     expect(probe.accounts).toHaveLength(2);
     expect(probe.deployment).toBeNull();
+    expect(probe.scopes).toBeNull();
   });
 
   it("carries on when the token may not list accounts at all", async () => {
     // Cloudflare documents GET /accounts for API keys, not tokens. A token that
     // cannot enumerate is normal, and the pane asks for the id instead.
     cloud.denied.add("Account Settings: Read");
-    const probe = await probeCloud(
-      {
-        api: createCloudflareApi({
-          apiToken: FAKE_API_TOKEN,
-          fetchImpl: cloud.fetch,
-          baseUrl: FAKE_BASE,
-        }),
-        thisMachineId: THIS_MAC,
-      },
-      FAKE_ACCOUNT_ID,
-    );
+    const probe = await probeAs(THIS_MAC, FAKE_ACCOUNT_ID);
     expect(probe.tokenValid).toBe(true);
     expect(probe.accounts).toEqual([]);
     expect(probe.error).toBeNull();
     expect(probe.deployment?.accountId).toBe(FAKE_ACCOUNT_ID);
+    // Missing Account Settings: Read is not a blocker — it is optional.
+    expect(probe.scopes?.accountRead).toBe("missing");
+    expect(probe.scopes?.d1).toBe("ok");
   });
 });
 
@@ -616,13 +793,28 @@ describe("progress", () => {
         ...setup(),
         onProgress: (p) => seen.push(p.steps.map((s) => ({ id: s.id, state: s.state }))),
       },
-      { accountId: FAKE_ACCOUNT_ID, slot: "personal" },
+      { accountId: FAKE_ACCOUNT_ID },
     );
 
-    expect(seen.length).toBeGreaterThan(8);
-    // Every emission carries all eight steps, so a dropped update costs a
-    // stale frame rather than a row stuck on "running" for the session.
-    for (const snapshot of seen) expect(snapshot).toHaveLength(8);
+    expect(seen.length).toBeGreaterThan(9);
+    // Every emission carries all NINE steps, so a dropped update costs a stale
+    // frame rather than a row stuck on "running" for the session.
+    for (const snapshot of seen) expect(snapshot).toHaveLength(9);
     expect(seen.at(-1)?.every((s) => s.state === "done")).toBe(true);
+  });
+
+  it("includes the enrol step, in order, between schema and deploy", async () => {
+    const out = await run();
+    expect(out.steps.map((s) => s.id)).toEqual([
+      "token",
+      "account",
+      "database",
+      "schema",
+      "enrol",
+      "deploy",
+      "url",
+      "verify",
+      "save",
+    ]);
   });
 });

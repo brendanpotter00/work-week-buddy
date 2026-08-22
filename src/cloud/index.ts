@@ -14,11 +14,13 @@ export {
   createCloudflareApi,
   toSubdomainLabel,
   workersDevUrl,
+  type CloudScopes,
   type CloudflareAccount,
   type CloudflareApi,
   type CloudflareApiConfig,
   type D1DatabaseSummary,
   type ReadBinding,
+  type ScopeState,
   type WorkerBinding,
   type WorkerUpload,
 } from "./api";
@@ -37,8 +39,9 @@ export {
   STEP_ORDER,
   buildBindings,
   findDatabase,
-  otherTokenPresent,
   probeCloud,
+  readEnrolledMachines,
+  revokeMachine,
   runCloudSetup,
   type BringupDeps,
   type CloudDeploymentState,
@@ -48,17 +51,10 @@ export {
   type CloudSetupRequest,
   type CloudStep,
   type CloudStepId,
+  type EnrolledMachineRow,
   type StepState,
 } from "./bringup";
-export {
-  OTHER_SLOT,
-  SLOT_BINDING,
-  autoSlot,
-  detectSlot,
-  type MachineSlot,
-  type SlotEvidence,
-  type SlotVerdict,
-} from "./slot";
+export { TOKEN_PAGE_URL, tokenCreateUrl } from "./token-url";
 export {
   WORKER_BUNDLE,
   WORKER_COMPATIBILITY_DATE,
