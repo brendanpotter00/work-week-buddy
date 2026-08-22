@@ -88,7 +88,22 @@ CREATE TABLE IF NOT EXISTS sync_state (k TEXT PRIMARY KEY, v TEXT);
 | `GET /machines` | the read half of the heartbeat — how one Mac learns the other's name |
 | `GET /fingerprint` | `{count, max_ended_at_ms, sha256(sorted ids)}` |
 
-**No DELETE, no UPDATE, no arbitrary SQL, ever.** One bearer secret per machine, compared with `timingSafeEqual`. The Worker stamps `machine_id` from the token, so a stolen token cannot forge the other machine's rows. Revoking the work Mac is one `wrangler secret put`.
+**No DELETE, no UPDATE, no arbitrary SQL, ever.** One bearer token per machine, resolved through the **`machine_token` registry**: the Worker hashes what was presented and looks the digest up, so nothing is hardcoded to a number of machines (`docs/PRD.md` §7). It stamps `machine_id` from that row — from the CREDENTIAL, never from the request body — so a stolen token cannot forge another machine's rows.
+
+```sql
+CREATE TABLE IF NOT EXISTS machine_token (
+  token_sha256   TEXT    PRIMARY KEY,   -- lowercase hex SHA-256 of the bearer token
+  machine_id     TEXT    NOT NULL,      -- IOPlatformUUID; stamped onto every row this token writes
+  enrolled_at_ms INTEGER NOT NULL,
+  revoked_at_ms  INTEGER                -- NULL = live
+);
+```
+
+**Cloudflare never holds a token, only a digest.** The plaintext exists in that Mac's Keychain and nowhere else, so a dump of this database hands over nothing that can be presented as a credential.
+
+**Nothing the Worker serves can write this table.** Enrolment and revocation are D1 REST writes made with the Cloudflare API token — the credential that can already delete everything. A stolen bearer token can append rows as itself and nothing more. Revoking a Mac is one `UPDATE`, effective on its next request; rows are never deleted, for the same reason `work_interval` rows are not.
+
+There is deliberately **no `label` column** — same rule as `work_interval`. A machine's name lives on `machine`, written by that machine's heartbeat, and is `LEFT JOIN`ed at query time.
 
 Client-side the token goes through Electron `safeStorage.encryptString`, which is backed by the macOS Keychain. Never a plist, never a dotfile, never the asar, never the repo.
 

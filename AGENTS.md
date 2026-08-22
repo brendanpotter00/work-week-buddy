@@ -42,6 +42,7 @@ These throw nothing and look fine. Each has a required mitigation.
 - **The local mirror is the outbox.** There is no separate queue table. Do not add one.
 - **Rows are never deleted or updated.** Exclusion is a query-time filter. The Worker has no `DELETE` or `UPDATE` route, and that route surface is the enforcement — not a comment.
 - **A machine's label is never stored on `work_interval`.** The row carries `machine_id`; the display name is LEFT JOINed from `machine` at query time. This is why renaming a Mac relabels its whole history in one write. Denormalising the label onto the row turns a rename into a backfill that can half-fail, and then a year of history disagrees with itself with no error anywhere.
+- **Machine credentials live in `machine_token` in D1, never as Worker bindings.** The Worker only READS that table; enrolment and revocation are D1 REST writes made with the Cloudflare API token. Do not add a Worker route that writes it — one would let a stolen bearer token mint itself a second identity or take every other Mac offline. Cloudflare holds a SHA-256 and never a token.
 - **Policy knobs live in `v_countable` and nowhere else.** If a product decision starts leaking into application code, put it back in the view.
 - **Toggling the jiggler closes the current interval and opens a new one.** Every stored interval must be homogeneous — `jiggler_s` is either `0` or equal to `duration_s`, never in between. Partial coverage breaks the cross-machine union merge.
 

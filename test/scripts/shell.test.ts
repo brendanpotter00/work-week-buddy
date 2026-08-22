@@ -42,12 +42,16 @@ function sh(args: readonly string[], env: NodeJS.ProcessEnv = {}): { code: numbe
 
 describe("every shell script parses", () => {
   it("finds the scripts at all — a rename must not silently skip this gate", () => {
-    expect(shellScripts).toEqual([
-      "bringup-cloud.sh",
-      "install.sh",
-      "launch-agent.sh",
-      "make-signing-cert.sh",
-    ]);
+    // `bringup-cloud.sh` is gone. It was the artefact that created the two-slot
+    // model — `--this personal|work`, `--rotate`, MACHINE_ID_PERSONAL all came
+    // from it — and keeping it would have meant implementing the enrolment
+    // protocol twice, in two languages, where drift means silent
+    // misattribution or a Mac offline. The escape hatch is a documented
+    // `wrangler` recipe in docs/CLOUDFLARE.md, not a second implementation.
+    //
+    // This test's own purpose is unchanged: a rename must not silently skip the
+    // gate below, and it still cannot for the three that remain.
+    expect(shellScripts).toEqual(["install.sh", "launch-agent.sh", "make-signing-cert.sh"]);
   });
 
   it.each(shellScripts)("bash -n %s", (name) => {

@@ -21,7 +21,6 @@
     "smoke": "electron-vite build && WWB_FAKE_NATIVE=1 electron . --smoke",
     "doctor": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/doctor.ts",
     "install:app": "bash scripts/install.sh",
-    "bringup:cloud": "bash scripts/bringup-cloud.sh",
     "signing-cert": "bash scripts/make-signing-cert.sh",
     "launch-agent": "bash scripts/launch-agent.sh"
   },

@@ -82,3 +82,44 @@ A locally built app carries no quarantine attribute, so Gatekeeper never engages
 | NSWorkspace sleep/wake notifications as the authority | The wall-clock comparison is strictly better and also catches App Nap, crashes and hard power-off, which notifications miss. |
 | A per-tick sample table | Blows every size budget for no benefit. Intervals plus the open-interval journal are enough. |
 | App Sandbox / Mac App Store | The camera device list returns zero devices under sandbox. |
+
+## Machine credentials: a registry in D1, not Worker bindings
+
+`worker/src/auth.ts` originally hardcoded two machine slots with two
+`secret_text` bindings. That violated `docs/PRD.md` §7 — *"user-extensible …
+nothing is hardcoded to two"* — and every awkward thing downstream came out of
+it: a third Mac needed a Worker edit, every redeploy had to carry the other
+Mac's token forward as an `inherit` (and an unresolvable inherit is DROPPED
+behind a 200, which is the other Mac offline with a green tick), and which slot
+a Mac occupied had to be *inferred* — 234 lines of it — because the Worker could
+not be asked. When the inference failed, the wizard had to ask the user, which
+was one of four onboarding failures watched live.
+
+Replaced by `machine_token`: a table of SHA-256 digests, one row per (machine,
+token). Each install mints its own token, hashes it, and writes the hash next to
+its own `IOPlatformUUID`.
+
+| Option | Why not |
+|---|---|
+| `TOKEN_1`, `TOKEN_2`, … enumerated from the bindings list | Still bindings, so the inherit hazard survives *and grows with N*; adding a machine is still a Worker redeploy. Solves "two" and keeps every mechanism that made "two" painful. |
+| One shared token, `machine_id` in the request body | Deletes the forgery guard. Non-starter. |
+| KV instead of D1 | A second storage product, a second binding, a second thing to mis-provision, and eventual consistency on a credential lookup. D1 is already bound and already in the test double. |
+| A Durable Object | Same objection, plus a new runtime primitive for a table with a handful of rows. |
+| Store the plaintext in D1 | Then a leaked Cloudflare API token with D1 Read hands over every machine's live credential. Hashing costs one digest per request and removes that entirely. |
+| Full-scan the registry and constant-time-compare every row | Genuinely defensible, and the runner-up. Rejected because the point was to stop being O(2): reading every row on every request re-introduces a size dependency in the one place this change exists to remove one. The indexed lookup leaks nothing — the index is fed SHA-256(presented), so steering a probe at a stored digest is a chosen-prefix preimage attack. |
+| `POST /enrol` on the Worker | Any valid token could then enrol a machine, growing a stolen token's blast radius from "append rows as myself" to "mint myself a second identity". |
+| `POST /revoke` on the Worker | Worse: a stolen token could take every other Mac offline. |
+
+Enrolment and revocation go through the D1 REST API instead, which needs the
+Cloudflare API token — the credential that can already destroy the database.
+
+What it bought: a machine can only ever enrol its own id, and only from the
+machine itself, so the silent-misattribution failure the slot detection existed
+to prevent is not merely detected but unconstructible. Cloudflare stops holding
+a live credential it never needed. Revocation is one `UPDATE` rather than a
+`wrangler secret put`. And the Worker's only binding is `DB`, so an upload can
+no longer silently delete anything.
+
+The migration cost was zero: the cloud database was empty (0 intervals, 0
+machines) and the old token plaintexts were lost, so the two-slot model was
+deleted outright rather than migrated.

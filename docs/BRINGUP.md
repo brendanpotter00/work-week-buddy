@@ -285,76 +285,66 @@ same designated requirement, so the grant survives.
 
 ## Part D — the cloud (once, from either Mac)
 
-### 10. Log in to Cloudflare — you, in a browser
+### 10. Set it up from the app
 
-```bash
-npx wrangler login
-```
+Menu-bar icon → **Set up cloud sync…** (it is on the tray whenever sync is
+unconfigured), or **Settings…** → **Cloud sync** → **Set up cloud sync…**.
 
-**This is the only step no script will do for you.** It authorises a real
-account that can be billed. Nothing automated gets to make that call.
+There is no `wrangler login` and no script. You need one thing: a Cloudflare API
+token with three permissions, all **Account** scope —
+`Workers Scripts · Edit`, `D1 · Edit`, and `Account Settings · Read` (optional).
+The wizard's first screen links straight to the page and lists all three; it also
+warns you that API tokens live under **your profile**, not on a Worker's page,
+which is where people look first.
 
-**You should see** a browser tab, an "Allow" button, and `Successfully logged
-in.`
+Paste the token and press **Check the token**. **Nothing is created yet** — a
+read-only probe runs, and the next screen tells you what is already on that
+account: an existing `wwb` database and how many intervals are in it, an existing
+Worker, and which Macs are already enrolled.
 
-**If you get `command not found: wrangler`**, you are running it without `npx`.
-Wrangler is a devDependency of this repo, not a global install.
+Press **Set it up**. In order: the database is created or adopted →
+`worker/schema.sql` is applied → **this Mac is enrolled** → the Worker is
+deployed → the workers.dev address is turned on → the Worker is asked whether it
+answers → sync is turned on here, with no relaunch.
 
-### 11. Everything else, in one command
+**You should see** every step ticked and *Sync is on.*
 
-```bash
-npm run bringup:cloud -- --this personal
-```
+**If the token is missing a permission**, the wizard says which one, by name, and
+tells you to edit the token you already have rather than making a new one. Do
+that — a new token would need all three set again.
 
-Substitute `--this work` if you are doing this from the work Mac. It creates the
-D1 database, applies `worker/schema.sql`, deploys the Worker, mints the two
-per-machine tokens, sets this Mac's machine id, and prints what to paste.
+**If `GET /health` takes a while on a brand-new address**, that is the
+workers.dev TLS certificate being issued. DNS resolves before TLS is ready —
+about two minutes on the first setup. The wizard waits it out rather than
+reporting it.
 
-**You should see**, in order: `logged in` → `created wwb (…)` → `schema applied`
-→ a `https://…workers.dev` URL → four secrets set → `GET /health → {"ok":true,…}`
-→ the two tokens.
-
-**Put both tokens in 1Password immediately.** They are printed exactly once.
-Cloudflare cannot read a secret back out, so a token you lose is a token you
-have to rotate, and rotating takes that Mac offline until you paste the new one.
-
-**If it stops at `0. Cloudflare account`**, go back to step 10.
-
-**If `GET /health` fails from the work Mac**, its proxy is blocking
-`workers.dev`. The Worker is fine; that Mac cannot reach it. `/health` is
-unauthenticated precisely so you can test this before any token is involved.
+**If nothing answers from the work Mac**, its proxy is blocking `workers.dev`.
+The Worker is fine; that Mac cannot reach it. `/health` is unauthenticated
+precisely so this can be tested before any token is involved.
 
 **Re-running this is safe.** An existing database is adopted rather than
-recreated, every statement in the schema is `CREATE TABLE IF NOT EXISTS`, and a
-secret that is already set is left alone.
+recreated, every statement in the schema is `CREATE TABLE IF NOT EXISTS`, and
+only *this* Mac's older tokens are retired — after the new one is stored.
 
-### 12. The machine-id caveat — read this one twice
+The API token is used for that one run and discarded: never written to a file,
+never logged, never returned over IPC. Delete it in the dashboard afterwards if
+you like.
 
-The Worker stamps `machine_id` **from the token**, never from the request body.
-That is what stops a stolen work token forging personal rows. The consequence is
-that **each token's machine id must be that Mac's `IOPlatformUUID`**.
+### 11. There is no machine-id step
 
-Get it wrong and *nothing fails*. Both Macs sync. Both mirrors converge. Every
-weekly total is correct. And the per-machine breakdown attributes your work to
-the wrong laptop — for ever, and with no error anywhere, because the app stamps
-the real UUID on the row it writes locally and the Worker stamps something else
-on the copy it stores.
+This used to be the caveat to read twice, because the Worker stamps `machine_id`
+**from the credential** and never from the request body — which is what stops a
+stolen token forging another machine's rows — and a mismatched id failed
+*silently*: both Macs synced, both mirrors converged, every weekly total was
+correct, and the per-machine breakdown credited the wrong laptop for ever.
 
-Step 11 read this Mac's UUID from `ioreg` and set it. The **other** Mac's is
-still unset until you run step 19. Until then the Worker stamps the literal
-string `personal` or `work` in place of a UUID.
+That cannot happen now. Each Mac **enrols itself**: it mints its own token,
+keeps the plaintext in its own Keychain, and records the SHA-256 next to its own
+`IOPlatformUUID`. A machine can only ever enrol its own id, and only from the
+machine itself. Nothing asks which Mac this is, and there is no token to carry.
 
-To check, on each Mac:
-
-```bash
-/usr/sbin/ioreg -rd1 -c IOPlatformExpertDevice | grep IOPlatformUUID
-```
-
-and set the other one without waiting:
-
-```bash
-npm run bringup:cloud -- --this personal --machine-id-work <THAT-MACS-UUID>
-```
+If `ioreg` cannot be read at all, setup **refuses to enrol** and says so, rather
+than filing your hours under a blank name.
 
 ---
 
@@ -417,22 +407,22 @@ makes them survive *rebuilds*, not what makes them transfer between machines.
 npm run doctor
 ```
 
-### 19. Tell the cloud who this Mac is
+### 19. Enrol this Mac
 
-```bash
-npx wrangler login          # this Mac has its own browser session
-npm run bringup:cloud -- --this work
-```
+Exactly what you did in step 10, on this Mac. Menu-bar icon → **Set up cloud
+sync…**, paste a Cloudflare API token — a new one, or the same one if it still
+exists — and press through.
 
-**You should see** `adopting the existing 'wwb'`, `TOKEN_PERSONAL already set —
-left alone`, `TOKEN_WORK already set — left alone`, and `MACHINE_ID_WORK set
-(<this Mac's UUID>)`.
+**There is nothing to copy from the first Mac.** No token in 1Password, no swap
+to get wrong.
 
-**If it says it created a database**, it is pointed at a different Cloudflare
-account. Check `npx wrangler whoami` on both Macs.
+**You should see** *Adopt the existing `wwb` database* with the interval count on
+the review screen, the first Mac listed under **Machines already enrolled**, and
+then every step ticked.
 
-**If it offers to print a token**, one of the secrets was missing and has just
-been replaced — the other Mac now needs the new one.
+**If it says it will CREATE a database**, it is pointed at a different Cloudflare
+account. Check which account the token belongs to.
+
 
 ---
 
@@ -449,7 +439,11 @@ Both go in through one IPC call, `wwb:sync:setConfig`, and take effect without a
 relaunch. The token is write-only: the renderer can ask whether one exists and
 can never read it back.
 
-### 21. Paste both halves into Settings
+### 21. Entering them by hand, if you ever have to
+
+**Normally you never do this.** Step 10 stores both halves for you. The fields
+exist for two cases: a Keychain that refused to store the token — setup shows it
+once, so it can be pasted back — and a URL that needs correcting.
 
 Open the settings window. There are three routes and they all land in the same
 place:
@@ -459,19 +453,21 @@ place:
 - the **gear** at the top right of the dashboard
 - **⌘,** while any window is focused
 
-In **Cloud sync**:
+In **Cloud sync**, open **Enter them by hand**:
 
-1. Paste the **Worker URL** from step 20. A URL that is not a URL is rejected
-   next to the field, before anything is written.
-2. Paste **this Mac's token** — the one for *this* laptop. Step 20 printed one
-   per Mac; swapping them files every hour under the other machine, and that
-   mistake is invisible afterwards.
+1. Paste the **Worker URL**. A URL that is not a URL is rejected next to the
+   field, before anything is written.
+2. Paste **this Mac's token**. It is 44 characters ending in `=`. A Cloudflare
+   API token is 40 characters with no padding, is only used during setup, and is
+   never stored — the app warns if one is pasted here.
 3. Press **Test connection** *before* Save. It calls the Worker's
    unauthenticated `/health` and then one authenticated read, so you get one of
-   three answers rather than silence:
+   four answers rather than silence:
    - *reached the Worker and the token was accepted* — go ahead and Save.
    - *reachable but rejected this token* — the URL is right and the token is
-     wrong. Usually the two tokens are the wrong way round.
+     not in any live registry row: wrong token, or that Mac was revoked.
+   - *no machine registry yet* — the Worker is running but its schema was never
+     applied. Run setup again; it applies the schema and changes nothing else.
    - *could not reach …* — the URL is wrong, the Worker is not deployed, or, on
      the work Mac, the proxy is blocking `workers.dev`. That is exactly why
      `/health` needs no token.
@@ -509,7 +505,7 @@ and at launch; `pull()` runs after every successful flush.
 | Nothing at login | `npm run launch-agent status`. A plist pointing at a missing app is a login that does nothing. |
 | Sync silent | `npm run doctor`. Over 72 h silent is a hard red, not a warning. |
 | Right totals, wrong machine | Step 12. The machine ids are swapped or unset. |
-| A token leaked | `npm run bringup:cloud -- --this <this mac> --rotate work` (or `personal`). That Mac is offline until you paste the new token. |
+| A token leaked | Revoke that Mac on the wizard's review screen — it stops working on its next request. Then run setup on that Mac to enrol a fresh token. Its queued intervals are not lost; they wait in its outbox. Note that a leak of the *database* is not a leak of any credential: Cloudflare only ever held a SHA-256. |
 
 ## Reference
 

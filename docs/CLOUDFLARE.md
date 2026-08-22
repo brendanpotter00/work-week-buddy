@@ -1,17 +1,19 @@
 # Cloudflare — what is deployed, and how to work with it
 
-The cloud half of Work Week Buddy: one D1 database, one Worker, two tokens.
-Set up on 2026-08-20 against the account `brendanpotter00@gmail.com`.
+The cloud half of Work Week Buddy: one D1 database, one Worker, and a registry
+of however many Macs you have enrolled. Set up against the account
+`brendanpotter00@gmail.com`.
 
-**Setting this up from scratch is now a thing the app does** —
-Settings → Cloud sync → *Set up cloud sync…*, no terminal required. Jump to
+**Setting this up is a thing the app does** — the tray's *Set up cloud sync…*,
+or Settings → Cloud sync, no terminal required. Jump to
 [Setting it all up from the app](#setting-it-all-up-from-the-app). The rest of
 this page describes the cloud that setup produces and how to work with it.
 
-**No secrets in this file.** The two bearer tokens were printed once by
-`npm run bringup:cloud` and cannot be read back from Cloudflare. They live in
-1Password and, on each Mac, in the macOS Keychain via Electron `safeStorage`.
-If they are lost, rotate rather than hunt for them — see below.
+**No secrets in this file, and none in Cloudflare either.** Each Mac mints its
+own bearer token, keeps the plaintext in its own Keychain via Electron
+`safeStorage`, and sends Cloudflare only the SHA-256. A dump of the database
+therefore hands over nothing that can be presented as a credential. If a token
+is lost, run setup again on that Mac — there is nothing to hunt for.
 
 ---
 
@@ -23,6 +25,7 @@ If they are lost, rotate rather than hunt for them — see below.
 | Worker name | `wwb-sync` |
 | D1 database | `wwb` |
 | Account | `brendanpotter00@gmail.com` |
+| Machines | as many as you enrol — `machine_token` in D1, nothing hardcoded to two |
 | Cost | $0 — free plan, ~10 row-writes/day against a 100,000/day cap |
 
 The real database id lives in `worker/wrangler.generated.toml`, which is
@@ -64,17 +67,31 @@ curl -H "authorization: Bearer $WWB_TOKEN" \
 unset WWB_TOKEN
 ```
 
-`200` with a JSON body is healthy. `401` means the token is wrong — which is a
-different problem from an unreachable URL, and the app's **Test connection**
-button distinguishes them for exactly that reason.
+`200` with a JSON body is healthy. Three failures, three different problems,
+and the app's **Test connection** button distinguishes all of them:
+
+| Answer | Means |
+|---|---|
+| connection refused / TLS error | the URL is wrong, or the network is |
+| `401` | this token is in no live registry row — wrong token, or revoked |
+| `503 machine registry unavailable` | the Worker is running but the schema was never applied. Run setup again; it applies the schema and changes nothing else. |
 
 ## Turning sync on in the app
 
-Menu-bar icon → **Settings…** (or ⌘,) → **Cloud sync**. Paste the Worker URL and
-**that Mac's** token, press **Test connection**, then **Save**. No relaunch.
+Normally you never do this by hand — setup mints this Mac's token and stores it
+for you. The fields exist for two cases: a Keychain that refused to store the
+token (setup shows it once, so it can be pasted back), and a URL that needs
+correcting.
+
+Menu-bar icon → **Settings…** (or ⌘,) → **Cloud sync** → *Enter them by hand*.
 
 The URL is an ordinary setting in `settings.json`. The token is not: it goes
 through `safeStorage` into the Keychain and never touches a file.
+
+**The two credentials are not interchangeable.** This Mac's sync token is 44
+characters ending in `=`. A Cloudflare API token is 40 characters with no
+padding, is only used during setup, and is never stored. The app warns if one
+is pasted where the other belongs.
 
 ---
 
@@ -84,17 +101,20 @@ through `safeStorage` into the Keychain and never touches a file.
 cloud that already exists; this is how one comes into being, and it needs no
 terminal, no `wrangler login` and no Node toolchain.
 
-Menu-bar icon → **Settings…** → **Cloud sync** → **Set up cloud sync…**
+Menu-bar icon → **Set up cloud sync…** (it is on the tray menu whenever sync is
+unconfigured), or **Settings…** → **Cloud sync** → **Set up cloud sync…**. It
+opens its own window.
 
-It does exactly what `scripts/bringup-cloud.sh` does — adopt or create the `wwb`
-database, apply `worker/schema.sql`, deploy the Worker, turn on the workers.dev
-address, mint the two per-machine tokens, and store this Mac's half in the
-Keychain — over the Cloudflare REST API instead of wrangler. It is safe to run
-again: an existing database is adopted, and the other Mac's token is left alone
-unless you explicitly ask to replace it.
+It adopts or creates the `wwb` database, applies `worker/schema.sql`, **enrols
+this Mac**, deploys the Worker, turns on the workers.dev address, proves the
+Worker answers, and stores this Mac's token in the Keychain — over the
+Cloudflare REST API, no wrangler involved.
 
-The shell script still works and is still supported. See
-[If the app cannot do it](#if-the-app-cannot-do-it).
+It is safe to run again. An existing database is adopted, never duplicated; the
+Worker is redeployed with the same single `DB` binding; and only **this Mac's**
+older tokens are retired. No run has ever touched another Mac's credential.
+
+For a terminal escape hatch, see [If the app cannot do it](#if-the-app-cannot-do-it).
 
 ## The one thing you have to do by hand: make an API token
 
@@ -133,55 +153,72 @@ for API keys rather than for tokens. Without it the wizard cannot list your
 accounts and asks for the **Account ID** instead — it is in the right-hand column
 of any account's overview page in the dashboard.
 
-## Which Mac is which — the app works it out
+## Nothing asks which Mac this is
 
-The Worker stamps `machine_id` from the token, so each token's machine id has to
-be the `IOPlatformUUID` of the Mac carrying it. Getting it wrong is silent: both
-Macs sync, both mirrors converge, every total is right, and every hour is filed
-under the wrong laptop.
+The Worker stamps `machine_id` from the credential, so each token has to belong
+to exactly one machine. Getting that wrong used to be possible and was silent:
+both Macs synced, both mirrors converged, every total was right, and every hour
+was filed under the wrong laptop.
 
-`scripts/bringup-cloud.sh` refuses to guess and makes you pass `--this`. The
-wizard cannot refuse — not asking is the point — so it works it out instead, and
-it tells you what it concluded and why.
+**It is no longer constructible.** Each install enrols *itself*: it mints a
+token, hashes it, and writes the hash next to its own `IOPlatformUUID`. A
+machine can only ever enrol its own id, and only from the machine itself. There
+is no slot to choose, no token to carry, and no question for the wizard to ask.
 
-**What makes that possible:** the wizard stores the machine ids as **`plain_text`
-bindings** rather than as secrets. Cloudflare will not read a `secret_text` value
-back, but it will read a `plain_text` one, and a machine id is not a secret —
-`worker/wrangler.toml` already said as much. The Worker cannot tell the
-difference (`env.MACHINE_ID_PERSONAL` is `env.MACHINE_ID_PERSONAL` either way),
-and the app gains the one fact that settles the question: whether
-`MACHINE_ID_PERSONAL` is *this* Mac's UUID or somebody else's.
+If `ioreg` cannot be read at all, setup **refuses to enrol** and says why —
+filing a year of hours under a blank name is worse than a setup that stopped.
 
-So:
+## The machine registry
 
-| What the app can see | What it concludes |
+`machine_token` in D1. One row per (machine, token):
+
+| Column | |
 |---|---|
-| `MACHINE_ID_PERSONAL` reads back as this Mac's UUID | this is the personal Mac |
-| `MACHINE_ID_PERSONAL` reads back as a different UUID, work is free | this is the work Mac |
-| Neither slot has a machine id | first Mac — takes `personal` |
-| Both slots taken by other Macs | **asks** |
+| `token_sha256` | lowercase hex SHA-256 of the bearer token. **Primary key.** |
+| `machine_id` | `IOPlatformUUID` — stamped onto every row this token writes |
+| `enrolled_at_ms` | when |
+| `revoked_at_ms` | `NULL` = live |
 
-On a deployment the **shell script** made, the ids are secrets and unreadable.
-There is still one sound inference: while `MACHINE_ID_WORK` is unset the Worker
-stamps the literal word `work` for that slot, so any UUID in the database must
-have come from the personal slot. If this Mac's UUID is on rows already, this
-Mac is personal — certainly, not probably. If it is not, the app **asks** rather
-than guesses. After one wizard run the ids are plain text and every later run on
-either Mac is exact.
+Three properties worth stating:
 
-Tokens are always secrets and always will be.
+- **Cloudflare never holds a token.** Only a digest. The plaintext exists in
+  that Mac's Keychain and nowhere else.
+- **No Worker route can write this table.** A `POST /enrol` would let any valid
+  token mint itself a second identity; a `POST /revoke` would let a stolen one
+  take every other Mac offline. Enrolment and revocation are D1 REST writes that
+  need the Cloudflare API token — the credential that can already delete
+  everything.
+- **Rows are never deleted.** Revocation sets `revoked_at_ms`. Same rule as
+  `work_interval`, for the same reason: who could write, and when, is history.
 
-## The other Mac's token
+There is deliberately **no label column**. A machine's name lives on the
+`machine` table, written by that machine's own heartbeat, and the wizard
+`LEFT JOIN`s for it. A second copy of a name is a rename that can half-fail.
 
-Shown **once**, at the end, with a copy button. Cloudflare cannot read a secret
-back, so that is genuinely the only time it exists outside Cloudflare. Put it in
-1Password, then paste it into the other Mac's Settings → Cloud sync.
+## Adding a second Mac
 
-Running the wizard again on this Mac does **not** mint a new one — it inherits
-the existing token untouched, so a re-run cannot knock the other Mac offline.
-If that token is lost, tick **Replace the other Mac's token too** on the
-confirmation screen; that Mac then stops syncing until the new one is pasted in,
-and its recorded hours wait in its local outbox in the meantime.
+Install the app there and run the same setup. It finds this database and this
+Worker and enrols itself. **There is nothing to copy across** — no token in
+1Password, no swap to get wrong.
+
+The one honest trade: the second Mac needs its own Cloudflare API-token paste
+rather than a Worker token handed to it. That is roughly the same effort and
+strictly safer — no long-lived secret in a password manager, and nothing that
+can be shown once and lost.
+
+The review screen lists the Macs already enrolled, so you can see what exists
+rather than guess.
+
+## Revoking a Mac
+
+On the wizard's review screen, next to that machine. It takes effect on that
+Mac's **next request**. Nothing it has already recorded is deleted — its hours
+stay in the cloud and on that Mac, and anything it has not yet sent waits in its
+outbox. To bring it back, run setup on that Mac again.
+
+There is no Revoke for the Mac you are standing on: running setup again already
+does that, and does it in the order that cannot leave this Mac offline (enrol
+the new token, store it, *then* retire the old one).
 
 ## Deploying the Worker without wrangler
 
@@ -189,12 +226,14 @@ The app ships the Worker's compiled source inside itself
 (`src/cloud/worker-bundle.generated.ts`, produced by `npm run bundle:worker`) and
 uploads it as a multipart script. Two details are load-bearing:
 
-- **An upload replaces every binding**, and the per-machine tokens are bindings.
-  The other Mac's token survives because the upload carries
-  `{"type":"inherit","name":"TOKEN_WORK"}`.
-- Every upload is sent with **`?bindings_inherit=strict`**. Cloudflare's own API
-  schema says: *"Without this, unresolvable inherit bindings are silently
-  dropped."* Silently dropping it is the other Mac offline behind a 200.
+- **An upload replaces every binding.** That used to be dangerous: per-machine
+  tokens *were* bindings, so an upload that forgot one deleted it. Credentials
+  now live in `machine_token`, so the Worker's only binding is `DB` and there is
+  nothing an upload can silently destroy.
+- Every upload is still sent with **`?bindings_inherit=strict`**. Cloudflare's
+  own API schema says: *"Without this, unresolvable inherit bindings are
+  silently dropped."* Nothing is inherited any more, but the flag costs nothing
+  and is the guarantee any future binding will want.
 
 If you edit anything under `worker/`, run `npm run bundle:worker`.
 `test/cloud/worker-bundle.test.ts` fails if you forget — it re-hashes
@@ -204,74 +243,58 @@ thing actually runs.
 
 ## If the app cannot do it
 
-`scripts/bringup-cloud.sh` is unchanged and still works. Use it when:
+There is no longer a `bringup-cloud.sh`. It was deleted, and the reasoning
+matters: it was the artefact that produced the two-slot model in the first place
+(`--this personal|work`, `--rotate`, `MACHINE_ID_PERSONAL`), and keeping it
+would mean implementing the enrolment protocol **twice** — insert-then-revoke
+ordering, hex validation, "revoke only after the Keychain commit" — in two
+languages, where drift means silent misattribution or a Mac offline.
 
-- you would rather not create an API token at all — the script uses
-  `wrangler login`'s browser OAuth session instead;
-- something about the account is unusual enough that the wizard stops;
-- you are debugging, and want to see each wrangler command.
+What replaces it is a recipe rather than a maintained script. `wrangler` stays
+in `devDependencies`, pinned, and `worker/wrangler.toml` remains the single
+source of the Worker's `name` and `compatibility_date` for
+`tools/bundle-worker.mjs` — but it is no longer on any automated path.
 
 ```bash
 npx wrangler login
-npm run bringup:cloud -- --this personal
+npx wrangler d1 create wwb                     # skip if it already exists
+
+# Put the real database_id into a gitignored copy of the config
+sed "s|^database_id = .*|database_id = \"$DB_ID\"|" worker/wrangler.toml \
+  > worker/wrangler.generated.toml
+
+npx wrangler d1 execute wwb --remote --file=worker/schema.sql \
+  --config worker/wrangler.generated.toml
+npx wrangler deploy --config worker/wrangler.generated.toml
+
+# Mint a token for THIS Mac and enrol it. The token never touches the network;
+# only its SHA-256 does.
+TOKEN="$(openssl rand -base64 32)"
+HASH="$(printf %s "$TOKEN" | shasum -a 256 | cut -d' ' -f1)"
+UUID="$(/usr/sbin/ioreg -rd1 -c IOPlatformExpertDevice \
+        | sed -n 's/.*"IOPlatformUUID" = "\([0-9A-Fa-f-]*\)".*/\1/p' | head -1)"
+npx wrangler d1 execute wwb --remote --config worker/wrangler.generated.toml \
+  --command "INSERT INTO machine_token (token_sha256, machine_id, enrolled_at_ms) \
+             VALUES ('$HASH','$UUID',$(date +%s)000);"
+
+echo "$TOKEN"   # paste into Settings → Cloud sync → Enter them by hand
 ```
 
-The two paths interoperate. The script sets machine ids as secrets and the app
-sets them as plain text; both are read the same way by the Worker, and neither
-disturbs the other's tokens.
-
-## One token per Mac — this matters
-
-Bring-up mints two, bound to machine slots. **Swapping them does not error.** Both
-Macs sync, both mirrors converge, every total is right — and the per-machine
-breakdown attributes every hour to the wrong laptop, silently.
-
-Related: `MACHINE_ID_WORK` is only set once setup has run *on* the work Mac,
-because it needs that machine's `IOPlatformUUID`. Until then the Worker stamps
-the literal word `work` instead of a UUID. Nothing breaks; only the per-machine
-split is wrong. **That state is the current one** — and it is also what lets the
-app work out that the personal Mac is the personal Mac, since a UUID in the
-database while `MACHINE_ID_WORK` is unset can only have come from the personal
-slot. Fix by running setup on the work Mac, or:
+Revocation is now genuinely a one-liner:
 
 ```bash
-/usr/sbin/ioreg -rd1 -c IOPlatformExpertDevice | grep IOPlatformUUID
-./scripts/bringup-cloud.sh --this personal --machine-id-work <UUID>
+npx wrangler d1 execute wwb --remote --config worker/wrangler.generated.toml \
+  --command "UPDATE machine_token SET revoked_at_ms = $(date +%s)000 \
+             WHERE machine_id = '<UUID>' AND revoked_at_ms IS NULL;"
 ```
 
-The app never mints a token for a slot it is not standing on, and never sets the
-other Mac's machine id from this Mac — the same refusal-to-guess the script has,
-for the same reason.
+## If a token leaks
 
-## Second Mac
+Revoke that machine — from the wizard, or with the `UPDATE` above. It stops
+working on its next request. Then run setup on that Mac to enrol a fresh token.
 
-In the app: **Settings… → Cloud sync → Set up cloud sync…**, paste an API token,
-and it will detect that this is the work Mac and set only that slot. See
-[Which Mac is which](#which-mac-is-which--the-app-works-it-out).
-
-Or, with the shell script:
-
-```bash
-npx wrangler login                        # its own browser session
-npm run bringup:cloud -- --this work
-```
-
-Expect `adopting the existing 'wwb'` and `TOKEN_* already set — left alone`.
-
-- **"created a database"** → it is pointed at a different Cloudflare account.
-  Check `npx wrangler whoami` on both.
-- **"offers to print a token"** → a secret was missing and has been replaced.
-  The other Mac now needs the new one.
-
-## Rotating a token
-
-```bash
-npm run bringup:cloud -- --this personal --rotate work
-```
-
-That Mac stops syncing until the new token is pasted into its Settings. Its
-queued intervals are not lost — they sit in the local outbox and flush when it
-can authenticate again.
+Because Cloudflare only ever held a hash, a leak of the *database* is not a leak
+of any credential.
 
 ## If the cloud disappears entirely
 

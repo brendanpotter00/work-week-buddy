@@ -92,7 +92,6 @@ work-week-buddy/
 │   ├── make-signing-cert.sh
 │   ├── install.sh
 │   ├── launch-agent.sh
-│   ├── bringup-cloud.sh            everything after `npx wrangler login`
 │   └── doctor.ts
 │
 ├── spike/run-m0.sh                 already committed
@@ -685,14 +684,24 @@ Every destination is overridable (`--dest`, `--app-src`, `--identity`,
 whole flow can be executed into `$TMPDIR` by a test. Nothing about the real
 install path is optional, and the defaults are the real paths.
 
-### `scripts/bringup-cloud.sh`
+### There is no `scripts/bringup-cloud.sh`
 
-Everything after `npx wrangler login`, in one command: create the D1 database
-(or adopt the existing one), apply `worker/schema.sql`, deploy the Worker, mint
-the two per-machine tokens, and print what to paste into the app. Idempotent —
-re-running it adopts rather than duplicates, and only rotates tokens when asked.
-It never runs `wrangler login` itself: that is a browser OAuth flow against a
-real, billable account, and it belongs to the human.
+It existed, and deleting it was the point rather than a side effect. The
+two-slot model — `--this personal|work`, `--rotate`, `MACHINE_ID_PERSONAL` —
+originated in that script, and `src/cloud/bringup.ts`'s header used to say "the
+shell script is the specification and this is the port of it". A script's
+convenience had become the product's data model.
+
+Keeping it would also have meant implementing the enrolment protocol **twice**:
+insert-then-revoke ordering, hex validation, and the "revoke only after the
+Keychain commit" rule, in bash as well as in TypeScript, where drift means
+silent misattribution or a Mac offline.
+
+Cloud setup is `src/cloud/` plus the wizard window. The terminal escape hatch is
+a documented `wrangler` recipe in `docs/CLOUDFLARE.md`, not a maintained script.
+`wrangler` stays in `devDependencies`, pinned — `worker/wrangler.toml` is still
+the single source of the Worker's `name` and `compatibility_date` for
+`tools/bundle-worker.mjs` — but it is on no automated path.
 
 ### `scripts/doctor.ts`
 
