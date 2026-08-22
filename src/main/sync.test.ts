@@ -607,8 +607,39 @@ describe("probeSyncConfig", () => {
     expect(r.reachable).toBe(true);
     expect(r.authorized).toBe(false);
     expect(r.status).toBe(401);
-    // The sentence has to name the mistake that is actually likely.
-    expect(r.error).toMatch(/each Mac gets its own/i);
+    // The sentence has to name the mistake that is actually likely, and the
+    // likely one changed: there is no swapping any more, because each Mac
+    // mints its own token and nothing is ever carried between them. What IS
+    // likely is the Cloudflare API token pasted into this field, so the
+    // sentence names the two SHAPES.
+    expect(r.error).toMatch(/44 characters ending in/i);
+    expect(r.error).toMatch(/Cloudflare API token, which is a different credential/i);
+    expect(r.error).not.toMatch(/swapping them/i);
+  });
+
+  it("says the schema was never applied when the Worker answers 503", async () => {
+    // A Worker deployed without its schema cannot read the registry. Reporting
+    // that as "your token was rejected" would send someone to re-copy a token
+    // that is perfect — the exact confusion this whole feature is about.
+    // `/health` still answers — the Worker is running and the URL is right.
+    // Only the authenticated read 503s, because that is the one that reads the
+    // registry.
+    const cloud = new FakeCloud();
+    const r = await probeSyncConfig(BASE_URL, TOKEN_A, {
+      fetchImpl: async (input, init) => {
+        const url = new URL(typeof input === "string" ? input : String(input));
+        return url.pathname === "/health"
+          ? await cloud.fetch(input, init)
+          : new Response("machine registry unavailable", { status: 503 });
+      },
+      now: () => NOW,
+    });
+    expect(r.ok).toBe(false);
+    expect(r.reachable).toBe(true);
+    expect(r.status).toBe(503);
+    expect(r.error).toMatch(/no machine registry yet/i);
+    expect(r.error).toMatch(/schema was never applied/i);
+    expect(r.error).not.toMatch(/rejected this token/i);
   });
 
   it("blames the network — and names the proxy — when nothing answers", async () => {

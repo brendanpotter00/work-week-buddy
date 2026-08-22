@@ -69,7 +69,7 @@ import {
   type WindowProbe,
 } from "./smoke-report";
 import { log } from "./log";
-import { closeAllWindows, showDashboard, showOnboarding } from "./windows";
+import { closeAllWindows, showCloudSetup, showDashboard, showOnboarding } from "./windows";
 
 /** Everything is bounded. A run that hangs is a run that fails, not one that waits. */
 const OVERALL_TIMEOUT_MS = 120_000;
@@ -368,16 +368,23 @@ export async function runSmoke(): Promise<number> {
 
   const dashboard = await showDashboard(settings.get("windowBackground"));
   const onboarding = await showOnboarding(settings.get("windowBackground"));
+  // The fourth window gets opened for real and measured like the others. It is
+  // never opened on first run in production — cloud sync is optional — but a
+  // window nothing measures is a window that can silently render the dashboard.
+  const cloudSetup = await showCloudSetup(settings.get("windowBackground"));
   await waitForView(dashboard, "dashboard");
   await waitForView(onboarding, "onboarding");
+  await waitForView(cloudSetup, "cloud-setup");
 
   const probes: WindowProbe[] = [
     await probe(dashboard, "dashboard", "degraded"),
     await probe(onboarding, "onboarding", "degraded"),
+    await probe(cloudSetup, "cloud-setup", "degraded"),
   ];
   if (shotDir !== null) {
     screenshots.push(await screenshot(dashboard, shotDir, "dashboard-degraded"));
     screenshots.push(await screenshot(onboarding, shotDir, "onboarding-degraded"));
+    screenshots.push(await screenshot(cloudSetup, shotDir, "cloud-setup-degraded"));
   }
 
   // ── the grant lands, and nothing reloads ────────────────────────────────

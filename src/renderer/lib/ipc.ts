@@ -29,6 +29,8 @@ import {
   type AppInfo,
   type CloudProbeRequest,
   type CloudProbeResult,
+  type CloudRevokeRequest,
+  type CloudRevokeResult,
   type CloudSetupProgress,
   type CloudSetupResult,
   type CloudSetupRunRequest,
@@ -110,6 +112,17 @@ export const ipc = {
   /** The whole bring-up. Progress arrives on `wwb:push:cloud-setup` meanwhile. */
   runCloudSetup: (req: CloudSetupRunRequest): Promise<CloudSetupResult> =>
     bridge().invoke("wwb:cloud:run", req),
+  /** Stop one Mac syncing. Never rejects — the result carries the reason. */
+  revokeMachine: (req: CloudRevokeRequest): Promise<CloudRevokeResult> =>
+    bridge().invoke("wwb:cloud:revoke", req),
+  /**
+   * Open Cloudflare's API-token page in the real browser.
+   *
+   * Takes no argument: main owns the URL. A plain `<a href>` would NOT work —
+   * `lockDownNavigation` preventDefaults any non-app origin on `will-navigate`,
+   * so a link here is inert and this has to be a button.
+   */
+  openTokenPage: (): Promise<void> => bridge().invoke("wwb:cloud:openTokenPage", undefined),
   renameMachine: (label: string): Promise<AppInfo> =>
     bridge().invoke("wwb:machine:rename", { label }),
   settings: (): Promise<UiSettings> => bridge().invoke("wwb:settings:get", undefined),
@@ -117,6 +130,8 @@ export const ipc = {
     bridge().invoke("wwb:settings:set", p),
   openDashboard: (): Promise<void> => bridge().invoke("wwb:window:openDashboard", undefined),
   openSettings: (): Promise<void> => bridge().invoke("wwb:window:openSettings", undefined),
+  /** Open the cloud-setup wizard in its own window. */
+  openCloudSetup: (): Promise<void> => bridge().invoke("wwb:window:openCloudSetup", undefined),
   /** Double-click on the title bar. See the channel's note in `ipc-types.ts`. */
   zoomWindow: (): Promise<void> => bridge().invoke("wwb:window:zoom", undefined),
 } as const;
@@ -218,12 +233,19 @@ export function useSettings(): Query<UiSettings> {
  * The sync configuration: a URL, whether a token exists, and why it is unusable
  * if it is. Never the token — `SyncConfigState` has no field for one.
  *
- * No push channel: main does not announce a config change, because the only
- * thing that can make one is this window, and `setSyncConfig` returns the new
- * state directly.
+ * SUBSCRIBED, since the wizard moved into its own window. It used to be enough
+ * to reload after `setSyncConfig`, because this window was the only thing that
+ * could change the config. Now a different window can finish a setup, and this
+ * card would otherwise sit there saying "not set up" for the rest of the
+ * session. `SyncConfigGateway.write()` is the single funnel both paths already
+ * pass through, so it pushes — which makes the manual Save path push too, and
+ * the dashboard update without a reload.
+ *
+ * Rejected: re-reading on window focus. Fragile, and stale in the common case
+ * where both windows are visible at once.
  */
 export function useSyncConfig(): Query<SyncConfigState> {
-  return useSnapshot<SyncConfigState>(() => ipc.syncConfig(), null, []);
+  return useSnapshot<SyncConfigState>(() => ipc.syncConfig(), "wwb:push:sync-config", []);
 }
 
 /**

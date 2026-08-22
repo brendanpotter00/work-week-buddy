@@ -37,6 +37,7 @@ import {
   wireWindowLifecycle,
 } from "./bootstrap";
 import { readCliMode } from "./cli";
+import { tokenCreateUrl } from "../cloud/token-url";
 import { createCloudSetupGateway } from "./cloud-setup";
 import { disposeIpc, pushAll, pushToAllWindows, registerIpcHandlers } from "./ipc";
 import { log, logToDirectory } from "./log";
@@ -49,6 +50,7 @@ import { TrayController } from "./tray";
 import {
   closeAllWindows,
   getOnboardingWindow,
+  showCloudSetup,
   showDashboard,
   showOnboarding,
   showSettings,
@@ -199,6 +201,10 @@ app.whenReady().then(async () => {
     isPackaged: app.isPackaged,
     vault: safeStorage,
     osVersion: process.getSystemVersion(),
+    // The wizard has its own window now, so a setup finishing in one window has
+    // to reach the Settings card in another. `write()` is the single funnel
+    // both the wizard's commit and the manual Save already pass through.
+    onSyncConfigChange: (state) => pushAll("wwb:push:sync-config", state),
   });
   log.boot("core services created");
   const runtime = services.runtime;
@@ -223,10 +229,12 @@ app.whenReady().then(async () => {
     tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
     openPrivacyPane: (which) => void shell.openExternal(privacyPaneUrl(which)),
     syncConfig: services.syncConfig,
-    // Everything `npm run bringup:cloud` does, over the Cloudflare REST API and
-    // from the Settings window. It reuses `services.syncConfig.write` for the
-    // last step, so finishing setup is the same event as pasting a URL and a
-    // token by hand — including reconfiguring the flusher with no relaunch.
+    // The whole bring-up, over the Cloudflare REST API and from the wizard
+    // window. It reuses `services.syncConfig.write` for the last step, so
+    // finishing setup is the same event as pasting a URL and a token by hand —
+    // including reconfiguring the flusher with no relaunch.
+    openTokenPage: () => void shell.openExternal(tokenCreateUrl()),
+    openCloudSetup: () => void showCloudSetup(settings.get("windowBackground")),
     cloudSetup: createCloudSetupGateway({
       machineId: services.machineId,
       syncConfig: services.syncConfig,
@@ -254,6 +262,11 @@ app.whenReady().then(async () => {
     showDashboard: () => void showDashboard(settings.get("windowBackground")),
     showOnboarding: () => void showOnboarding(settings.get("windowBackground")),
     showSettings: () => void showSettings(settings.get("windowBackground")),
+    showCloudSetup: () => void showCloudSetup(settings.get("windowBackground")),
+    // Reads the CONFIG, not the keychain: `read()` only asks whether a token
+    // exists, and the tray must never be the thing that puts a SecurityAgent
+    // dialog on screen.
+    syncConfigured: () => services.syncConfig.read().configured,
     openPrivacyPane: (which) => void shell.openExternal(privacyPaneUrl(which)),
     showErrorBox: (title, content) => dialog.showErrorBox(title, content),
     askJigglerPause: async () => {
