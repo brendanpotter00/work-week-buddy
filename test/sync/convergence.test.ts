@@ -190,9 +190,8 @@ describe("two machines and one cloud", () => {
     const personal = machine(cloud, "personal", TOKEN_A, MACHINE_A);
     const work = machine(cloud, "work", TOKEN_B, MACHINE_B);
 
-    // A machine whose local id is NOT the one the Worker stamps for its token —
-    // `MACHINE_ID_PERSONAL` never set, say, or set to the wrong Mac's UUID at
-    // bring-up. Every column converges except the one nobody would check.
+    // A machine whose local id is NOT the one its registry row carries. Every
+    // column converges except the one nobody would check.
     insertClosed(
       personal.db,
       makeRow({
@@ -213,10 +212,14 @@ describe("two machines and one cloud", () => {
       .get();
     expect(localSide).toMatchObject({ machine_id: "a-label-the-worker-has-never-heard-of" });
     expect(otherSide).toMatchObject({ machine_id: MACHINE_A });
-    // Hence T7.2's bring-up step: set MACHINE_ID_PERSONAL / MACHINE_ID_WORK to
-    // each Mac's IOPlatformUUID, the same value the app writes locally. Nothing
-    // in the sync layer can detect this on its own — the presence answer
-    // carries only id and seq — so it is a deploy-time invariant, checked here.
+    // Nothing in the sync layer can detect this on its own — the presence
+    // answer carries only id and seq — so it has to be prevented upstream, and
+    // it now is: enrolment writes the machine id from `services.machineId`, the
+    // same value the app stamps locally, and a Mac can only ever enrol itself.
+    // Setting it to another Mac's UUID is no longer a step anybody can get
+    // wrong, because it is no longer a step. This test keeps the invariant
+    // visible, and would fail loudly if enrolment ever took an id from
+    // anywhere but the machine it is running on.
   });
 
   it("attributes each row to the Mac that recorded it, from its token", async () => {
