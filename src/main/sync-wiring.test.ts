@@ -28,8 +28,8 @@ import type { DatabaseSync } from "node:sqlite";
 import type { PowerMonitor } from "electron";
 
 import { MIN, T0, makeHarness, rows, type Harness } from "../../test/helpers/runtime";
-import { BASE_URL, FakeCloud, MACHINE_WORK, TOKEN_WORK } from "../../test/sync/fake-cloud";
-import { TOKEN_PERSONAL } from "../../test/sync/fake-cloud";
+import { BASE_URL, FakeCloud, MACHINE_B, TOKEN_B } from "../../test/sync/fake-cloud";
+import { TOKEN_A } from "../../test/sync/fake-cloud";
 import { pendingCount } from "../store/intervals";
 import { setSyncState } from "../store/sync-state";
 import { SILENCE_MS } from "../sync/backup";
@@ -158,7 +158,7 @@ function realSync(
     make: (db) => {
       const resolved = resolveSyncConfig(
         over.configured === false ? "" : BASE_URL,
-        over.configured === false ? null : TOKEN_PERSONAL,
+        over.configured === false ? null : TOKEN_A,
       );
       const service = createSyncService({
         db,
@@ -255,12 +255,12 @@ describe("an interval that closes, end to end", () => {
 
     await cloud.fetch(`${BASE_URL}/intervals`, {
       method: "POST",
-      headers: { authorization: `Bearer ${TOKEN_WORK}`, "content-type": "application/json" },
+      headers: { authorization: `Bearer ${TOKEN_B}`, "content-type": "application/json" },
       body: JSON.stringify({
         rows: [
           {
             id: "from-the-work-mac",
-            machine_id: MACHINE_WORK,
+            machine_id: MACHINE_B,
             started_at_ms: T0 - 7_200_000,
             ended_at_ms: T0 - 3_600_000,
             duration_s: 3600,

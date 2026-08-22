@@ -23,11 +23,11 @@ import {
   upsertMachine,
 } from "../../src/store/sync-state";
 import { makeRow, openTestDb, t } from "../fakes/seed-db";
-import { BASE_URL, FakeCloud, MACHINE_WORK, TOKEN_PERSONAL, TOKEN_WORK } from "./fake-cloud";
+import { BASE_URL, FakeCloud, MACHINE_B, TOKEN_A, TOKEN_B } from "./fake-cloud";
 
 /** A client speaking for "the other Mac" — the work token, the work machine id. */
 function other(cloud: FakeCloud): WorkerClient {
-  return createWorkerClient({ baseUrl: BASE_URL, token: TOKEN_WORK, fetchImpl: cloud.fetch });
+  return createWorkerClient({ baseUrl: BASE_URL, token: TOKEN_B, fetchImpl: cloud.fetch });
 }
 
 /** Fill the cloud from "the other Mac", one POST per 200 rows. */
@@ -58,7 +58,7 @@ function local(cloud: FakeCloud): { db: DatabaseSync; client: WorkerClient } {
     db: openTestDb(),
     client: createWorkerClient({
       baseUrl: BASE_URL,
-      token: TOKEN_PERSONAL,
+      token: TOKEN_A,
       fetchImpl: cloud.fetch,
     }),
   };
@@ -82,7 +82,7 @@ describe("pull", () => {
       .prepare("SELECT id, machine_id, cloud_seq, synced_at_ms, last_signal_at_ms, ended_at_ms FROM work_interval ORDER BY id")
       .all() as Array<Record<string, number | string>>;
     expect(rows.map((r) => r.id)).toEqual(ids);
-    expect(rows.every((r) => r.machine_id === MACHINE_WORK)).toBe(true);
+    expect(rows.every((r) => r.machine_id === MACHINE_B)).toBe(true);
     expect(rows.every((r) => r.synced_at_ms === 4_242)).toBe(true);
     expect(rows.map((r) => r.cloud_seq)).toEqual([1, 2, 3, 4, 5]);
     // The cloud has no last_signal_at_ms column; ingest re-derives it, which is
@@ -249,7 +249,7 @@ describe("pull: machine labels", () => {
     expect(res.machinesError).toBeNull();
     expect(readMachines(db)).toEqual([
       {
-        machineId: MACHINE_WORK,
+        machineId: MACHINE_B,
         label: "The loft mini",
         osVersion: null,
         appVersion: "0.1.0",
@@ -260,7 +260,7 @@ describe("pull: machine labels", () => {
     // JOIN is what puts them together. Without the machine row this reads back
     // as a raw IOPlatformUUID.
     expect(byMachine(db, DEFAULT_POLICY, "UTC", t("2026-08-19T12:00:00Z"))[0]).toMatchObject({
-      machineId: MACHINE_WORK,
+      machineId: MACHINE_B,
       label: "The loft mini",
       hours: 1,
     });
@@ -278,7 +278,7 @@ describe("pull: machine labels", () => {
     // where the heartbeat has not gone out yet. Re-pulling the older cloud row
     // must not revert it.
     upsertMachine(db, {
-      machineId: MACHINE_WORK,
+      machineId: MACHINE_B,
       label: "The loft mini",
       lastSeenMs: pulledAt + 60_000,
     });
@@ -292,7 +292,7 @@ describe("pull: machine labels", () => {
   it("takes a NEWER cloud label over an older local one", async () => {
     const cloud = new FakeCloud();
     const { db, client } = local(cloud);
-    upsertMachine(db, { machineId: MACHINE_WORK, label: "stale", lastSeenMs: 1 });
+    upsertMachine(db, { machineId: MACHINE_B, label: "stale", lastSeenMs: 1 });
     await other(cloud).heartbeat({ label: "The loft mini" });
 
     await pull(db, client);
@@ -309,7 +309,7 @@ describe("pull: machine labels", () => {
     await seedCloud(cloud, 4);
     const { db } = local(cloud);
     const client = {
-      ...createWorkerClient({ baseUrl: BASE_URL, token: TOKEN_PERSONAL, fetchImpl: cloud.fetch }),
+      ...createWorkerClient({ baseUrl: BASE_URL, token: TOKEN_A, fetchImpl: cloud.fetch }),
       getMachines: () => Promise.reject(new Error("GET /machines → 404")),
     };
 

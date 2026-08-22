@@ -19,11 +19,11 @@ import { makeRow, t } from "../fakes/seed-db";
 import {
   BASE_URL,
   FakeCloud,
-  MACHINE_PERSONAL,
-  TOKEN_PERSONAL,
+  MACHINE_A,
+  TOKEN_A,
 } from "./fake-cloud";
 
-function clientFor(cloud: FakeCloud, token = TOKEN_PERSONAL) {
+function clientFor(cloud: FakeCloud, token = TOKEN_A) {
   return createWorkerClient({ baseUrl: BASE_URL, token, fetchImpl: cloud.fetch });
 }
 
@@ -66,7 +66,7 @@ describe("the Worker client", () => {
     // The row claims to be from the work Mac. The token says otherwise.
     await client.postIntervals([interval("a", 0, "forged-by-the-client")]);
 
-    expect(cloud.rows()[0]?.machine_id).toBe(MACHINE_PERSONAL);
+    expect(cloud.rows()[0]?.machine_id).toBe(MACHINE_A);
   });
 
   it("reports a row present on the second post too — a duplicate is a no-op", async () => {
@@ -121,7 +121,7 @@ describe("the Worker client", () => {
     expect(page.rows).toHaveLength(1);
     const row = page.rows[0]!;
     expect(row.id).toBe("a");
-    expect(row.machineId).toBe(MACHINE_PERSONAL);
+    expect(row.machineId).toBe(MACHINE_A);
     expect(row.startedAtMs).toBe(t("2026-08-17T09:00:00Z"));
     expect(row.endedAtMs).toBe(t("2026-08-17T09:00:30Z"));
     expect(row.durationS).toBe(30);
@@ -179,7 +179,7 @@ describe("the Worker client", () => {
 
     expect(
       cloud.d1.query<{ machine_id: string; label: string }>("SELECT * FROM machine"),
-    ).toMatchObject([{ machine_id: MACHINE_PERSONAL, label: "personal" }]);
+    ).toMatchObject([{ machine_id: MACHINE_A, label: "personal" }]);
   });
 
   it("answers a POST that a garbage collection interrupts", async () => {

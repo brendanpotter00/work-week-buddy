@@ -12,17 +12,17 @@ import {
   json,
   makeRow,
   makeRows,
-  MACHINE_PERSONAL,
-  MACHINE_WORK,
-  TOKEN_PERSONAL,
-  TOKEN_WORK,
+  MACHINE_A,
+  MACHINE_B,
+  TOKEN_A,
+  TOKEN_B,
   type PostResponse,
 } from "./harness.js";
 
 async function post(
   env: Parameters<typeof call>[0],
   rows: unknown[],
-  token = TOKEN_PERSONAL,
+  token = TOKEN_A,
 ): Promise<Response> {
   return call(env, { method: "POST", path: "/intervals", token, body: { rows } });
 }
@@ -33,18 +33,18 @@ describe("POST /intervals — machine_id is stamped, never trusted", () => {
     // The token is personal. The body insists the row belongs to the work Mac.
     const res = await post(
       env,
-      [makeRow("forgery", { machine_id: MACHINE_WORK })],
-      TOKEN_PERSONAL,
+      [makeRow("forgery", { machine_id: MACHINE_B })],
+      TOKEN_A,
     );
     expect(res.status).toBe(200);
 
     const stored = db.query<{ id: string; machine_id: string }>(
       "SELECT id, machine_id FROM work_interval",
     );
-    expect(stored).toEqual([{ id: "forgery", machine_id: MACHINE_PERSONAL }]);
+    expect(stored).toEqual([{ id: "forgery", machine_id: MACHINE_A }]);
     // And the forged value is nowhere in the table at all.
     expect(
-      db.query("SELECT 1 FROM work_interval WHERE machine_id = ?", MACHINE_WORK),
+      db.query("SELECT 1 FROM work_interval WHERE machine_id = ?", MACHINE_B),
     ).toEqual([]);
   });
 
@@ -53,17 +53,17 @@ describe("POST /intervals — machine_id is stamped, never trusted", () => {
     await post(
       env,
       [
-        makeRow("a", { machine_id: MACHINE_PERSONAL }),
+        makeRow("a", { machine_id: MACHINE_A }),
         makeRow("b", { machine_id: "somebody-else" }),
         makeRow("c", { machine_id: "" }),
       ],
-      TOKEN_WORK,
+      TOKEN_B,
     );
     expect(
       db.query<{ machine_id: string }>(
         "SELECT DISTINCT machine_id FROM work_interval",
       ),
-    ).toEqual([{ machine_id: MACHINE_WORK }]);
+    ).toEqual([{ machine_id: MACHINE_B }]);
   });
 
   it("stamps server_ms from the Worker clock, ignoring the client's value", async () => {
@@ -258,7 +258,7 @@ describe("POST /intervals — bodies", () => {
       const res = await call(env, {
         method: "POST",
         path: "/intervals",
-        token: TOKEN_PERSONAL,
+        token: TOKEN_A,
         ...opts,
       });
       expect(res.status, why).toBe(400);
@@ -306,7 +306,7 @@ describe("GET /intervals", () => {
       await call(env, {
         method: "GET",
         path: "/intervals?since=0",
-        token: TOKEN_PERSONAL,
+        token: TOKEN_A,
       }),
     );
     expect(all.rows.map((r) => r.seq)).toEqual([1, 2, 3, 4, 5]);
@@ -315,7 +315,7 @@ describe("GET /intervals", () => {
       await call(env, {
         method: "GET",
         path: "/intervals?since=3",
-        token: TOKEN_PERSONAL,
+        token: TOKEN_A,
       }),
     );
     expect(after.rows.map((r) => r.seq)).toEqual([4, 5]);
@@ -333,7 +333,7 @@ describe("GET /intervals", () => {
       const res = await call(env, {
         method: "GET",
         path: `/intervals${q}`,
-        token: TOKEN_PERSONAL,
+        token: TOKEN_A,
       });
       expect(res.status, q).toBe(200);
       const body = await json<{ rows: unknown[] }>(res);
@@ -344,17 +344,17 @@ describe("GET /intervals", () => {
   it("returns rows from BOTH machines — the pull is not scoped to the caller", async () => {
     // Each Mac holds the full merged history; that is backup layer 1.
     const { env } = harness();
-    await post(env, [makeRow("p")], TOKEN_PERSONAL);
-    await post(env, [makeRow("w")], TOKEN_WORK);
+    await post(env, [makeRow("p")], TOKEN_A);
+    await post(env, [makeRow("w")], TOKEN_B);
     const body = await json<{ rows: Array<{ machine_id: string }> }>(
       await call(env, {
         method: "GET",
         path: "/intervals",
-        token: TOKEN_PERSONAL,
+        token: TOKEN_A,
       }),
     );
     expect(body.rows.map((r) => r.machine_id).sort()).toEqual(
-      [MACHINE_PERSONAL, MACHINE_WORK].sort(),
+      [MACHINE_A, MACHINE_B].sort(),
     );
   });
 });

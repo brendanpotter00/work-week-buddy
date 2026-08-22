@@ -1,6 +1,8 @@
 import { describe, it, expect } from "vitest";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { ROUTES, lookupRoute } from "../src/routes.js";
-import { call, harness, TOKEN_PERSONAL } from "./harness.js";
+import { call, harness, TOKEN_A } from "./harness.js";
 
 /**
  * docs/DATA_MODEL.md: rows are never deleted or updated; exclusion is a
@@ -45,7 +47,7 @@ describe("the route table is the enforcement", () => {
       const res = await call(env, {
         method: "DELETE",
         path,
-        token: TOKEN_PERSONAL, // authenticated, so 404 means "no such route"
+        token: TOKEN_A, // authenticated, so 404 means "no such route"
       });
       expect(res.status, `DELETE ${path}`).toBe(404);
     }
@@ -55,7 +57,7 @@ describe("the route table is the enforcement", () => {
     const { env } = harness();
     for (const method of ["PUT", "PATCH"]) {
       for (const path of PATHS) {
-        const res = await call(env, { method, path, token: TOKEN_PERSONAL });
+        const res = await call(env, { method, path, token: TOKEN_A });
         expect(res.status, `${method} ${path}`).toBe(404);
       }
     }
@@ -66,7 +68,7 @@ describe("the route table is the enforcement", () => {
     await call(env, {
       method: "POST",
       path: "/intervals",
-      token: TOKEN_PERSONAL,
+      token: TOKEN_A,
       body: { rows: [{ ...row(), id: "keep-me" }] },
     });
     const before = db.query("SELECT * FROM work_interval");
@@ -75,7 +77,7 @@ describe("the route table is the enforcement", () => {
       const res = await call(env, {
         method,
         path: "/intervals",
-        token: TOKEN_PERSONAL,
+        token: TOKEN_A,
         body: { rows: [{ ...row(), id: "keep-me", duration_s: 99_999 }] },
       });
       expect(res.status, method).toBe(404);
@@ -92,7 +94,7 @@ describe("the route table is the enforcement", () => {
         await call(env, {
           method: "POST",
           path: "/fingerprint",
-          token: TOKEN_PERSONAL,
+          token: TOKEN_A,
         })
       ).status,
     ).toBe(404);
@@ -101,7 +103,7 @@ describe("the route table is the enforcement", () => {
         await call(env, {
           method: "GET",
           path: "/heartbeat",
-          token: TOKEN_PERSONAL,
+          token: TOKEN_A,
         })
       ).status,
     ).toBe(404);
@@ -116,15 +118,64 @@ describe("the route table is the enforcement", () => {
     expect(lookupRoute("GET", "/nope")).toBeUndefined();
   });
 
-  it("returns 500 rather than an unhandled rejection when the database fails", async () => {
+  it("returns 500 rather than an unhandled rejection when a HANDLER's query fails", async () => {
+    // The registry is intact, so the token authenticates; the table the handler
+    // reads is gone. That is a genuine 500 and must not be dressed up as
+    // anything else.
+    const { env, db } = harness();
+    db.raw.exec("DROP TABLE work_interval");
+    const res = await call(env, {
+      method: "GET",
+      path: "/fingerprint",
+      token: TOKEN_A,
+    });
+    expect(res.status).toBe(500);
+  });
+
+  it("returns 503, not 500, when the registry itself cannot be read", async () => {
+    // A dead database fails at authentication, before any handler is reached.
+    // 503 says "this deployment was never finished", which is the useful
+    // diagnostic; a 500 would say nothing and a 401 would say the wrong thing.
     const { env, db } = harness();
     db.close(); // every query now throws
     const res = await call(env, {
       method: "GET",
       path: "/fingerprint",
-      token: TOKEN_PERSONAL,
+      token: TOKEN_A,
     });
-    expect(res.status).toBe(500);
+    expect(res.status).toBe(503);
+  });
+});
+
+describe("no route can touch the machine registry", () => {
+  /**
+   * The registry is readable by `authenticate` and by nothing else. A route
+   * that wrote it would let a stolen bearer token mint itself a second identity
+   * or take another Mac offline — the blast radius this design exists to keep
+   * at "append rows as myself". Enrolment and revocation are D1 REST writes
+   * made with the Cloudflare API token, which can already destroy everything.
+   *
+   * Asserted over the source text, in the style of the tap-callback guard: a
+   * behavioural test can only prove the routes that exist today do not do it.
+   */
+  it("no handler's SQL mentions machine_token", () => {
+    const src = readFileSync(
+      fileURLToPath(new URL("../src/routes.ts", import.meta.url)),
+      "utf8",
+    );
+    expect(src).not.toContain("machine_token");
+  });
+
+  it("only auth.ts reads the registry, and it only SELECTs", () => {
+    const src = readFileSync(
+      fileURLToPath(new URL("../src/auth.ts", import.meta.url)),
+      "utf8",
+    );
+    expect(src).toContain("FROM machine_token");
+    // No write verb anywhere in the Worker's half of the registry contract.
+    for (const verb of ["INSERT INTO machine_token", "UPDATE machine_token", "DELETE FROM machine_token"]) {
+      expect(src, verb).not.toContain(verb);
+    }
   });
 });
 

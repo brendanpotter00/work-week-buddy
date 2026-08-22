@@ -3,38 +3,85 @@
  *
  * The token literals below are obvious nonsense on purpose. AGENTS.md is
  * explicit that the real database token never appears in a plist, a dotfile,
- * the asar, a test fixture or a commit — it goes from `openssl rand` straight
- * into `wrangler secret put` and the macOS Keychain. These strings exist only
- * so the comparison has two distinguishable inputs.
+ * the asar, a test fixture or a commit — it is minted by the app, goes straight
+ * into the macOS Keychain, and only its SHA-256 ever leaves the Mac. These
+ * strings exist only so the registry has distinguishable rows.
+ *
+ * ── Why the seed hashes with `node:crypto` ──────────────────────────────────
+ * The Worker hashes the presented token with WebCrypto; the app enrols using
+ * `node:crypto`. If those two ever disagreed, every machine would 401 forever
+ * with nothing in any log. Seeding the registry here with `node:crypto` while
+ * the Worker looks rows up with WebCrypto makes EVERY test in this directory a
+ * cross-implementation agreement check — a test that fails loudly instead of a
+ * property nobody re-verifies. auth.test.ts also pins it directly.
  */
 
+import { createHash } from "node:crypto";
 import worker from "../src/index.js";
 import { FakeD1 } from "./fake-d1.js";
 import type { Env } from "../src/types.js";
 
-export const TOKEN_PERSONAL = "not-a-real-token-personal-aaaaaaaaaaaaaaaa";
-export const TOKEN_WORK = "not-a-real-token-work-bbbbbbbbbbbbbbbbbbbb";
+export const TOKEN_A = "not-a-real-token-machine-a-aaaaaaaaaaaaaaaa";
+export const TOKEN_B = "not-a-real-token-machine-b-bbbbbbbbbbbbbbbb";
 
-/** Stand-ins for the two Macs' IOPlatformUUIDs. */
-export const MACHINE_PERSONAL = "00000000-0000-0000-0000-00000000AAAA";
-export const MACHINE_WORK = "00000000-0000-0000-0000-00000000BBBB";
+/** Stand-ins for two Macs' IOPlatformUUIDs. */
+export const MACHINE_A = "00000000-0000-0000-0000-00000000AAAA";
+export const MACHINE_B = "00000000-0000-0000-0000-00000000BBBB";
+
+/** SHA-256, lowercase hex — the format `machine_token.token_sha256` stores. */
+export function sha256HexNode(s: string): string {
+  return createHash("sha256").update(s, "utf8").digest("hex");
+}
+
+export interface Enrolment {
+  readonly token: string;
+  readonly machineId: string;
+  readonly revoked?: boolean;
+}
+
+export interface HarnessOptions {
+  /**
+   * Defaults to two live rows, one per machine. Two is not a limit any more —
+   * it is just the smallest number that can prove one token cannot stamp the
+   * other's id. Pass `[]` for an unenrolled deployment, or a longer list.
+   */
+  readonly enrolled?: readonly Enrolment[];
+  /** Drop the registry table, to model a Worker deployed without its schema. */
+  readonly noRegistry?: boolean;
+}
 
 export interface Harness {
   readonly db: FakeD1;
   readonly env: Env;
 }
 
-export function harness(overrides: Partial<Env> = {}): Harness {
+export function harness(opts: HarnessOptions = {}): Harness {
   const db = new FakeD1();
-  const env: Env = {
-    DB: db,
-    TOKEN_PERSONAL,
-    TOKEN_WORK,
-    MACHINE_ID_PERSONAL: MACHINE_PERSONAL,
-    MACHINE_ID_WORK: MACHINE_WORK,
-    ...overrides,
-  };
-  return { db, env };
+  const enrolled = opts.enrolled ?? [
+    { token: TOKEN_A, machineId: MACHINE_A },
+    { token: TOKEN_B, machineId: MACHINE_B },
+  ];
+
+  if (opts.noRegistry === true) {
+    db.raw.exec("DROP TABLE machine_token");
+  } else {
+    for (const e of enrolled) {
+      db.raw
+        .prepare(
+          `INSERT INTO machine_token
+             (token_sha256, machine_id, enrolled_at_ms, revoked_at_ms)
+           VALUES (?,?,?,?)`,
+        )
+        .run(
+          sha256HexNode(e.token),
+          e.machineId,
+          1_760_000_000_000,
+          e.revoked === true ? 1_760_000_001_000 : null,
+        );
+    }
+  }
+
+  return { db, env: { DB: db } };
 }
 
 export interface CallOptions {

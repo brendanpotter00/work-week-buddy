@@ -160,7 +160,7 @@ export class FakeD1 implements D1Database {
       .map((r) => plain<T>(r));
   }
 
-  count(table: "work_interval" | "machine"): number {
+  count(table: "work_interval" | "machine" | "machine_token"): number {
     const r = this.raw.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as {
       n: number;
     };

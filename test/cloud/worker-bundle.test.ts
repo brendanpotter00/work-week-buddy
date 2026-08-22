@@ -25,6 +25,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { createHash } from "node:crypto";
 
 import { FakeD1 } from "../../worker/test/fake-d1";
 import type { Env } from "../../worker/src/types";
@@ -114,17 +115,28 @@ describe("the embedded bundle is a working Worker", () => {
   let mod: WorkerModule;
   let env: Env;
 
+  /**
+   * Credentials are rows now, not bindings, so the bundle is driven against a
+   * seeded registry. The seed hashes with `node:crypto` while the bundle looks
+   * up with WebCrypto — so this is also the cross-implementation agreement
+   * check, running against the artefact that actually gets uploaded.
+   */
+  const TOKEN = "not-a-real-token-machine-a-aaaaaaaaaaaaaaaa";
+  const MACHINE = "MACHINE-A";
+
   beforeAll(async () => {
     const file = join(scratch, "worker-bundle.mjs");
     writeFileSync(file, WORKER_BUNDLE, "utf8");
     mod = (await import(pathToFileURL(file).href)) as unknown as WorkerModule;
-    env = {
-      DB: new FakeD1(),
-      TOKEN_PERSONAL: "not-a-real-token-personal",
-      TOKEN_WORK: "not-a-real-token-work",
-      MACHINE_ID_PERSONAL: "MACHINE-A",
-      MACHINE_ID_WORK: "MACHINE-B",
-    };
+
+    const db = new FakeD1();
+    db.raw
+      .prepare(
+        `INSERT INTO machine_token (token_sha256, machine_id, enrolled_at_ms)
+         VALUES (?,?,?)`,
+      )
+      .run(createHash("sha256").update(TOKEN, "utf8").digest("hex"), MACHINE, 1);
+    env = { DB: db };
   });
 
   it("is one self-contained ES module with a fetch handler", () => {
@@ -159,7 +171,7 @@ describe("the embedded bundle is a working Worker", () => {
       new Request("https://w/intervals", {
         method: "POST",
         headers: {
-          authorization: `Bearer ${env.TOKEN_PERSONAL}`,
+          authorization: `Bearer ${TOKEN}`,
           "content-type": "application/json",
         },
         body: JSON.stringify({
@@ -185,7 +197,7 @@ describe("the embedded bundle is a working Worker", () => {
 
     const pull = await mod.default.fetch(
       new Request("https://w/intervals?since=0", {
-        headers: { authorization: `Bearer ${env.TOKEN_PERSONAL}` },
+        headers: { authorization: `Bearer ${TOKEN}` },
       }),
       env,
     );
@@ -199,7 +211,7 @@ describe("the embedded bundle is a working Worker", () => {
       const res = await mod.default.fetch(
         new Request("https://w/intervals", {
           method,
-          headers: { authorization: `Bearer ${env.TOKEN_PERSONAL}` },
+          headers: { authorization: `Bearer ${TOKEN}` },
         }),
         env,
       );

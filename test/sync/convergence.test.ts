@@ -27,10 +27,10 @@ import { testFlusher } from "./flusher";
 import {
   BASE_URL,
   FakeCloud,
-  MACHINE_PERSONAL,
-  MACHINE_WORK,
-  TOKEN_PERSONAL,
-  TOKEN_WORK,
+  MACHINE_A,
+  MACHINE_B,
+  TOKEN_A,
+  TOKEN_B,
 } from "./fake-cloud";
 
 const DAY_MS = 86_400_000;
@@ -137,8 +137,8 @@ async function settle(a: Machine, b: Machine): Promise<void> {
 describe("two machines and one cloud", () => {
   it("converge on identical interval sets after three weeks apart", async () => {
     const cloud = new FakeCloud();
-    const personal = machine(cloud, "personal", TOKEN_PERSONAL, MACHINE_PERSONAL);
-    const work = machine(cloud, "work", TOKEN_WORK, MACHINE_WORK);
+    const personal = machine(cloud, "personal", TOKEN_A, MACHINE_A);
+    const work = machine(cloud, "work", TOKEN_B, MACHINE_B);
     const rnd = mulberry32(20260819);
 
     for (let step = 0; step < 200; step++) {
@@ -187,8 +187,8 @@ describe("two machines and one cloud", () => {
 
   it("needs the local machine id to equal the Worker's stamp, or attribution splits", async () => {
     const cloud = new FakeCloud();
-    const personal = machine(cloud, "personal", TOKEN_PERSONAL, MACHINE_PERSONAL);
-    const work = machine(cloud, "work", TOKEN_WORK, MACHINE_WORK);
+    const personal = machine(cloud, "personal", TOKEN_A, MACHINE_A);
+    const work = machine(cloud, "work", TOKEN_B, MACHINE_B);
 
     // A machine whose local id is NOT the one the Worker stamps for its token —
     // `MACHINE_ID_PERSONAL` never set, say, or set to the wrong Mac's UUID at
@@ -212,7 +212,7 @@ describe("two machines and one cloud", () => {
       .prepare("SELECT machine_id FROM work_interval WHERE id = 'misconfigured-0000'")
       .get();
     expect(localSide).toMatchObject({ machine_id: "a-label-the-worker-has-never-heard-of" });
-    expect(otherSide).toMatchObject({ machine_id: MACHINE_PERSONAL });
+    expect(otherSide).toMatchObject({ machine_id: MACHINE_A });
     // Hence T7.2's bring-up step: set MACHINE_ID_PERSONAL / MACHINE_ID_WORK to
     // each Mac's IOPlatformUUID, the same value the app writes locally. Nothing
     // in the sync layer can detect this on its own — the presence answer
@@ -221,24 +221,24 @@ describe("two machines and one cloud", () => {
 
   it("attributes each row to the Mac that recorded it, from its token", async () => {
     const cloud = new FakeCloud();
-    const personal = machine(cloud, "personal", TOKEN_PERSONAL, MACHINE_PERSONAL);
-    const work = machine(cloud, "work", TOKEN_WORK, MACHINE_WORK);
+    const personal = machine(cloud, "personal", TOKEN_A, MACHINE_A);
+    const work = machine(cloud, "work", TOKEN_B, MACHINE_B);
     record(personal, 0);
     record(work, 0);
 
     await settle(personal, work);
 
     const byId = new Map(cloud.rows().map((r) => [r.id, r.machine_id]));
-    expect(byId.get("personal-0000")).toBe(MACHINE_PERSONAL);
-    expect(byId.get("work-0000")).toBe(MACHINE_WORK);
+    expect(byId.get("personal-0000")).toBe(MACHINE_A);
+    expect(byId.get("work-0000")).toBe(MACHINE_B);
   });
 });
 
 describe("total vendor loss", () => {
   it("rebuilds the whole cloud from one mirror's outbox", async () => {
     const cloud = new FakeCloud();
-    const personal = machine(cloud, "personal", TOKEN_PERSONAL, MACHINE_PERSONAL);
-    const work = machine(cloud, "work", TOKEN_WORK, MACHINE_WORK);
+    const personal = machine(cloud, "personal", TOKEN_A, MACHINE_A);
+    const work = machine(cloud, "work", TOKEN_B, MACHINE_B);
     for (let i = 0; i < 12; i++) record(personal, i % 5);
     for (let i = 0; i < 9; i++) record(work, i % 5);
     await settle(personal, work);
@@ -267,8 +267,8 @@ describe("total vendor loss", () => {
 
   it("re-stamps rows to the rebuilding Mac — so rebuild from BOTH to keep attribution", async () => {
     const cloud = new FakeCloud();
-    const personal = machine(cloud, "personal", TOKEN_PERSONAL, MACHINE_PERSONAL);
-    const work = machine(cloud, "work", TOKEN_WORK, MACHINE_WORK);
+    const personal = machine(cloud, "personal", TOKEN_A, MACHINE_A);
+    const work = machine(cloud, "work", TOKEN_B, MACHINE_B);
     record(personal, 0);
     record(work, 0);
     await settle(personal, work);
@@ -283,7 +283,7 @@ describe("total vendor loss", () => {
 
     expect(cloud.ids()).toEqual(["personal-0000", "work-0000"]);
     expect(new Map(cloud.rows().map((r) => [r.id, r.machine_id])).get("work-0000")).toBe(
-      MACHINE_PERSONAL,
+      MACHINE_A,
     );
 
     // The fix is to rebuild from both Macs, each marking only its own rows:
@@ -299,8 +299,8 @@ describe("total vendor loss", () => {
 
     expect(new Map(cloud.rows().map((r) => [r.id, r.machine_id]))).toEqual(
       new Map([
-        ["personal-0000", MACHINE_PERSONAL],
-        ["work-0000", MACHINE_WORK],
+        ["personal-0000", MACHINE_A],
+        ["work-0000", MACHINE_B],
       ]),
     );
   });

@@ -35,18 +35,11 @@ export interface D1Database {
 }
 
 export interface Env {
-  readonly DB: D1Database;
-  /** 32 random bytes, base64. Set with `wrangler secret put`, never committed. */
-  readonly TOKEN_PERSONAL: string;
-  readonly TOKEN_WORK: string;
   /**
-   * The IOPlatformUUID each token stands for. The Worker stamps this onto every
-   * row, so a stolen token cannot forge the other machine's rows. Optional: an
-   * unset value falls back to the slot name, which keeps a fresh deploy
-   * coherent before the ids are known.
+   * The only binding. Credentials live in `machine_token` inside this database,
+   * not in the environment — see auth.ts. There are no secrets to set.
    */
-  readonly MACHINE_ID_PERSONAL?: string | undefined;
-  readonly MACHINE_ID_WORK?: string | undefined;
+  readonly DB: D1Database;
 }
 
 /** The presence answer. `seq` is what the client stores as `cloud_seq`. */

@@ -6,8 +6,8 @@ import {
   harness,
   json,
   makeRow,
-  TOKEN_PERSONAL,
-  TOKEN_WORK,
+  TOKEN_A,
+  TOKEN_B,
 } from "./harness.js";
 
 interface Fingerprint {
@@ -34,7 +34,7 @@ async function fetchFingerprint(env: Parameters<typeof call>[0]) {
   const res = await call(env, {
     method: "GET",
     path: "/fingerprint",
-    token: TOKEN_PERSONAL,
+    token: TOKEN_A,
   });
   expect(res.status).toBe(200);
   return json<Fingerprint>(res);
@@ -97,7 +97,7 @@ describe("GET /fingerprint", () => {
       await call(forward.env, {
         method: "POST",
         path: "/intervals",
-        token: TOKEN_PERSONAL,
+        token: TOKEN_A,
         body: { rows: [makeRow(id)] },
       });
     }
@@ -108,7 +108,7 @@ describe("GET /fingerprint", () => {
     await call(reverse.env, {
       method: "POST",
       path: "/intervals",
-      token: TOKEN_WORK,
+      token: TOKEN_B,
       body: { rows: [...ids].reverse().map((id) => makeRow(id)) },
     });
 
@@ -132,7 +132,7 @@ describe("GET /fingerprint", () => {
     await call(env, {
       method: "POST",
       path: "/intervals",
-      token: TOKEN_PERSONAL,
+      token: TOKEN_A,
       body: {
         rows: [
           makeRow("f1", { ended_at_ms: 1_700_000_000_000 }),
@@ -161,14 +161,14 @@ describe("GET /fingerprint", () => {
     await call(env, {
       method: "POST",
       path: "/intervals",
-      token: TOKEN_PERSONAL,
+      token: TOKEN_A,
       body: { rows: [makeRow("only")] },
     });
     const before = await fetchFingerprint(env);
     await call(env, {
       method: "POST",
       path: "/intervals",
-      token: TOKEN_PERSONAL,
+      token: TOKEN_A,
       body: { rows: [makeRow("second")] },
     });
     const after = await fetchFingerprint(env);
