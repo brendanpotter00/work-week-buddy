@@ -373,6 +373,31 @@ run ditto "$APP_SRC" "$APP_DEST"
 if [ "$DO_SIGN" = "1" ]; then run codesign --verify --strict --deep "$APP_DEST"; fi
 [ "$DRY_RUN" = "1" ] || ok "installed at $APP_DEST"
 
+# ── HIDE THE BUILD OUTPUT FROM SPOTLIGHT AND LAUNCHPAD ──────────────────────
+# LaunchServices registers every .app bundle it finds anywhere on disk, so the
+# copy we just built in release/ shows up beside the installed one under the
+# same name and the same icon. That is not cosmetic. A TCC grant binds to the
+# bundle's ON-DISK PATH, so launching the release/ copy from Spotlight gives an
+# app with no Input Monitoring and no Accessibility: it opens, looks entirely
+# normal, and records nothing. Silently, which is the only way this app can
+# fail badly.
+#
+# Unregister rather than delete: release/ is the build output and other scripts
+# (tools/smoke-packaged.sh) expect it to still be there. Unregistering only
+# removes it from the launcher's index, and re-running this script re-hides the
+# copy the next build creates.
+LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+unregister_stray() {
+  [ -e "$1" ] || return 0
+  "$LSREGISTER" -u "$1" 2>/dev/null || true
+}
+if [ "$DRY_RUN" = "1" ]; then
+  printf "  + lsregister -u \"%s\"\n" "$APP_SRC"
+elif [ -x "$LSREGISTER" ] && [ "$APP_DEST" = "$DEFAULT_APP_DEST" ]; then
+  unregister_stray "$APP_SRC"
+  ok "hid the build copy from Spotlight (only $APP_DEST is launchable)"
+fi
+
 # The designated requirement IS the identity that TCC remembers. Print it so the
 # two Macs can be compared when a grant mysteriously fails to transfer.
 if [ "$DRY_RUN" = "1" ]; then
