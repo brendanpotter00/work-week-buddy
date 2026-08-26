@@ -138,7 +138,7 @@ The always-on surface. The dashboard window may never be opened for a week at a 
 |---|---|---|
 | **D1** | With the jiggler ON and the owner actually typing, does that typing count as work? | **(a) No — jiggler ON means off the clock.** Chosen by the owner over the recommendation. |
 | **D2** | Keep the 5-minute read-only watchdog tick? | **Always on.** |
-| **D3** | What does the menu-bar title show? | **Hours this week.** Today and the current interval live in the dropdown. |
+| **D3** | What does the menu-bar title show? | **Hours today.** ↺ Revised — this was "hours this week" until the owner reversed it. The week total and the current interval live in the dropdown. |
 | **D4** | Is ~209 MB resident acceptable? | **Accept.** TypeScript is worth it. |
 
 ### D1, precisely — because "off the clock" has more than one implementation

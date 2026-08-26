@@ -1460,7 +1460,7 @@ Three independent layers. All three are required; each catches what the others m
 
 ### 3.1 The title rule
 
-**The title is "hours this week" (PRD D3), updated once a minute from MAIN while an interval is open, and frozen otherwise.**
+**The title is "hours today" (PRD D3, revised), updated once a minute from MAIN while an interval is open, and frozen otherwise.** It was "hours this week" until the owner reversed D3; the week total moved to the dropdown's "This week" line, which is still there.
 
 Three sub-rules, each of which is a bug if you get it wrong:
 
@@ -1470,7 +1470,7 @@ Three sub-rules, each of which is a bug if you get it wrong:
 
 2. **The open interval contributes nothing when it will not be countable.** If `jigglerOnForOpenInterval` and `countJigglerTime === 0`, add zero. Same filter as `v_countable`, applied to the row that does not exist yet.
 
-3. **"Frozen" means the minute timer does not exist**, not that it ticks and no-ops. `setInterval` is created on interval-open and cleared on interval-close. While frozen, a **one-shot week-rollover timer** is armed instead — otherwise an idle Monday 00:00 leaves last week's total on the menu bar until the next keystroke.
+3. **"Frozen" means the minute timer does not exist**, not that it ticks and no-ops. `setInterval` is created on interval-open and cleared on interval-close. While frozen, a **one-shot day-rollover timer** is armed instead — otherwise an idle midnight leaves yesterday's total on the menu bar until the next keystroke. Every midnight, not only Monday's: a today figure goes stale seven nights a week. It still covers the week, because Monday 00:00 is one of the midnights it stops at.
 
 Title format: `36.5h`, or `36.5h ⚠︎` when degraded, or `—h` before the first row exists. Always `tray.setTitle(text, { fontType: "monospacedDigit" })` — this is the menu bar's `tabular-nums`; without it the title jitters horizontally every minute.
 
@@ -1487,7 +1487,7 @@ Title format: `36.5h`, or `36.5h ⚠︎` when degraded, or `—h` before the fir
 | `rows-pulled` | the other Mac's history landed | unchanged |
 | `resume` | `powerMonitor` | re-armed from scratch |
 | `unlock` | `powerMonitor` | unchanged |
-| `week-rollover` | the one-shot timer | rollover timer re-armed for the next week |
+| `day-rollover` | the one-shot timer | rollover timer re-armed for the next local midnight |
 
 `RuntimeChange === "signal"` is **ignored by the tray**. At 300 events/second a mouse drag would otherwise redraw the menu bar 300 times a second.
 
@@ -1565,7 +1565,7 @@ export function creditedOpenMs(
   return Math.max(0, end - s.openedAtMs)
 }
 
-/** Hours this week for the tray title and the "This week" stat card. */
+/** Hours this week for the tray menu's "This week" line and the stat card. */
 export function hoursThisWeek(
   status: LiveStatus,
   policy: Pick<MetricsPolicy, "countJigglerTime" | "minIntervalS">,
@@ -1673,7 +1673,7 @@ import type { DegradedReason, LiveStatus } from "../shared/ipc-types"
 
 type RefreshReason =
   | "boot" | "interval-open" | "interval-close" | "minute" | "toggles"
-  | "permissions" | "tap-health" | "rows-pulled" | "resume" | "unlock" | "week-rollover"
+  | "permissions" | "tap-health" | "rows-pulled" | "resume" | "unlock" | "day-rollover"
 
 const ICON_DIR = app.isPackaged
   ? join(process.resourcesPath, "resources")
@@ -1751,7 +1751,7 @@ export class TrayController {
 
   /**
    * The minute timer exists ONLY while an interval is open. While it is frozen,
-   * a one-shot week-rollover timer keeps Monday 00:00 honest.
+   * a one-shot day-rollover timer keeps every local midnight honest.
    */
   private armTimers(status: LiveStatus, reason: RefreshReason): void {
     const open = status.state === "working"
@@ -1765,7 +1765,7 @@ export class TrayController {
       this.minuteTimer = null
     }
     if (!open && this.rolloverTimer === null) this.armRollover()
-    if (reason === "week-rollover") { this.clearRollover(); if (!open) this.armRollover() }
+    if (reason === "day-rollover") { this.clearRollover(); if (!open) this.armRollover() }
     if (reason === "resume") {
       // A timer that slept through the boundary is not to be trusted.
       this.clearRollover()
@@ -1777,7 +1777,7 @@ export class TrayController {
     const delay = Math.max(1000, nextIsoWeekStart(Date.now()) - Date.now())
     this.rolloverTimer = setTimeout(() => {
       this.rolloverTimer = null
-      this.refresh("week-rollover")
+      this.refresh("day-rollover")
     }, delay)                               // ≤ 7 days; no 32-bit overflow risk
   }
 

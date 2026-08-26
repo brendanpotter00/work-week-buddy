@@ -23,6 +23,8 @@ import {
 import { onWindowAllClosed } from "./bootstrap";
 import { TrayController, type TrayDeps } from "./tray";
 import { countIntervals } from "../store";
+import { seed } from "../../test/fakes/seed-db";
+import { hoursThisWeek, hoursToday } from "../shared/format";
 import { MIN, T0, fakeSettings, makeHarness, type Harness } from "../../test/helpers/runtime";
 import { privacyPaneUrl } from "./onboarding";
 import { traySessionLabel } from "../shared/stopwatch";
@@ -82,6 +84,68 @@ afterEach(() => {
 });
 
 describe("the title", () => {
+  it("is hours TODAY, not hours this week", async () => {
+    // The owner's words: "I want that to show how many hours I've worked that
+    // day, not for the whole week, at least in the top toolbar." This reverses
+    // PRD D3; `docs/DECISIONS.md` records the reversal.
+    //
+    // T0 is a Tuesday, so a Monday row is in the same ISO week but NOT today.
+    // That is the whole point of this fixture: the two numbers are 3 hours
+    // apart, so the title can only be read one way.
+    h = await makeHarness();
+    seed(h.db, [
+      {
+        id: "mon",
+        machineId: "machine-a",
+        start: "2023-11-13T09:00:00Z",
+        end: "2023-11-13T12:00:00Z",
+      },
+    ]);
+
+    tray = makeTray();
+    h.source.key(Date.now());
+    vi.advanceTimersByTime(5 * MIN);
+    h.source.key(Date.now());
+    // Past the idle timeout, so today's five minutes are a closed row too and
+    // the hours cache has been invalidated by a real write.
+    vi.advanceTimersByTime(16 * MIN);
+
+    const status = h.runtime.liveStatus();
+    const policy = fakeSettings().all();
+    expect(hoursToday(status, policy, Date.now())).toBe(0.1);
+    expect(hoursThisWeek(status, policy, Date.now())).toBe(3.1);
+
+    expect(instance().title).toBe("0.1h");
+    expect(instance().title).not.toBe("3.1h");
+    // And the hover text does not describe it as the week's.
+    expect(instance().tooltip).toBe("Work Week Buddy — 0.1h today");
+  });
+
+  it("keeps the week in the dropdown, beside Today", async () => {
+    // Changing the title is not permission to drop the week's total. It moved
+    // one glance further in; it did not go away.
+    h = await makeHarness();
+    seed(h.db, [
+      {
+        id: "mon",
+        machineId: "machine-a",
+        start: "2023-11-13T09:00:00Z",
+        end: "2023-11-13T12:00:00Z",
+      },
+    ]);
+
+    tray = makeTray();
+    h.source.key(Date.now());
+    vi.advanceTimersByTime(5 * MIN);
+    h.source.key(Date.now());
+    vi.advanceTimersByTime(16 * MIN);
+
+    const l = labels(tray);
+    expect(l.some((x) => x.startsWith("Today") && x.includes("0.1h"))).toBe(true);
+    expect(l.some((x) => x.startsWith("This week") && x.includes("3.1h"))).toBe(true);
+  });
+
+
   it("uses monospaced digits, or it jitters every minute", async () => {
     h = await makeHarness();
     tray = makeTray();
@@ -367,8 +431,9 @@ describe("the menu", () => {
   });
 });
 
-describe("the week-rollover timer", () => {
-  it("re-renders at Monday 00:00 so an idle Monday does not show last week's total", async () => {
+describe("the day-rollover timer", () => {
+  /** Five minutes of work, then idle past the timeout. Title reads 0.1h. */
+  async function idleAfterSixMinutes(): Promise<void> {
     h = await makeHarness();
     tray = makeTray();
     h.source.key(Date.now());
@@ -377,13 +442,43 @@ describe("the week-rollover timer", () => {
     vi.advanceTimersByTime(16 * MIN);
     expect(instance().title).toBe("0.1h");
     expect(tray.hasRolloverTimer).toBe(true);
+  }
 
-    // Sleep through the boundary with no input at all.
+  it("re-renders at midnight so an idle morning does not show yesterday's total", async () => {
+    // This is the timer the title change made load-bearing. The title is a
+    // TODAY figure now, so it goes stale every single midnight — not only
+    // Monday's, which is all the old week-rollover timer ever woke up for. A
+    // Mac left alone overnight has nothing else that would redraw it.
+    await idleAfterSixMinutes();
+
+    // 26 hours: enough to have crossed one local midnight in ANY zone, which
+    // is what `nextLocalMidnight()` schedules against — it reads the OS zone,
+    // exactly as the `nextIsoWeekStart()` it replaced did, while this harness
+    // runs the store on UTC. Not enough to reach a Monday: T0 is a Tuesday, so
+    // this lands on Wednesday and crosses no week boundary at all.
+    vi.advanceTimersByTime(26 * 60 * MIN);
+
+    // Yesterday's 0.1h is gone from the menu bar without anyone touching a key.
+    expect(instance().title).toBe("0.0h");
+    // And it is a DAY that rolled over, not a week: the same 0.1h is still
+    // sitting in "This week" one line down. If the timer had stayed weekly,
+    // these two would both still read 0.1h and nothing here would notice.
+    expect(labels(tray).some((x) => x.startsWith("This week") && x.includes("0.1h"))).toBe(true);
+    // And tomorrow's timer is armed, not left dangling.
+    expect(tray.hasRolloverTimer).toBe(true);
+  });
+
+  it("still carries the week over, because Monday 00:00 is one of its midnights", async () => {
+    // The week total moved to the dropdown; it did not stop needing to roll
+    // over. A daily timer is a superset of the weekly one it replaced, and
+    // this is the assertion that says so out loud.
+    await idleAfterSixMinutes();
+    expect(labels(tray).some((x) => x.startsWith("This week") && x.includes("0.1h"))).toBe(true);
+
     vi.advanceTimersByTime(8 * 24 * 60 * MIN);
 
-    // Last week's 0.1h is gone from the menu bar without anyone touching a key.
+    expect(labels(tray).some((x) => x.startsWith("This week") && x.includes("0.0h"))).toBe(true);
     expect(instance().title).toBe("0.0h");
-    // And the next week's timer is armed, not left dangling.
     expect(tray.hasRolloverTimer).toBe(true);
   });
 });

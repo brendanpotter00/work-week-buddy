@@ -67,7 +67,7 @@ A locally built app carries no quarantine attribute, so Gatekeeper never engages
 | Two machines active at once | union — counts once | ✔ |
 | Jiggler semantics | **(a) jiggler ON = off the clock** | ✔ — chosen over the recommendation; see PRD §6 for the exact implementation and the one accepted consequence |
 | Watchdog tick | always on, every 5 minutes | ✔ |
-| Menu-bar title | hours this week | ✔ |
+| Menu-bar title | **hours today** | ↺ — was "hours this week"; reversed by the owner. The week total was not lost: it is the "This week" line in the dropdown, beside "Today". |
 | Microphone detection | **in v1, unscoped** | ↺ — shipped scoped to meeting apps, then simplified: mic in use, held 60 s, is the signal. The allowlist, the ignore list and the running-process check are gone. See PRD §3.5 |
 | ~209 MB resident | accepted | ✔ |
 

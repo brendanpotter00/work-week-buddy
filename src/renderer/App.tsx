@@ -75,7 +75,6 @@ import { useResolvedTheme } from "@/renderer/lib/use-resolved-theme";
 import { useThemeMirror } from "@/renderer/lib/use-theme-mirror";
 import { DEFAULT_METRICS_POLICY, type DegradedReason } from "@/shared/ipc-types";
 import {
-  creditedOpenMs,
   formatCount,
   formatDuration,
   formatHeaderDate,
@@ -183,7 +182,6 @@ export function App(): React.ReactElement {
   // Armed only while an interval is open. §5.7.
   const nowMs = useNowMs(status?.state === "working");
 
-  const openMs = status ? creditedOpenMs(status, nowMs) : 0;
   const degraded = status?.degraded ?? [];
   const keyboardBroken = degraded.includes("keyboard_permission_missing");
 
@@ -267,11 +265,12 @@ export function App(): React.ReactElement {
             knows that a capped camera hold, a jiggled session and a broken tap
             are not the same "Working". The richer one won; this row keeps what
             it was the only source of.
-            The elapsed figure stays, and stays LABELLED: it is
-            `creditedOpenMs()` — what the close rule will actually write, ending
-            at the last real signal — while the stopwatch's digits are a wall
-            clock. They are allowed to differ by up to the idle timeout, and
-            naming this one is what stops that reading as a bug. */}
+            It no longer carries an elapsed figure either. It used to print
+            `creditedOpenMs()` under the label "counted", a second duration a
+            few pixels from the stopwatch's own digits, and the session length
+            is what the stopwatch is for. `creditedOpenMs()` is still what
+            every hours figure on this page is built on — it is simply not
+            printed twice. */}
         <section
           data-slot="status-strip"
           className="mt-4 flex items-center gap-3 rounded-lg border border-border bg-card px-4 py-3"
@@ -279,17 +278,6 @@ export function App(): React.ReactElement {
           <span className="flex items-center gap-1.5 text-sm text-muted-foreground">
             <Laptop className="size-3.5" />
             {status?.machineLabel || "this Mac"}
-          </span>
-          <Separator orientation="vertical" className="mx-1 !h-4" />
-          <span className="text-sm text-muted-foreground">
-            counted{" "}
-            <span
-              data-slot="credited-open"
-              className="font-mono tabular-nums"
-              title="This session, credited to your last real signal — what will be written when it closes."
-            >
-              {formatDuration(openMs)}
-            </span>
           </span>
           <Separator orientation="vertical" className="mx-1 !h-4" />
           <LastSignal lastSignalMs={status?.lastSignalMs ?? null} asOfMs={status?.asOfMs ?? 0} />
