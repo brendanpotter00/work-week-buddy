@@ -252,6 +252,13 @@ export interface CloudDeploymentState {
    * is a token that may not look. The screen says something different for each.
    */
   readonly zones: ReadonlyArray<{ id: string; name: string }>;
+  /**
+   * Hostnames already pointed at a Worker on this account, and which one.
+   *
+   * So the review screen can refuse a name that belongs to something else
+   * before anything is created, rather than after a deploy.
+   */
+  readonly workerDomains: ReadonlyArray<{ hostname: string; service: string }>;
 }
 
 export interface BringupDeps {
@@ -453,6 +460,10 @@ async function inspectDeployment(o: {
     // `[]` rather than throwing when the token may not read zones, and a
     // missing OPTIONAL permission must never present as a broken account.
     zones: (await api.listZones(o.accountId)).map((z) => ({ id: z.id, name: z.name })),
+    workerDomains: (await api.listWorkerDomains(o.accountId)).map((d) => ({
+      hostname: d.hostname,
+      service: d.service,
+    })),
   };
 }
 

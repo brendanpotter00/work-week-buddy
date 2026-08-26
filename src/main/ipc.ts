@@ -328,6 +328,8 @@ export function registerIpcHandlers(runtime: AppRuntime, deps: IpcDeps): void {
     error: "this build cannot set up cloud sync",
     ok: false,
     workerUrl: null,
+    altWorkerUrl: null,
+    addresses: [],
     unstoredToken: null,
   });
 

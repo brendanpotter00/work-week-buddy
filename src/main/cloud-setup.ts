@@ -138,6 +138,11 @@ export function createCloudSetupGateway(deps: CloudSetupDeps): CloudSetupGateway
                 machines: withThisMac(d.machines),
                 accountSubdomain: d.accountSubdomain,
                 rowsInCloud: d.rowsInCloud,
+                zones: d.zones.map((z) => ({ id: z.id, name: z.name })),
+                workerDomains: d.workerDomains.map((w) => ({
+                  hostname: w.hostname,
+                  service: w.service,
+                })),
               },
         error: result.error,
       };
@@ -220,6 +225,7 @@ export function createCloudSetupGateway(deps: CloudSetupDeps): CloudSetupGateway
         {
           accountId: req.accountId,
           ...(req.subdomain === undefined ? {} : { subdomain: req.subdomain }),
+          ...(req.customDomain === undefined ? {} : { customDomain: req.customDomain }),
         },
       );
 
@@ -228,7 +234,7 @@ export function createCloudSetupGateway(deps: CloudSetupDeps): CloudSetupGateway
       // `bringup.ts` from names and counts.
       log.info(
         `cloud setup ${outcome.ok ? "succeeded" : "did not finish"} ` +
-          `(url ${outcome.workerUrl ?? "none"})` +
+          `(url ${outcome.workerUrl ?? "none"}, also ${outcome.altWorkerUrl ?? "none"})` +
           (outcome.error === null ? "" : `: ${describeCloudError(outcome.error)}`),
       );
 
@@ -238,6 +244,8 @@ export function createCloudSetupGateway(deps: CloudSetupDeps): CloudSetupGateway
         error: outcome.error,
         ok: outcome.ok,
         workerUrl: outcome.workerUrl,
+        altWorkerUrl: outcome.altWorkerUrl,
+        addresses: outcome.addresses.map((a) => ({ ...a })),
         unstoredToken: outcome.unstoredToken,
       };
     },

@@ -47,6 +47,8 @@ import {
 const API_TOKEN = "V1lLNMKcJ9_Yz8Q3rTfB2wXpA6nE0dH4sG7uK1oM";
 
 const ACCOUNT = { id: "00000000000000000000000000000001", name: "Personal" };
+// `.test` is reserved by RFC 6761, so this can never name a domain that exists.
+const ZONE = { id: "00000000000000000000000000000010", name: "example.test" };
 const THIS_MAC = "00000000-0000-0000-0000-00000000AAAA";
 const OTHER_MAC = "00000000-0000-0000-0000-00000000BBBB";
 
@@ -81,7 +83,7 @@ function probeResult(over: Partial<CloudProbeResult> = {}): CloudProbeResult {
     tokenValid: true,
     tokenStatus: "active",
     accounts: [ACCOUNT],
-    scopes: { d1: "ok", workers: "ok", accountRead: "ok" },
+    scopes: { d1: "ok", workers: "ok", accountRead: "ok", zones: "ok" },
     deployment: {
       accountId: ACCOUNT.id,
       databaseExists: false,
@@ -89,6 +91,8 @@ function probeResult(over: Partial<CloudProbeResult> = {}): CloudProbeResult {
       machines: [],
       accountSubdomain: "someones-subdomain",
       rowsInCloud: null,
+      zones: [ZONE],
+      workerDomains: [],
     },
     error: null,
     ...over,
@@ -102,6 +106,16 @@ function runResult(over: Partial<CloudSetupResult> = {}): CloudSetupResult {
     error: null,
     ok: true,
     workerUrl: "https://wwb-sync.someones-subdomain.workers.dev",
+    altWorkerUrl: null,
+    addresses: [
+      {
+        url: "https://wwb-sync.someones-subdomain.workers.dev",
+        kind: "workers.dev",
+        reachable: true,
+        error: null,
+        ms: 12,
+      },
+    ],
     unstoredToken: null,
     ...over,
   };
@@ -349,7 +363,7 @@ describe("a token that is real but cannot do the job", () => {
     // THE REGRESSION TEST. He saw "Cloudflare did not accept that API token"
     // and re-copied a token that was perfectly fine.
     const f = await withScopes({
-      scopes: { d1: "missing", workers: "ok", accountRead: "ok" },
+      scopes: { d1: "missing", workers: "ok", accountRead: "ok", zones: "ok" },
     });
     const text = f.container.textContent ?? "";
     expect(text).toContain("Account · D1 · Edit");
@@ -362,7 +376,7 @@ describe("a token that is real but cannot do the job", () => {
 
   it("names the missing Workers permission the same way", async () => {
     const f = await withScopes({
-      scopes: { d1: "ok", workers: "missing", accountRead: "ok" },
+      scopes: { d1: "ok", workers: "missing", accountRead: "ok", zones: "ok" },
     });
     const text = f.container.textContent ?? "";
     expect(text).toContain("Account · Workers Scripts · Edit");
@@ -372,7 +386,7 @@ describe("a token that is real but cannot do the job", () => {
 
   it("blames the templates when the token has neither", async () => {
     const f = await withScopes({
-      scopes: { d1: "missing", workers: "missing", accountRead: "ok" },
+      scopes: { d1: "missing", workers: "missing", accountRead: "ok", zones: "ok" },
     });
     const text = f.container.textContent ?? "";
     expect(text).toContain("none of the permissions");
@@ -382,7 +396,7 @@ describe("a token that is real but cannot do the job", () => {
 
   it("creates nothing while a permission is missing", async () => {
     const f = await withScopes({
-      scopes: { d1: "missing", workers: "ok", accountRead: "ok" },
+      scopes: { d1: "missing", workers: "ok", accountRead: "ok", zones: "ok" },
     });
     expect(f.runs).toEqual([]);
   });
@@ -450,6 +464,8 @@ describe("the review screen", () => {
           machines: [],
           accountSubdomain: "someones-subdomain",
           rowsInCloud: null,
+          zones: [ZONE],
+          workerDomains: [],
           ...over,
         },
       }),
@@ -642,5 +658,316 @@ describe("progress", () => {
     });
     await runToDone(f);
     expect(f.container.textContent).toContain("Cloudflare is rate-limiting");
+  });
+});
+
+/**
+ * The Address section.
+ *
+ * One section on a screen that already existed — not a new step and not a
+ * sub-menu, which is what the owner complained about last time and why this
+ * wizard has its own window at all. The rule that everything below enforces:
+ * NOTHING in this section can stop the wizard. A bad name is a sentence, never
+ * a disabled button, and the address is simply not sent.
+ */
+describe("choosing a second address", () => {
+  async function toReview(over: Parameters<typeof mount>[0] = {}): Promise<Fixture> {
+    const f = mount(over);
+    await probeWith(f);
+    await waitFor(() => expect(panel(f.container).dataset["phase"]).toBe("review"));
+    return f;
+  }
+
+  const section = (f: Fixture): HTMLElement =>
+    f.container.querySelector('[data-slot="address-section"]') as HTMLElement;
+  const toggle = (): HTMLInputElement =>
+    document.querySelector('[data-slot="custom-domain-toggle"]') as HTMLInputElement;
+  const labelInput = (): HTMLInputElement =>
+    screen.getByLabelText(/name on the domain/i) as HTMLInputElement;
+
+  it("offers the account's domains, ticked, with the address spelled out", async () => {
+    const f = await toReview();
+    expect(section(f)).not.toBeNull();
+    // Ticked by DEFAULT, because there is something to prefill. A ticked box
+    // over an empty field would be a trap rather than a default.
+    expect(toggle().checked).toBe(true);
+    expect(
+      f.container.querySelector('[data-slot="custom-domain-preview"]')?.textContent,
+    ).toContain("https://wwb.example.test");
+    // And it says what the workers.dev address will be, because both go on.
+    expect(section(f).textContent).toContain("wwb-sync.someones-subdomain.workers.dev");
+  });
+
+  it("sends the address only when the box is ticked", async () => {
+    const f = await toReview();
+    await act(async () => {
+      fireEvent.click(toggle());
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /set it up/i }));
+    });
+    await waitFor(() => expect(f.runs).toHaveLength(1));
+    expect(f.runs[0]?.customDomain).toBeUndefined();
+  });
+
+  it("sends the label and the zone id when it came from the picker", async () => {
+    const f = await toReview();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /set it up/i }));
+    });
+    await waitFor(() => expect(f.runs).toHaveLength(1));
+    expect(f.runs[0]?.customDomain).toEqual({
+      label: "wwb",
+      zone: { id: ZONE.id, name: ZONE.name },
+    });
+  });
+
+  it("shows the reason a name is wrong, and does NOT disable Set it up", async () => {
+    const f = await toReview();
+    await act(async () => {
+      fireEvent.change(labelInput(), { target: { value: "not a label" } });
+    });
+    expect(
+      f.container.querySelector('[data-slot="custom-domain-error"]')?.textContent,
+    ).toMatch(/lowercase letters/);
+    // THE RULE. An address the owner cannot have is not a reason to refuse to
+    // set up sync.
+    const button = screen.getByRole("button", { name: /set it up/i }) as HTMLButtonElement;
+    expect(button.disabled).toBe(false);
+
+    await act(async () => {
+      fireEvent.click(button);
+    });
+    await waitFor(() => expect(f.runs).toHaveLength(1));
+    // Not sent. Setup goes ahead on the workers.dev address alone.
+    expect(f.runs[0]?.customDomain).toBeUndefined();
+  });
+
+  it("refuses the zone apex by refusing an empty name", async () => {
+    // Cloudflare would ACCEPT the apex. Taking over the address the owner's
+    // other things use is not a mistake this wizard gets to make for him.
+    const f = await toReview();
+    await act(async () => {
+      fireEvent.change(labelInput(), { target: { value: "" } });
+    });
+    expect(
+      f.container.querySelector('[data-slot="custom-domain-error"]')?.textContent,
+    ).toMatch(/will not take over the domain itself/);
+  });
+
+  it("says a name belongs to another Worker BEFORE anything is created", async () => {
+    const f = await toReview({
+      probe: probeResult({
+        deployment: {
+          accountId: ACCOUNT.id,
+          databaseExists: false,
+          workerExists: false,
+          machines: [],
+          accountSubdomain: "someones-subdomain",
+          rowsInCloud: null,
+          zones: [ZONE],
+          workerDomains: [{ hostname: "wwb.example.test", service: "somebody-elses-worker" }],
+        },
+      }),
+    });
+    const taken = f.container.querySelector('[data-slot="custom-domain-taken"]');
+    expect(taken?.textContent).toContain("somebody-elses-worker");
+    expect(taken?.textContent).toMatch(/will not touch it/);
+    // Still not disabled. Still runnable.
+    expect(
+      (screen.getByRole("button", { name: /set it up/i }) as HTMLButtonElement).disabled,
+    ).toBe(false);
+  });
+
+  it("falls back to a text field, with a reason, when it could not list domains", async () => {
+    const f = await toReview({
+      probe: probeResult({
+        scopes: { d1: "ok", workers: "ok", accountRead: "ok", zones: "missing" },
+        deployment: {
+          accountId: ACCOUNT.id,
+          databaseExists: false,
+          workerExists: false,
+          machines: [],
+          accountSubdomain: "someones-subdomain",
+          rowsInCloud: null,
+          zones: [],
+          workerDomains: [],
+        },
+      }),
+    });
+    // Unticked here: nothing could be prefilled, so nothing is assumed.
+    expect(toggle().checked).toBe(false);
+    await act(async () => {
+      fireEvent.click(toggle());
+    });
+    const zoneField = screen.getByLabelText(/your domain/i);
+    expect(zoneField.tagName).toBe("INPUT");
+    expect(
+      f.container.querySelector('[data-slot="zones-unavailable"]')?.textContent,
+    ).toMatch(/Zone · Zone · Read/);
+    // DATA, never an error banner. A missing optional permission must not use
+    // the words for a broken token.
+    expect(f.container.querySelector('[role="alert"]')).toBeNull();
+    expect(f.container.querySelector('[data-slot="scope-problem"]')).toBeNull();
+  });
+
+  it("sends the zone by NAME when it was typed, which needs no zone permission", async () => {
+    const f = await toReview({
+      probe: probeResult({
+        scopes: { d1: "ok", workers: "ok", accountRead: "ok", zones: "missing" },
+        deployment: {
+          accountId: ACCOUNT.id,
+          databaseExists: false,
+          workerExists: false,
+          machines: [],
+          accountSubdomain: "someones-subdomain",
+          rowsInCloud: null,
+          zones: [],
+          workerDomains: [],
+        },
+      }),
+    });
+    await act(async () => {
+      fireEvent.click(toggle());
+    });
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText(/your domain/i), {
+        target: { value: "example.test" },
+      });
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /set it up/i }));
+    });
+    await waitFor(() => expect(f.runs).toHaveLength(1));
+    expect(f.runs[0]?.customDomain).toEqual({ label: "wwb", zone: { name: "example.test" } });
+  });
+
+  it("says so plainly when the account has no domains at all", async () => {
+    const f = await toReview({
+      probe: probeResult({
+        deployment: {
+          accountId: ACCOUNT.id,
+          databaseExists: false,
+          workerExists: false,
+          machines: [],
+          accountSubdomain: "someones-subdomain",
+          rowsInCloud: null,
+          zones: [],
+          workerDomains: [],
+        },
+      }),
+    });
+    await act(async () => {
+      fireEvent.click(toggle());
+    });
+    // A different sentence from "add Zone: Read" — nothing to fix here.
+    expect(
+      f.container.querySelector('[data-slot="zones-unavailable"]')?.textContent,
+    ).toMatch(/no domains on it/);
+  });
+});
+
+describe("the Done screen reports every address", () => {
+  const bothAddresses = (over: Partial<CloudSetupResult> = {}): CloudSetupResult =>
+    runResult({
+      workerUrl: "https://wwb.example.test",
+      altWorkerUrl: "https://wwb-sync.someones-subdomain.workers.dev",
+      addresses: [
+        {
+          url: "https://wwb.example.test",
+          kind: "custom",
+          reachable: true,
+          error: null,
+          ms: 184,
+        },
+        {
+          url: "https://wwb-sync.someones-subdomain.workers.dev",
+          kind: "workers.dev",
+          reachable: false,
+          error: "that hostname does not resolve from this Mac — DNS could not find it",
+          ms: null,
+        },
+      ],
+      ...over,
+    });
+
+  it("lists both, says which answered, and marks the one in use", async () => {
+    // The sentence the work Mac has been missing. Before this the app could
+    // report the word "failed" and nothing else.
+    const f = mount({ run: bothAddresses() });
+    await runToDone(f);
+    const rows = Array.from(
+      f.container.querySelectorAll('[data-slot="address-row"]'),
+    ) as HTMLElement[];
+    expect(rows).toHaveLength(2);
+    expect(rows[0]?.dataset["reachable"]).toBe("yes");
+    expect(rows[0]?.textContent).toContain("184 ms");
+    expect(rows[0]?.textContent).toContain("in use");
+    expect(rows[1]?.dataset["reachable"]).toBe("no");
+    expect(rows[1]?.textContent).toContain("does not resolve from this Mac");
+  });
+
+  it("says a custom domain that is not answering YET is not a failure", async () => {
+    const f = mount({
+      run: bothAddresses({
+        workerUrl: "https://wwb-sync.someones-subdomain.workers.dev",
+        altWorkerUrl: "https://wwb.example.test",
+        addresses: [
+          {
+            url: "https://wwb.example.test",
+            kind: "custom",
+            reachable: false,
+            error: "the TLS handshake failed.",
+            ms: null,
+          },
+          {
+            url: "https://wwb-sync.someones-subdomain.workers.dev",
+            kind: "workers.dev",
+            reachable: true,
+            error: null,
+            ms: 90,
+          },
+        ],
+      }),
+    });
+    await runToDone(f);
+    // The run SUCCEEDED, so this must not read as an error.
+    expect(f.container.textContent).toContain("Sync is on.");
+    const banner = f.container.querySelector('[data-slot="alert-banner"]');
+    expect(banner?.getAttribute("data-variant")).not.toBe("error");
+    expect(f.container.textContent).toMatch(/is not answering yet/);
+    expect(f.container.textContent).toMatch(/Use this one instead/);
+  });
+
+  it("still lists the addresses when NOTHING answered", async () => {
+    const f = mount({
+      run: runResult({
+        ok: false,
+        error: "the Worker was deployed but none of its addresses answered from this Mac.",
+        workerUrl: null,
+        altWorkerUrl: null,
+        addresses: [
+          {
+            url: "https://wwb.example.test",
+            kind: "custom",
+            reachable: false,
+            error: "the connection was closed mid-request",
+            ms: null,
+          },
+          {
+            url: "https://wwb-sync.someones-subdomain.workers.dev",
+            kind: "workers.dev",
+            reachable: false,
+            error: "that hostname does not resolve from this Mac",
+            ms: null,
+          },
+        ],
+      }),
+    });
+    await runToDone(f);
+    // A failed run is exactly when this report is worth most: it is the only
+    // evidence anyone gets.
+    expect(f.container.querySelectorAll('[data-slot="address-row"]')).toHaveLength(2);
+    expect(f.container.textContent).toContain("Setup did not finish");
   });
 });

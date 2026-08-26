@@ -14,30 +14,53 @@
  */
 import * as React from "react";
 
+import { customDomainUrl, hostnameLabelError, zoneNameError } from "@/cloud/api";
 import { Field, inputClass } from "@/renderer/components/settings-ui";
 import { Button } from "@/renderer/components/ui/button";
 import { formatAgo } from "@/shared/format";
-import type { CloudDeployment, EnrolledMachine } from "@/shared/ipc-types";
+import type {
+  CloudDeployment,
+  CloudScopeState,
+  EnrolledMachine,
+} from "@/shared/ipc-types";
+
+/** What the Address section has collected. Held by `CloudSetup.tsx`. */
+export interface AddressChoice {
+  /** Ticked. Unticking is always allowed and never costs anything. */
+  enabled: boolean;
+  /** One DNS label, e.g. `wwb`. */
+  label: string;
+  /** The zone id when it came from the picker, "" when it was typed. */
+  zoneId: string;
+  zoneName: string;
+}
 
 export function ReviewStep({
   deployment,
+  zonesScope,
   machineLabel,
   subdomain,
+  address,
   busy,
   revoking,
   onSubdomain,
+  onAddress,
   onRevoke,
   onRun,
   onCancel,
 }: {
   deployment: CloudDeployment;
+  /** Whether the token could LIST domains — a picker or a text field. */
+  zonesScope: CloudScopeState;
   /** What this Mac calls itself, from `AppInfo`. Never sent to Cloudflare here. */
   machineLabel: string;
   subdomain: string;
+  address: AddressChoice;
   busy: boolean;
   /** The machine id a confirmation is currently open for, if any. */
   revoking: string | null;
   onSubdomain: (v: string) => void;
+  onAddress: (next: AddressChoice) => void;
   onRevoke: (machineId: string | null, confirm: boolean) => void;
   onRun: () => void;
   onCancel: () => void;
@@ -45,6 +68,10 @@ export function ReviewStep({
   const needsSubdomain = deployment.accountSubdomain === null;
   const ready = !needsSubdomain || subdomain.trim() !== "";
   const thisMac = deployment.machines.find((m) => m.isThisMac) ?? null;
+  const workersDevHost =
+    deployment.accountSubdomain === null
+      ? `wwb-sync.<subdomain>.workers.dev`
+      : `wwb-sync.${deployment.accountSubdomain}.workers.dev`;
 
   return (
     <div data-slot="review-step" className="flex flex-col gap-5">
@@ -80,6 +107,14 @@ export function ReviewStep({
             keychain, and record its fingerprint in the database.{" "}
             <b>Nothing is minted for any other Mac.</b>
           </li>
+          {address.enabled && addressProblem(address, deployment) === null ? (
+            <li data-slot="plan-custom-domain">
+              <b>Put it on {customDomainUrl(address.label, address.zoneName)}</b> as well as
+              the <code className="rounded bg-muted px-1 py-0.5">workers.dev</code> address.
+              Cloudflare adds one DNS record on {address.zoneName} for that name and changes
+              nothing else there.
+            </li>
+          ) : null}
         </ul>
       </section>
 
@@ -99,6 +134,14 @@ export function ReviewStep({
           the same way, with their own token.
         </p>
       </section>
+
+      <AddressSection
+        deployment={deployment}
+        zonesScope={zonesScope}
+        workersDevHost={workersDevHost}
+        address={address}
+        onAddress={onAddress}
+      />
 
       {deployment.machines.length === 0 ? null : (
         <section>
@@ -229,5 +272,202 @@ function MachineRow({
         </div>
       ) : null}
     </li>
+  );
+}
+
+/**
+ * Why this address cannot be sent yet, or null.
+ *
+ * The ONE rule of this section is that nothing in it can stop the wizard: `Set
+ * it up` is never disabled by an address problem. A bad label shows its
+ * sentence, the address is simply not sent, and setup goes ahead on the
+ * workers.dev address alone.
+ */
+function addressProblem(a: AddressChoice, deployment: CloudDeployment): string | null {
+  if (!a.enabled) return null;
+  const shape = hostnameLabelError(a.label) ?? zoneNameError(a.zoneName);
+  if (shape !== null) return shape;
+  return takenBy(a, deployment) === null ? null : "that hostname is already in use";
+}
+
+/** The OTHER Worker already answering at this hostname, if there is one. */
+function takenBy(a: AddressChoice, deployment: CloudDeployment): string | null {
+  const hostname = `${a.label.trim().toLowerCase()}.${a.zoneName.trim().toLowerCase()}`;
+  const match = deployment.workerDomains.find((d) => d.hostname === hostname);
+  return match === undefined || match.service === "wwb-sync" ? null : match.service;
+}
+
+/**
+ * "Also put it on a domain you own" — one section, no disclosure, no sub-panel.
+ *
+ * DELIBERATELY NOT A NEW SCREEN. The owner's complaint about the previous flow
+ * was "very confusing … I don't like how there was like a sub menu", and this
+ * whole wizard window exists because of it. So the address choice lives inside
+ * the review screen that already existed, and `STEP_ORDER` keeps its nine ids.
+ *
+ * The section degrades rather than disappears. With `Zone · Read` the domain is
+ * a picker; without it, a text field and a sentence saying why. The feature is
+ * available either way, because attaching is authorised by a permission the
+ * token already has.
+ */
+function AddressSection({
+  deployment,
+  zonesScope,
+  workersDevHost,
+  address,
+  onAddress,
+}: {
+  deployment: CloudDeployment;
+  zonesScope: CloudScopeState;
+  workersDevHost: string;
+  address: AddressChoice;
+  onAddress: (next: AddressChoice) => void;
+}): React.ReactElement {
+  const canPick = zonesScope === "ok" && deployment.zones.length > 0;
+  const labelProblem = address.enabled ? hostnameLabelError(address.label) : null;
+  const zoneProblem =
+    address.enabled && labelProblem === null ? zoneNameError(address.zoneName) : null;
+  const preview =
+    address.enabled && labelProblem === null && zoneProblem === null
+      ? customDomainUrl(address.label, address.zoneName)
+      : null;
+  const taken = preview === null ? null : takenBy(address, deployment);
+
+  return (
+    <section data-slot="address-section">
+      <h2 className="text-sm font-medium">Address</h2>
+      <p className="mt-1 text-xs text-muted-foreground">
+        <code className="rounded bg-muted px-1 py-0.5">{workersDevHost}</code> — Cloudflare
+        gives every Worker this one. Setup always turns it on.
+      </p>
+
+      <label className="mt-3 flex items-center gap-2 text-xs font-medium">
+        <input
+          type="checkbox"
+          data-slot="custom-domain-toggle"
+          checked={address.enabled}
+          onChange={(e) => onAddress({ ...address, enabled: e.target.checked })}
+        />
+        Also put it on a domain you own
+      </label>
+
+      {address.enabled ? (
+        <div className="mt-2 flex flex-col gap-2">
+          <div className="flex items-baseline gap-2">
+            <input
+              id="cloud-domain-label"
+              aria-label="Name on the domain"
+              type="text"
+              spellCheck={false}
+              autoComplete="off"
+              placeholder="wwb"
+              className={`${inputClass} max-w-[10rem]`}
+              value={address.label}
+              onChange={(e) => onAddress({ ...address, label: e.target.value })}
+            />
+            <span className="text-xs text-muted-foreground">.</span>
+            {canPick ? (
+              <select
+                id="cloud-domain-zone"
+                aria-label="Your domain"
+                className={inputClass}
+                value={address.zoneName}
+                onChange={(e) => {
+                  const zone = deployment.zones.find((z) => z.name === e.target.value);
+                  onAddress({
+                    ...address,
+                    zoneId: zone?.id ?? "",
+                    zoneName: zone?.name ?? e.target.value,
+                  });
+                }}
+              >
+                {[...deployment.zones]
+                  .sort((a, b) => a.name.localeCompare(b.name))
+                  .map((z) => (
+                    <option key={z.id} value={z.name}>
+                      {z.name}
+                    </option>
+                  ))}
+              </select>
+            ) : (
+              <input
+                id="cloud-domain-zone"
+                aria-label="Your domain"
+                type="text"
+                spellCheck={false}
+                autoComplete="off"
+                placeholder="your-domain.com"
+                className={inputClass}
+                value={address.zoneName}
+                // Typed, so there is no zone id — the attach carries `zone_name`
+                // instead, which needs no zone permission at all.
+                onChange={(e) => onAddress({ ...address, zoneId: "", zoneName: e.target.value })}
+              />
+            )}
+          </div>
+
+          {/* The confirmation, not the input. It is what makes a typo visible
+              here rather than as a DNS failure minutes later. */}
+          {preview === null ? null : (
+            <p data-slot="custom-domain-preview" className="text-xs text-muted-foreground">
+              → <code className="rounded bg-muted px-1 py-0.5">{preview}</code>
+            </p>
+          )}
+          {labelProblem === null ? null : (
+            <p data-slot="custom-domain-error" className="text-xs text-destructive">
+              {labelProblem}
+            </p>
+          )}
+          {zoneProblem === null ? null : (
+            <p data-slot="custom-domain-error" className="text-xs text-destructive">
+              {zoneProblem}
+            </p>
+          )}
+          {/* Said BEFORE anything is created. The probe already read the
+              account's Worker domains, so this costs nothing — and being
+              refused three minutes into a run is a much worse way to learn it.
+              Setup would refuse this hostname anyway: the documented attach has
+              no override flag at all. */}
+          {taken === null ? null : (
+            <p data-slot="custom-domain-taken" className="text-xs text-destructive">
+              <b>
+                {address.label}.{address.zoneName}
+              </b>{" "}
+              is already the address of another Worker ({taken}). Setup will not touch it.
+              Pick a different name.
+            </p>
+          )}
+
+          {zonesScope === "missing" ? (
+            <p data-slot="zones-unavailable" className="text-xs text-muted-foreground">
+              Setup could not list your domains — that needs{" "}
+              <code className="rounded bg-muted px-1 py-0.5">Zone · Zone · Read</code> on the
+              token, which is optional. Type the domain instead; it must already be on this
+              Cloudflare account.
+            </p>
+          ) : null}
+          {zonesScope === "unknown" ? (
+            <p data-slot="zones-unavailable" className="text-xs text-muted-foreground">
+              Setup could not check which domains are on this account. You can still type
+              one, or leave this unticked and use the{" "}
+              <code className="rounded bg-muted px-1 py-0.5">workers.dev</code> address.
+            </p>
+          ) : null}
+          {zonesScope === "ok" && deployment.zones.length === 0 ? (
+            <p data-slot="zones-unavailable" className="text-xs text-muted-foreground">
+              This Cloudflare account has no domains on it, so there is nothing to offer.
+              Setup will use the <code className="rounded bg-muted px-1 py-0.5">workers.dev</code>{" "}
+              address.
+            </p>
+          ) : null}
+        </div>
+      ) : null}
+
+      <p className="mt-2 text-xs text-muted-foreground">
+        Some work networks block <code className="rounded bg-muted px-1 py-0.5">workers.dev</code>{" "}
+        because everybody’s Workers share it. A domain you own usually gets through. Setup
+        turns on <b>both</b> and this Mac uses whichever one it can reach.
+      </p>
+    </section>
   );
 }

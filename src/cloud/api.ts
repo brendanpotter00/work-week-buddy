@@ -238,6 +238,16 @@ export interface CloudflareApi {
     hostname: string,
   ): Promise<WorkerDomain | null | undefined>;
   /**
+   * Every custom domain on the account, so the review screen can say "that name
+   * belongs to something else" BEFORE anything is created.
+   *
+   * Tolerant like `listZones`: 401/403 is an empty list, because not being able
+   * to warn early is not a reason to refuse to run. The attach itself still
+   * checks — that is the check that decides — and this one only buys the owner
+   * a better moment to find out.
+   */
+  listWorkerDomains(accountId: string): Promise<WorkerDomain[]>;
+  /**
    * `PUT /accounts/{id}/workers/domains` — attach one hostname to one script.
    *
    * THE DOCUMENTED, SINGLE-HOSTNAME FORM, DELIBERATELY. wrangler uses a bulk
@@ -650,6 +660,22 @@ export function createCloudflareApi(cfg: CloudflareApiConfig): CloudflareApi {
         // that silently stopped working cannot make a taken hostname look free.
         .find((d) => d.hostname === hostname);
       return match;
+    },
+
+    async listWorkerDomains(accountId) {
+      const { status, result } = await call(
+        "GET",
+        `/accounts/${enc(accountId)}/workers/domains`,
+        {
+          operation: "listing the addresses already on this account's Workers",
+          permission: PERMISSION.workersRead,
+          tolerate: [401, 403, 404],
+        },
+      );
+      if (status !== 200) return [];
+      return asArray(result)
+        .map((raw) => toWorkerDomain(raw, { hostname: "", service: "" }))
+        .filter((d) => d.hostname !== "");
     },
 
     async attachWorkerDomain(accountId, o) {

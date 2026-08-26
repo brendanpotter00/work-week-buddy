@@ -532,6 +532,12 @@ export interface CloudScopes {
   workers: CloudScopeState;
   /** Optional — it only decides whether setup can list accounts. */
   accountRead: CloudScopeState;
+  /**
+   * Optional, and it decides less than it looks like it does: whether the
+   * review screen shows a DOMAIN PICKER or a text field. Attaching a custom
+   * domain is authorised by Workers Scripts, which is already required.
+   */
+  zones: CloudScopeState;
 }
 
 /** One Mac already in the registry. */
@@ -563,6 +569,20 @@ export interface CloudDeployment {
   machines: EnrolledMachine[];
   accountSubdomain: string | null;
   rowsInCloud: number | null;
+  /**
+   * The domains on this account, for the address picker.
+   *
+   * EMPTY MEANS TWO THINGS and `CloudScopes.zones` separates them: `ok` with an
+   * empty list is an account with no domains on it; `missing` is a token that
+   * may not look. The screen says something different for each.
+   */
+  zones: Array<{ id: string; name: string }>;
+  /**
+   * Hostnames already pointed at a Worker on this account, and which Worker.
+   * Lets the review screen refuse a name that belongs to something else before
+   * anything is created.
+   */
+  workerDomains: Array<{ hostname: string; service: string }>;
 }
 
 /**
@@ -587,9 +607,26 @@ export interface CloudProbeResult {
   error: string | null;
 }
 
+/** One address setup turned on, and what it did when THIS Mac asked it. */
+export interface CloudAddressProbe {
+  url: string;
+  kind: "workers.dev" | "custom";
+  reachable: boolean;
+  /** Null when reachable. Plain words — never a token, never a response body. */
+  error: string | null;
+  ms: number | null;
+}
+
 export interface CloudSetupResult extends CloudSetupProgress {
   ok: boolean;
   workerUrl: string | null;
+  /**
+   * EVERY address, and what each one did from this Mac. Present on failure too:
+   * a run that could not reach anything is exactly when this is worth most.
+   */
+  addresses: CloudAddressProbe[];
+  /** The other live address. Diagnostics and a one-click switch; never synced to. */
+  altWorkerUrl: string | null;
   /**
    * This Mac's token, surfaced ONLY when the keychain refused to store it.
    *
@@ -611,11 +648,27 @@ export interface CloudProbeRequest {
   accountId?: string;
 }
 
+/** The second address, as the review screen collected it. */
+export interface CloudCustomDomainRequest {
+  /** One DNS label, e.g. `wwb`. Never a full hostname. */
+  label: string;
+  /**
+   * By id when setup could list the domains, by name when it could not. The
+   * by-name form is what makes `Zone · Read` optional.
+   */
+  zone: { id: string; name: string } | { name: string };
+}
+
 export interface CloudSetupRunRequest {
   apiToken: string;
   accountId: string;
   /** Only used when the account has no workers.dev subdomain at all. */
   subdomain?: string;
+  /**
+   * Also put the Worker on a domain the owner already has. ADDITIVE — the
+   * workers.dev address is turned on either way and never switched off.
+   */
+  customDomain?: CloudCustomDomainRequest;
 }
 
 /**
