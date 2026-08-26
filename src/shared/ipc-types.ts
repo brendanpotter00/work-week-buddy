@@ -429,6 +429,15 @@ export interface UiSettings {
    * exists (`SyncConfigState.tokenPresent`).
    */
   syncWorkerUrl: string;
+  /**
+   * The OTHER address the Worker answers on, when setup turned two on.
+   *
+   * NEVER USED TO SYNC. It exists so Settings can test both and offer to switch
+   * in one click when the one in use stops answering — so a Mac that lands on
+   * the wrong address is a click away from the right one rather than a re-run
+   * of setup. A URL, like `syncWorkerUrl`, and equally not a credential.
+   */
+  syncWorkerUrlAlt: string;
 }
 
 /**
@@ -439,6 +448,8 @@ export interface UiSettings {
  */
 export interface SyncConfigState {
   workerUrl: string;
+  /** The other address setup turned on, or "". Never used to sync. */
+  workerUrlAlt: string;
   tokenPresent: boolean;
   /** Both halves present and usable. This is the `configured` in the doctor. */
   configured: boolean;
@@ -478,6 +489,23 @@ export interface SyncTestResult {
   ms: number | null;
   /** Plain words. Never a token, never a raw response body. */
   error: string | null;
+  /**
+   * The same question asked of the OTHER address, when there is one.
+   *
+   * `/health` ONLY — unauthenticated. The token has already been proved against
+   * the address in use, and it is a property of the Worker rather than of the
+   * hostname, so asking twice buys nothing and costs a second authenticated
+   * round trip on a button somebody is waiting on.
+   *
+   * Null when no alternate is configured, which is the ordinary case.
+   */
+  alt: {
+    url: string;
+    reachable: boolean;
+    status: number | null;
+    ms: number | null;
+    error: string | null;
+  } | null;
 }
 
 // ── in-app cloud setup ──────────────────────────────────────────────────────
@@ -715,7 +743,13 @@ export interface InvokeContract {
   "wwb:sync:config": { req: void; res: SyncConfigState };
   /** Either half may be omitted. The token is write-only; it never comes back. */
   "wwb:sync:setConfig": {
-    req: { workerUrl?: string; token?: string };
+    /**
+     * `workerUrlAlt` is how the two addresses are SWAPPED — send both, with the
+     * values exchanged. Deliberately not a channel of its own: a swap is an
+     * ordinary configuration change and must go through the one funnel that
+     * rebuilds the flusher and tells every window.
+     */
+    req: { workerUrl?: string; workerUrlAlt?: string; token?: string };
     res: SyncConfigState;
   };
   /**

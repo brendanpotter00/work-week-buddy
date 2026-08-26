@@ -136,7 +136,12 @@ export function workerUrlError(raw: string): string | null {
   try {
     parsed = new URL(url);
   } catch {
-    return "That is not a URL. It looks like https://wwb-sync.<account>.workers.dev";
+    // Not only workers.dev any more: setup can put the Worker on a domain the
+    // owner already has, and a hint that names only one shape reads as a rule.
+    return (
+      "That is not a URL. It looks like https://wwb-sync.<account>.workers.dev, " +
+      "or your own domain if you set one up."
+    );
   }
   if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
     return `A Worker URL is http or https, not ${parsed.protocol.replace(":", "")}.`;

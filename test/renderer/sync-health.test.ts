@@ -17,6 +17,7 @@ import type { DoctorReport, SyncConfigState } from "@/shared/ipc-types";
 function config(over: Partial<SyncConfigState> = {}): SyncConfigState {
   return {
     workerUrl: "",
+    workerUrlAlt: "",
     tokenPresent: false,
     configured: false,
     error: null,
@@ -27,6 +28,7 @@ function config(over: Partial<SyncConfigState> = {}): SyncConfigState {
 
 const CONFIGURED = config({
   workerUrl: "https://wwb-sync.example.workers.dev",
+  workerUrlAlt: "",
   tokenPresent: true,
   configured: true,
 });

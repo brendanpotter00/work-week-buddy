@@ -27,6 +27,8 @@ import {
   FAKE_ACCOUNT_ID,
   FAKE_API_TOKEN,
   FAKE_BASE,
+  FAKE_ZONE_ID,
+  FAKE_ZONE_NAME,
   FakeCloudflare,
   THIS_MAC,
   sha256Hex,
@@ -288,5 +290,65 @@ describe("the Worker token, by contrast, is stored properly", () => {
     expect(Buffer.from(a, "base64")).toHaveLength(32);
     // `openssl rand -base64 32` produces exactly this.
     expect(a).toHaveLength(44);
+  });
+});
+
+/**
+ * The custom-domain path, held to the same rule.
+ *
+ * It makes three more Cloudflare calls than the plain run and writes one more
+ * setting, so "the token is borrowed and never kept" has to be proved on THIS
+ * path too rather than inferred from the other one.
+ */
+describe("a run with a custom domain keeps the same promise", () => {
+  const CUSTOM = { label: "wwb", zone: { id: FAKE_ZONE_ID, name: FAKE_ZONE_NAME } };
+
+  it("puts the API token in no file, on the path with the extra calls", async () => {
+    const cloud = new FakeCloudflare();
+    const { dir, gateway } = await wire(cloud);
+    const out = await gateway.run({
+      apiToken: FAKE_API_TOKEN,
+      accountId: FAKE_ACCOUNT_ID,
+      customDomain: CUSTOM,
+    });
+    expect(out.ok).toBe(true);
+    expect(allBytes(dir)).not.toContain(FAKE_API_TOKEN);
+  });
+
+  it("stores the second address as a URL, and it is not a credential", async () => {
+    const cloud = new FakeCloudflare();
+    const { dir, gateway, settings } = await wire(cloud);
+    await gateway.run({
+      apiToken: FAKE_API_TOKEN,
+      accountId: FAKE_ACCOUNT_ID,
+      customDomain: CUSTOM,
+    });
+
+    // Both addresses landed, and the custom one is the one in use.
+    expect(settings.get("syncWorkerUrl")).toBe(`https://wwb.${FAKE_ZONE_NAME}`);
+    expect(settings.get("syncWorkerUrlAlt")).toMatch(/^https:\/\/wwb-sync\./);
+    const json = readFileSync(join(dir, "settings.json"), "utf8");
+    expect(json).not.toContain(FAKE_API_TOKEN);
+    // A URL, and only a URL. Nothing token-shaped went into the new key.
+    const parsed = JSON.parse(json) as Record<string, unknown>;
+    expect(String(parsed["syncWorkerUrlAlt"])).toMatch(/^https:\/\//);
+  });
+
+  it("clears a stale second address rather than inheriting it", async () => {
+    // A run that turns on only one address must not leave the previous run's
+    // other address behind: it would be offered in Settings as a live fallback
+    // and would answer nothing.
+    const cloud = new FakeCloudflare();
+    const { gateway, settings } = await wire(cloud);
+    await gateway.run({
+      apiToken: FAKE_API_TOKEN,
+      accountId: FAKE_ACCOUNT_ID,
+      customDomain: CUSTOM,
+    });
+    expect(settings.get("syncWorkerUrlAlt")).not.toBe("");
+
+    await gateway.run({ apiToken: FAKE_API_TOKEN, accountId: FAKE_ACCOUNT_ID });
+    expect(settings.get("syncWorkerUrl")).toMatch(/^https:\/\/wwb-sync\./);
+    expect(settings.get("syncWorkerUrlAlt")).toBe("");
   });
 });

@@ -200,7 +200,20 @@ export interface SyncUnlockResult {
 
 export interface SyncConfigGateway {
   read(): SyncConfigState;
-  write(patch: { workerUrl?: string; token?: string }): Promise<SyncConfigState>;
+  write(patch: {
+    workerUrl?: string;
+    /**
+     * The other address the same Worker answers on. Remembered, never synced
+     * to — `resolveSyncConfig` does not look at it, and that is the point of
+     * it: a second address is a diagnostic and a one-click fallback, not a
+     * second thing the flusher has to reason about.
+     *
+     * `""` clears it, which is how a run that turned on only one address says
+     * so; omitting it leaves whatever was there alone.
+     */
+    workerUrlAlt?: string;
+    token?: string;
+  }): Promise<SyncConfigState>;
   /**
    * Try a candidate configuration and store NOTHING.
    *
@@ -250,6 +263,7 @@ export function createSyncConfigGateway(deps: {
     const resolved = resolveSyncConfig(workerUrl, token);
     return {
       workerUrl,
+      workerUrlAlt: deps.settings.get("syncWorkerUrlAlt"),
       tokenPresent: token !== null,
       configured: resolved.config !== null,
       error: resolved.error,
@@ -270,12 +284,23 @@ export function createSyncConfigGateway(deps: {
       const token = patch.token ?? deps.tokens.read();
       return await probeSyncConfig(workerUrl, token, {
         ...(deps.fetchImpl ? { fetchImpl: deps.fetchImpl } : {}),
+        // The other address is tested at the same time, unauthenticated. It
+        // cannot change the verdict either way — see `probeAlternate`.
+        altUrl: deps.settings.get("syncWorkerUrlAlt"),
       });
     },
 
     async write(patch) {
       if (patch.workerUrl !== undefined) {
         await deps.settings.set("syncWorkerUrl", patch.workerUrl.trim());
+      }
+      // `""` clears it — that is how a run with no second address says so —
+      // while omitting it leaves whatever was there alone. Swapping the two
+      // addresses over is just this call with both halves set, so it goes
+      // through the SAME funnel as every other change: `sync.reconfigure()`
+      // runs, and every window hears about it.
+      if (patch.workerUrlAlt !== undefined) {
+        await deps.settings.set("syncWorkerUrlAlt", patch.workerUrlAlt.trim());
       }
       // Throws when there is no keychain to encrypt with, which surfaces in the
       // renderer as a rejected invoke. Storing it anywhere weaker is the one

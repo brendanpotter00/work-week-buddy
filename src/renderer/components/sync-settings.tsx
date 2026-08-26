@@ -90,6 +90,8 @@ export function SyncSettings({
   const [tokenTyped, setTokenTyped] = React.useState(false);
   const [tokenShape, setTokenShape] = React.useState<CredentialShape>("unknown");
 
+  const hasAlt = (saved?.workerUrlAlt ?? "").trim() !== "";
+
   const [busy, setBusy] = React.useState<Busy>("idle");
   const [test, setTest] = React.useState<SyncTestResult | null>(null);
   const [error, setError] = React.useState<string | null>(null);
@@ -191,6 +193,40 @@ export function SyncSettings({
     );
   };
 
+  /**
+   * Swap the two addresses over, then re-test.
+   *
+   * Through `setSyncConfig`'s own path in main, so `sync.reconfigure()` runs
+   * and the push fires — the same event as any other configuration change.
+   */
+  const useAlternate = (): void => {
+    if (!hasAlt) return;
+    setBusy("saving");
+    setError(null);
+    setSavedNote(null);
+    setTest(null);
+    // Both halves, exchanged, through the ordinary write path. No new channel
+    // and no special case in main: a swap is a configuration change.
+    ipc
+      .setSyncConfig({
+        workerUrl: saved?.workerUrlAlt ?? "",
+        workerUrlAlt: saved?.workerUrl ?? "",
+      })
+      .then(
+      () => {
+        setBusy("idle");
+        setSavedNote("Switched. This Mac will sync through the other address from now on.");
+        config.reload();
+        reloadDoctor();
+        runTest();
+      },
+      (e: unknown) => {
+        setError(messageOf(e));
+        setBusy("idle");
+      },
+    );
+  };
+
   const flush = (): void => {
     setBusy("flushing");
     setError(null);
@@ -282,6 +318,13 @@ export function SyncSettings({
                 ? " · this Mac’s token is stored in the keychain."
                 : "."}
             </p>
+            {hasAlt ? (
+              <p data-slot="sync-alt-address" className="mt-1 text-xs text-muted-foreground">
+                Also set up:{" "}
+                <code className="rounded bg-muted px-1 py-0.5">{saved?.workerUrlAlt}</code> — not
+                in use.
+              </p>
+            ) : null}
             <div className="mt-3 flex flex-wrap items-center gap-2">
               <Button
                 size="sm"
@@ -289,7 +332,11 @@ export function SyncSettings({
                 onClick={runTest}
                 disabled={busy !== "idle" || urlProblem !== null}
               >
-                {busy === "testing" ? "Testing…" : "Test connection"}
+                {busy === "testing"
+                  ? "Testing…"
+                  : hasAlt
+                    ? "Test both addresses"
+                    : "Test connection"}
               </Button>
               <Button size="sm" variant="outline" onClick={flush} disabled={busy !== "idle"}>
                 {busy === "flushing" ? "Syncing…" : "Sync now"}
@@ -340,7 +387,7 @@ export function SyncSettings({
             <Field
               htmlFor="sync-url"
               label="Worker URL"
-              hint="Set up sync fills this in. It looks like https://wwb-sync.<account>.workers.dev"
+              hint="Set up sync fills this in. It is https://wwb-sync.<account>.workers.dev, or your own domain if you set one up."
               error={urlProblem}
             >
               <input
@@ -422,16 +469,34 @@ export function SyncSettings({
       </div>
 
       {test === null ? null : (
-        <p
-          data-slot="sync-test-result"
-          data-ok={String(test.ok)}
-          role="status"
-          className={`mt-3 text-xs ${test.ok ? "text-muted-foreground" : "text-destructive"}`}
-        >
-          {test.ok
-            ? `Reached the Worker and the token was accepted${test.ms === null ? "" : ` (${String(test.ms)} ms)`}.`
-            : (test.error ?? "The test failed with no reason given.")}
-        </p>
+        <>
+          <p
+            data-slot="sync-test-result"
+            data-ok={String(test.ok)}
+            role="status"
+            className={`mt-3 text-xs ${test.ok ? "text-muted-foreground" : "text-destructive"}`}
+          >
+            {testSentence(test)}
+          </p>
+          {/* The one action that is worth offering here, and only when the
+              evidence for it is on screen: the address in use did not answer
+              and the other one did. An inline Button, never a dialog —
+              nothing here may put a modal on a path the user is waiting on —
+              and trivially reversible, since pressing it again puts it back. */}
+          {test.alt?.reachable === true && !test.reachable ? (
+            <div className="mt-2">
+              <Button
+                size="sm"
+                variant="outline"
+                data-slot="sync-use-alt"
+                disabled={busy !== "idle"}
+                onClick={useAlternate}
+              >
+                Use {test.alt.url} instead
+              </Button>
+            </div>
+          ) : null}
+        </>
       )}
       {error === null ? null : (
         <p data-slot="sync-error" role="alert" className="mt-3 text-xs text-destructive">
@@ -445,6 +510,33 @@ export function SyncSettings({
       )}
     </SettingsCard>
   );
+}
+
+/**
+ * What the test button says, for all four outcomes.
+ *
+ * The two-address cases are the reason this is a function rather than a
+ * ternary. "Neither answered" and "the one you are using did not answer but
+ * the other one did" are completely different situations — the second is one
+ * click from fixed and must not read as a failure of the setup.
+ */
+function testSentence(test: SyncTestResult): string {
+  const ms = test.ms === null ? "" : ` (${String(test.ms)} ms)`;
+  if (test.ok) {
+    if (test.alt === null) return `Reached the Worker and the token was accepted${ms}.`;
+    return test.alt.reachable
+      ? `Reached both addresses and the token was accepted${ms}. ${test.alt.url} also answers.`
+      : `Reached ${test.alt.url === "" ? "the Worker" : "the address in use"} and the token ` +
+          `was accepted${ms}. ${test.alt.url} did not answer: ${
+            test.alt.error ?? "no reason given"
+          }. Nothing is wrong — this Mac is using the one that works.`;
+  }
+  const primary = test.error ?? "The test failed with no reason given.";
+  if (test.alt === null) return primary;
+  return test.alt.reachable
+    ? `${primary} ${test.alt.url} did answer.`
+    : `${primary} Neither address answered from this Mac. Nothing is lost — every hour ` +
+        `stays here until an upload is confirmed.`;
 }
 
 /**

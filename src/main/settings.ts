@@ -33,6 +33,15 @@ export interface MainSettings {
    */
   syncWorkerUrl: string;
   /**
+   * The OTHER address the same Worker answers on, when setup turned two on.
+   *
+   * Never used to sync — `resolveSyncConfig` does not look at it, deliberately.
+   * It is remembered so Settings can test it and offer to switch in one click,
+   * and so a run that had to fall back to the address this Mac could reach has
+   * not silently forgotten the one it could not.
+   */
+  syncWorkerUrlAlt: string;
+  /**
    * The last time the jiggler self-test ran, and what it said.
    *
    * NOT a preference — it is evidence, and it is the one thing in this file
@@ -63,6 +72,7 @@ export const SETTINGS_DEFAULTS: MainSettings = {
   countJigglerTime: DEFAULTS.countJigglerTime ? 1 : 0,
   graceS: 0,
   syncWorkerUrl: "",
+  syncWorkerUrlAlt: "",
   lastSelfTest: null,
 };
 

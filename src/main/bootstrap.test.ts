@@ -356,4 +356,58 @@ describe("the sync configuration gateway", () => {
     expect(state.tokenPresent).toBe(true);
     expect(state.error).toMatch(/not a URL/);
   });
+
+  it("remembers the second address without ever syncing to it", async () => {
+    const dir = tmp();
+    const { g, applied } = gateway(dir);
+    await g.write({
+      workerUrl: "https://wwb.example.test",
+      workerUrlAlt: "https://wwb-sync.example.workers.dev",
+      token: "not-a-real-token-aaaaaaaaaaaa",
+    });
+    expect(g.read().workerUrlAlt).toBe("https://wwb-sync.example.workers.dev");
+    // The live configuration is the ONE address. `resolveSyncConfig` does not
+    // look at the alternate, deliberately: a second address is a diagnostic and
+    // a one-click fallback, not a second thing the flusher reasons about.
+    expect(applied.at(-1)).toEqual({
+      baseUrl: "https://wwb.example.test",
+      token: "not-a-real-token-aaaaaaaaaaaa",
+    });
+  });
+
+  it("swaps the two addresses through the same funnel as any other change", async () => {
+    const dir = tmp();
+    const { g, applied } = gateway(dir);
+    await g.write({
+      workerUrl: "https://wwb.example.test",
+      workerUrlAlt: "https://wwb-sync.example.workers.dev",
+      token: "not-a-real-token-aaaaaaaaaaaa",
+    });
+
+    const swapped = await g.write({
+      workerUrl: "https://wwb-sync.example.workers.dev",
+      workerUrlAlt: "https://wwb.example.test",
+    });
+
+    expect(swapped.workerUrl).toBe("https://wwb-sync.example.workers.dev");
+    expect(swapped.workerUrlAlt).toBe("https://wwb.example.test");
+    // The flusher was rebuilt, which is the whole reason this goes through
+    // `write()` rather than around it.
+    expect(applied.at(-1)?.baseUrl).toBe("https://wwb-sync.example.workers.dev");
+    // And the token survived a write that did not carry one.
+    expect(swapped.tokenPresent).toBe(true);
+  });
+
+  it("clears the second address when asked to, and leaves it alone otherwise", async () => {
+    const dir = tmp();
+    const { g } = gateway(dir);
+    await g.write({ workerUrl: "https://a.example.test", workerUrlAlt: "https://b.example.test" });
+    // Omitted: untouched. A partial write must not blank a live fallback.
+    await g.write({ token: "not-a-real-token-aaaaaaaaaaaa" });
+    expect(g.read().workerUrlAlt).toBe("https://b.example.test");
+    // "" clears it. That is how a run with only one address says so, and it is
+    // what stops a stale fallback outliving the run that created it.
+    await g.write({ workerUrlAlt: "" });
+    expect(g.read().workerUrlAlt).toBe("");
+  });
 });

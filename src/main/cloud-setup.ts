@@ -218,8 +218,15 @@ export function createCloudSetupGateway(deps: CloudSetupDeps): CloudSetupGateway
           ...(deps.fetchImpl ? { fetchImpl: deps.fetchImpl } : {}),
           ...(deps.sleep ? { sleep: deps.sleep } : {}),
           onProgress: emit,
-          commit: async ({ workerUrl, token }) => {
-            await deps.syncConfig.write({ workerUrl, token });
+          commit: async ({ workerUrl, altWorkerUrl, token }) => {
+            // The alternate is ALWAYS sent, including as "": a run that turned
+            // on only one address must CLEAR a stale second one left by an
+            // earlier run rather than inherit it.
+            await deps.syncConfig.write({
+              workerUrl,
+              workerUrlAlt: altWorkerUrl ?? "",
+              token,
+            });
           },
         },
         {

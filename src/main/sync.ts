@@ -128,11 +128,27 @@ export function resolveSyncConfig(workerUrl: string, token: string | null): Conf
 export async function probeSyncConfig(
   workerUrl: string,
   token: string | null,
-  opts: { fetchImpl?: typeof fetch; now?: () => number; timeoutMs?: number } = {},
+  opts: {
+    fetchImpl?: typeof fetch;
+    now?: () => number;
+    timeoutMs?: number;
+    /**
+     * The other address setup turned on, if there is one.
+     *
+     * Probed with an unauthenticated `GET /health` and nothing else: the token
+     * has already been proved against the address in use, and it is a property
+     * of the WORKER rather than of the hostname, so a second authenticated read
+     * would buy nothing and cost a round trip on a button somebody is waiting
+     * on. What this answers is the only question that differs between two
+     * hostnames — can this Mac reach it.
+     */
+    altUrl?: string;
+  } = {},
 ): Promise<SyncTestResult> {
   const nowMs = opts.now ?? Date.now;
   const started = nowMs();
   const resolved = resolveSyncConfig(workerUrl, token);
+  const alt = await probeAlternate(workerUrl, opts);
   if (resolved.config === null) {
     return {
       ok: false,
@@ -145,6 +161,7 @@ export async function probeSyncConfig(
         (workerUrl.trim() === ""
           ? "enter the Worker URL first"
           : "enter this Mac's token first"),
+      alt,
     };
   }
 
@@ -167,6 +184,7 @@ export async function probeSyncConfig(
       status: err instanceof HttpError ? err.status : null,
       ms: nowMs() - started,
       error: reachErrorOf(err, resolved.config.baseUrl),
+      alt,
     };
   }
 
@@ -180,6 +198,7 @@ export async function probeSyncConfig(
       authorized: false,
       status,
       ms: nowMs() - started,
+      alt,
       error:
         status === 503
           ? // The Worker is running and its URL is right; what is missing is
@@ -210,7 +229,49 @@ export async function probeSyncConfig(
     status: 200,
     ms: nowMs() - started,
     error: null,
+    alt,
   };
+}
+
+/**
+ * Can this Mac reach the OTHER address? `/health` only, and never fatal.
+ *
+ * The whole point of two addresses is that a given Mac may reach one and not
+ * the other, so this is the question the report is for. It is deliberately not
+ * allowed to change the verdict: the alternate answering does not make a
+ * failing configuration pass, and the alternate failing does not make a working
+ * one fail.
+ */
+async function probeAlternate(
+  workerUrl: string,
+  opts: { fetchImpl?: typeof fetch; now?: () => number; timeoutMs?: number; altUrl?: string },
+): Promise<SyncTestResult["alt"]> {
+  const url = (opts.altUrl ?? "").trim();
+  // Nothing to say, and — belt and braces — never the address already in use.
+  if (url === "" || url === workerUrl.trim()) return null;
+  const nowMs = opts.now ?? Date.now;
+  const started = nowMs();
+  const client = createWorkerClient({
+    baseUrl: url,
+    // `/health` is unauthenticated (`worker/src/routes.ts`), so there is
+    // nothing to present and nothing that could be leaked to a hostname that
+    // turned out not to be ours.
+    token: "",
+    ...(opts.fetchImpl ? { fetchImpl: opts.fetchImpl } : {}),
+    timeoutMs: opts.timeoutMs ?? 8000,
+  });
+  try {
+    await client.health();
+    return { url, reachable: true, status: 200, ms: nowMs() - started, error: null };
+  } catch (err) {
+    return {
+      url,
+      reachable: false,
+      status: err instanceof HttpError ? err.status : null,
+      ms: nowMs() - started,
+      error: reachErrorOf(err, url),
+    };
+  }
 }
 
 function reachErrorOf(err: unknown, baseUrl: string): string {
