@@ -30,7 +30,7 @@ describe("tokenCreateUrl", () => {
     expect(TOKEN_PAGE_URL).toBe("https://dash.cloudflare.com/profile/api-tokens");
   });
 
-  it("carries all three permission keys as a URI-encoded JSON array", () => {
+  it("carries every permission key as a URI-encoded JSON array", () => {
     const url = new URL(tokenCreateUrl());
     const raw = url.searchParams.get("permissionGroupKeys");
     expect(raw).not.toBeNull();
@@ -40,6 +40,9 @@ describe("tokenCreateUrl", () => {
       { key: "workers_scripts", type: "edit" },
       { key: "d1", type: "edit" },
       { key: "account_settings", type: "read" },
+      // The one new row, and it is optional. Attaching a custom domain needs no
+      // new permission at all — this only buys a domain picker.
+      { key: "zone", type: "read" },
     ]);
   });
 
@@ -58,24 +61,44 @@ describe("tokenCreateUrl", () => {
     expect(new URL(emitted).searchParams.get("permissionGroupKeys")).toContain("workers_scripts");
   });
 
-  it("lists the same three permissions the wizard renders as a checklist", () => {
+  it("lists the same permissions the wizard renders as a checklist", () => {
     // The deep link and the visible checklist come from ONE list, so a key that
     // is added or renamed cannot appear in the URL and not on screen.
     expect(TOKEN_PERMISSIONS.map((p) => p.key)).toEqual([
       "workers_scripts",
       "d1",
       "account_settings",
+      "zone",
     ]);
     for (const p of TOKEN_PERMISSIONS) {
       // The dashboard's own spelling, which the screen shows verbatim. It says
       // "Edit" where Cloudflare's API docs say "Write"; the screen says so too.
-      expect(p.label.startsWith("Account · ")).toBe(true);
+      // Every label still names its level — it just is not "Account" for all of
+      // them any more, and the Zone row is added in the OTHER half of the form.
+      expect(p.label.startsWith(`${p.level} · `)).toBe(true);
       expect(p.why).not.toBe("");
     }
-    // Only Account Settings is optional — without it setup asks for the ID.
+    // Two are optional, and neither of them costs a feature: without them setup
+    // asks for the account ID, and asks you to type the domain.
     expect(TOKEN_PERMISSIONS.filter((p) => p.optional).map((p) => p.key)).toEqual([
       "account_settings",
+      "zone",
     ]);
+    // Everything REQUIRED is still an account row. That matters: it is the
+    // whole reason the new one can be skipped.
+    expect(TOKEN_PERMISSIONS.filter((p) => !p.optional).every((p) => p.level === "Account")).toBe(
+      true,
+    );
+  });
+
+  it("does not ask for DNS, or for Workers Routes", () => {
+    // Neither is needed and both would be a real cost. Cloudflare writes the
+    // custom domain's DNS record with its own privileges, and Workers Routes
+    // governs route patterns — a different feature entirely. Nothing may quietly
+    // add either while "making the domain work".
+    const keys = TOKEN_PERMISSIONS.map((p) => p.key);
+    expect(keys).not.toContain("dns");
+    expect(keys).not.toContain("workers_routes");
   });
 
   it("is a plain string built from nothing — no imports, no I/O, no clock", () => {

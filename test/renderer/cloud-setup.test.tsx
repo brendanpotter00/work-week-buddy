@@ -312,16 +312,26 @@ describe("finding the token page", () => {
     expect(external).toEqual([]);
   });
 
-  it("lists all three permissions, in the words the dashboard uses", async () => {
+  it("lists every permission, in the words the dashboard uses", async () => {
     const f = mount();
     await toTokenScreen(f);
-    const list = f.container.querySelector('[data-slot="permission-list"]')?.textContent ?? "";
-    expect(list).toContain("Account · Workers Scripts · Edit");
-    expect(list).toContain("Account · D1 · Edit");
-    expect(list).toContain("Account · Account Settings · Read");
+    const required =
+      f.container.querySelector('[data-slot="permission-list"]')?.textContent ?? "";
+    const optional =
+      f.container.querySelector('[data-slot="optional-permission-list"]')?.textContent ?? "";
+    expect(required).toContain("Account · Workers Scripts · Edit");
+    expect(required).toContain("Account · D1 · Edit");
+    // Grouped by whether they can be SKIPPED, which is the thing the reader
+    // actually needs to know. Four permissions reads like four chances to get
+    // it wrong; two plus two you can leave out reads like two.
+    expect(optional).toContain("Account · Account Settings · Read");
+    expect(optional).toContain("Zone · Zone · Read");
+    expect(required).not.toContain("Zone · Zone · Read");
     // The checklist is on screen whether or not the deep link works, so a
     // renamed permission key can never leave the reader with no instructions.
     expect(f.container.textContent).toContain("Account Resources");
+    // And the Zone row is added in the OTHER half of that form.
+    expect(f.container.textContent).toContain("Zone Resources");
   });
 });
 
