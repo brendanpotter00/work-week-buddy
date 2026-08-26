@@ -681,3 +681,89 @@ describe("probeSyncConfig", () => {
     expect(r.ok).toBe(true);
   });
 });
+
+/**
+ * The reason a request failed, kept rather than dropped.
+ *
+ * Every failure below is a `TypeError: fetch failed` and nothing else — that is
+ * literally all undici's message ever says. The four faults it covers want four
+ * different actions from the owner, and until now the app reported the message
+ * and threw the `cause` away. A work Mac spent an evening on that.
+ */
+describe("a failed request says why", () => {
+  const fetchFailed = (code: string) => (): Promise<Response> =>
+    Promise.reject(Object.assign(new TypeError("fetch failed"), { cause: { code } }));
+
+  it("names the cause on the Test-connection button rather than the bare message", async () => {
+    const r = await probeSyncConfig(BASE_URL, TOKEN_A, {
+      fetchImpl: fetchFailed("SELF_SIGNED_CERT_IN_CHAIN"),
+      now: () => NOW,
+    });
+    expect(r.reachable).toBe(false);
+    // The world nobody guesses: a corporate root macOS trusts and Node does
+    // not. Chrome loads the same URL fine, which is what makes it invisible.
+    expect(r.error).toMatch(/does not read macOS's trust store/);
+    expect(r.error).not.toMatch(/fetch failed/);
+  });
+
+  it("separates a dead hostname from an intercepted one on that same button", async () => {
+    const dns = await probeSyncConfig(BASE_URL, TOKEN_A, {
+      fetchImpl: fetchFailed("ENOTFOUND"),
+      now: () => NOW,
+    });
+    const proxy = await probeSyncConfig(BASE_URL, TOKEN_A, {
+      fetchImpl: fetchFailed("ECONNRESET"),
+      now: () => NOW,
+    });
+    expect(dns.error).toMatch(/does not resolve from this Mac/);
+    expect(proxy.error).toMatch(/proxy dropped it/);
+    expect(dns.error).not.toBe(proxy.error);
+  });
+
+  it("names it on the authenticated read too, not only on /health", async () => {
+    const cloud = new FakeCloud();
+    const r = await probeSyncConfig(BASE_URL, TOKEN_A, {
+      fetchImpl: async (input, init) => {
+        const url = new URL(typeof input === "string" ? input : String(input));
+        if (url.pathname === "/health") return await cloud.fetch(input, init);
+        return await fetchFailed("ECONNRESET")();
+      },
+      now: () => NOW,
+    });
+    expect(r.reachable).toBe(true);
+    expect(r.authorized).toBe(false);
+    expect(r.error).toMatch(/proxy dropped it/);
+  });
+
+  it("names it on the ONGOING pull, which is what reports failures after setup", async () => {
+    // The most valuable of the lot. Setup runs once; this runs for ever, and
+    // it is the only thing that speaks up when a Mac that WAS syncing stops.
+    const db = seeded(2);
+    const cloud = new FakeCloud();
+    const service = createSyncService({
+      db,
+      config: resolveSyncConfig(BASE_URL, TOKEN_A).config,
+      machineId: MACHINE_A,
+      appVersion: "0.1.0-test",
+      tz: "UTC",
+      backupDir: tmp(),
+      now: () => NOW,
+      fetchImpl: async (input, init) => {
+        const url = new URL(typeof input === "string" ? input : String(input));
+        // The push works; only the read back fails. That is what a proxy that
+        // blocks one hostname intermittently actually looks like.
+        return url.pathname === "/intervals" && (init?.method ?? "GET") === "GET"
+          ? await fetchFailed("ERR_CERT_AUTHORITY_INVALID")()
+          : await cloud.fetch(input, init);
+      },
+    });
+    onTestFinished(async () => {
+      await service.stop();
+    });
+
+    await service.flush();
+
+    expect(service.snapshot().sync.lastPullError).toMatch(/does not read macOS's trust store/);
+    expect(service.snapshot().sync.lastPullError).not.toMatch(/fetch failed/);
+  });
+});

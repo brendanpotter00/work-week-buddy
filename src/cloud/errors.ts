@@ -83,7 +83,10 @@ export class CloudflareNetworkError extends Error {
   constructor(operation: string, cause: unknown) {
     super(
       `could not reach api.cloudflare.com while ${operation} ` +
-        `(${redactSecrets(messageOf(cause))}) — check the network, and on a work Mac ` +
+        // NOT `messageOf`. Every one of these is a `TypeError: fetch failed`
+        // and the only thing that varies is on `cause` — see
+        // `describeFetchFailure`.
+        `(${describeFetchFailure(cause)}) — check the network, and on a work Mac ` +
         `check whether the proxy allows api.cloudflare.com`,
     );
     this.name = "CloudflareNetworkError";
@@ -202,6 +205,177 @@ export function redactSecrets(text: string): string {
 export function messageOf(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
+
+/**
+ * Codes that mean "this address is not ready YET", as opposed to "this address
+ * is wrong".
+ *
+ * A brand-new hostname resolves before its certificate exists, so the first
+ * minute of failures on one is a wait rather than a fault. Everything NOT in
+ * here — a refusal, a reset, a 403 — is a real answer, and retrying it for
+ * three minutes is a bug rather than patience. `ERR_SSL_*` is a family rather
+ * than a list, so use `isTlsNotReady` rather than testing membership by hand.
+ */
+export const TLS_NOT_READY_CODES: readonly string[] = [
+  "EPROTO",
+  "ERR_SSL_PROTOCOL_ERROR",
+  "ERR_TLS_CERT_ALTNAME_INVALID",
+  "ENOTFOUND",
+];
+
+/** Is this failure one an address that was created a minute ago would give? */
+export function isTlsNotReady(err: unknown): boolean {
+  const code = fetchFailureCode(err);
+  if (code === null) return false;
+  return TLS_NOT_READY_CODES.includes(code) || code.startsWith("ERR_SSL_");
+}
+
+/**
+ * Why a fetch failed, in words, out of the `cause` nobody reads.
+ *
+ * `TypeError: fetch failed` is what undici throws for a dead DNS name, a
+ * refused socket, a proxy that dropped the connection and a certificate the
+ * process does not trust — four problems with four different fixes and ONE
+ * message. Measured on Node 22: `err.message` is the literal string "fetch
+ * failed" in all four, and everything that distinguishes them is on
+ * `err.cause`:
+ *
+ *     NXDOMAIN        message: "fetch failed"   cause.code: ENOTFOUND
+ *     self-signed     message: "fetch failed"   cause.code: DEPTH_ZERO_SELF_SIGNED_CERT
+ *     untrusted root  message: "fetch failed"   cause.code: SELF_SIGNED_CERT_IN_CHAIN
+ *     wrong hostname  message: "fetch failed"   cause.code: ERR_TLS_CERT_ALTNAME_INVALID
+ *
+ * That is why the only thing a work Mac could report about a failed setup was
+ * `fetch failed`: `messageOf` returns `err.message` and every caller threw the
+ * cause away. The four above want four different answers from the owner, and
+ * one of them ("a work network that inspects HTTPS traffic") is not something
+ * anyone would guess.
+ *
+ * Electron's `net.fetch` (Chromium's stack) reports the same conditions with
+ * `ERR_*` codes instead, so both vocabularies are handled and the sentence does
+ * not change when the network stack does.
+ *
+ * Redacted like everything else in this file: a cause message is a string from
+ * a library, and this one reaches a screen.
+ */
+export function describeFetchFailure(err: unknown): string {
+  const code = fetchFailureCode(err);
+  if (code !== null) {
+    const sentence = sentenceForCode(code);
+    // An unrecognised code is still worth vastly more than "fetch failed" — it
+    // is the thing to paste into a search. Shown bare rather than dressed up.
+    return sentence ?? redactSecrets(code);
+  }
+  // No code anywhere on the chain. Either this is not a fetch failure at all —
+  // in which case `err.message` already reads as a sentence and replacing it
+  // would be a downgrade — or it is one with nothing but a message on it.
+  const message = deepestMessage(err);
+  return message === "" ? "no reason given" : redactSecrets(message);
+}
+
+/**
+ * The first string `code` on the error or anywhere down its `cause` chain.
+ *
+ * Depth-limited and cycle-guarded because a `cause` is whatever the thrower put
+ * there, and this runs on a path that must never hang. DOMException carries a
+ * NUMERIC `code`, so only strings count — otherwise an abort would be reported
+ * as the code `20`.
+ */
+function fetchFailureCode(err: unknown): string | null {
+  for (const link of causeChain(err)) {
+    const code = (link as { code?: unknown }).code;
+    if (typeof code === "string" && code !== "") return code;
+    // `AbortSignal.timeout` rejects with a DOMException whose only identifying
+    // mark is its NAME. It is how every timeout in this app expires, so it
+    // cannot be the one failure that reports nothing.
+    const name = (link as { name?: unknown }).name;
+    if (name === "AbortError" || name === "TimeoutError") return "ABORT_ERR";
+  }
+  return null;
+}
+
+function deepestMessage(err: unknown): string {
+  let message = messageOf(err);
+  for (const link of causeChain(err)) {
+    const m = (link as { message?: unknown }).message;
+    if (typeof m === "string" && m !== "") message = m;
+  }
+  return message;
+}
+
+function causeChain(err: unknown): object[] {
+  const chain: object[] = [];
+  const seen = new Set<unknown>();
+  let node: unknown = err;
+  // Eight is well past anything undici produces (TypeError → AggregateError →
+  // Error is three) and makes a hand-built cycle harmless.
+  while (typeof node === "object" && node !== null && chain.length < 8 && !seen.has(node)) {
+    seen.add(node);
+    chain.push(node);
+    const errs = (node as { errors?: unknown }).errors;
+    // `AggregateError` is what a multi-address connect failure comes back as,
+    // and the real code is on its FIRST member rather than on the aggregate.
+    node =
+      (node as { cause?: unknown }).cause ??
+      (Array.isArray(errs) ? (errs[0] as unknown) : undefined);
+  }
+  return chain;
+}
+
+function sentenceForCode(code: string): string | null {
+  switch (code) {
+    case "ENOTFOUND":
+    case "EAI_AGAIN":
+    case "ERR_NAME_NOT_RESOLVED":
+      return "that hostname does not resolve from this Mac — DNS could not find it";
+    case "ECONNREFUSED":
+    case "ERR_CONNECTION_REFUSED":
+      return "the connection was refused";
+    case "ECONNRESET":
+    case "ERR_CONNECTION_RESET":
+    case "ERR_CONNECTION_CLOSED":
+      return (
+        "the connection was closed mid-request, which on a work Mac usually " +
+        "means a proxy dropped it"
+      );
+    case "UND_ERR_CONNECT_TIMEOUT":
+    case "ETIMEDOUT":
+    case "ERR_CONNECTION_TIMED_OUT":
+      return "the connection timed out";
+    case "SELF_SIGNED_CERT_IN_CHAIN":
+    case "DEPTH_ZERO_SELF_SIGNED_CERT":
+    case "UNABLE_TO_VERIFY_LEAF_SIGNATURE":
+    case "UNABLE_TO_GET_ISSUER_CERT_LOCALLY":
+    case "ERR_CERT_AUTHORITY_INVALID":
+      // THE ONE NOBODY GUESSES. Node reads neither the macOS trust store nor
+      // the macOS proxy configuration, so a corporate MITM root that Chrome
+      // trusts is invisible to this process — the app fails and the browser
+      // does not, on every hostname, and a custom domain would not help.
+      return (
+        "the TLS certificate was signed by an authority this app does not " +
+        "trust. That is the signature of a work network that inspects HTTPS " +
+        "traffic — the browser trusts it because macOS does, and this app does " +
+        "not read macOS's trust store."
+      );
+    case "ERR_TLS_CERT_ALTNAME_INVALID":
+    case "ERR_CERT_COMMON_NAME_INVALID":
+      return "the certificate served does not name that hostname";
+    case "CERT_HAS_EXPIRED":
+    case "ERR_CERT_DATE_INVALID":
+      return "the certificate has expired";
+    case "EPROTO":
+      return TLS_HANDSHAKE;
+    case "ABORT_ERR":
+      return "it did not answer within the timeout";
+    default:
+      // `ERR_SSL_*` is an open family in Chromium rather than a list.
+      return code.startsWith("ERR_SSL_") ? TLS_HANDSHAKE : null;
+  }
+}
+
+const TLS_HANDSHAKE =
+  "the TLS handshake failed. On an address created in the last few minutes " +
+  "this is normally the certificate still being issued rather than a fault.";
 
 /**
  * The sentence to show for anything thrown out of `src/cloud/`.
