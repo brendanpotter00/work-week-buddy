@@ -25,6 +25,7 @@ import {
   revokeMachine,
   runCloudSetup,
   type CloudSetupOutcome,
+  type CustomDomainRequest,
 } from "../../src/cloud/bringup";
 import { WORKER_BUNDLE } from "../../src/cloud/worker-bundle.generated";
 import {
@@ -32,15 +33,19 @@ import {
   FAKE_API_TOKEN,
   FAKE_BASE,
   FAKE_SUBDOMAIN,
+  FAKE_ZONE_ID,
+  FAKE_ZONE_NAME,
   FakeCloudflare,
   OTHER_MAC,
+  OTHER_ZONE_NAME,
   THIS_MAC,
   sha256Hex,
+  type FakeHostBehaviour,
   workerFetchFor,
 } from "./fake-cloudflare";
 
 let cloud: FakeCloudflare;
-let committed: Array<{ workerUrl: string; token: string }>;
+let committed: Array<{ workerUrl: string; altWorkerUrl: string | null; token: string }>;
 let minted: string[];
 
 /**
@@ -74,6 +79,8 @@ function setup(
     healthFailures?: number;
     authFailures?: number;
     noRegistry?: boolean;
+    /** Per-hostname behaviour — the fake that proves the two-address feature. */
+    hosts?: Record<string, FakeHostBehaviour>;
   } = {},
 ) {
   return {
@@ -87,10 +94,11 @@ function setup(
       ...(over.healthFailures === undefined ? {} : { healthFailures: over.healthFailures }),
       ...(over.authFailures === undefined ? {} : { authFailures: over.authFailures }),
       ...(over.noRegistry === undefined ? {} : { noRegistry: over.noRegistry }),
+      ...(over.hosts === undefined ? {} : { hosts: over.hosts }),
     }),
     // The TLS wait is real time in production and no time here.
     sleep: async () => undefined,
-    commit: async (c: { workerUrl: string; token: string }) => {
+    commit: async (c: { workerUrl: string; altWorkerUrl: string | null; token: string }) => {
       committed.push(c);
     },
   };
@@ -135,7 +143,10 @@ describe("a first run, on a blank account", () => {
     // The URL is composed from a subdomain READ BACK off the account, and then
     // proved by /health before it is stored.
     expect(out.workerUrl).toBe(`https://wwb-sync.${FAKE_SUBDOMAIN}.workers.dev`);
-    expect(committed).toEqual([{ workerUrl: out.workerUrl, token: minted[0] }]);
+    expect(committed).toEqual([
+      // No second address was asked for, so there is none to remember.
+      { workerUrl: out.workerUrl, altWorkerUrl: null, token: minted[0] },
+    ]);
   });
 
   it("mints exactly ONE token, for this Mac, and nothing for anybody else", async () => {
@@ -852,5 +863,268 @@ describe("progress", () => {
       "verify",
       "save",
     ]);
+  });
+});
+
+/**
+ * The optional second address.
+ *
+ * The premise this feature was built on is UNPROVEN: nobody knows whether the
+ * work Mac's proxy blocks `*.workers.dev`, blocks everything, or is not a
+ * domain block at all. So the design hedges, and so does this file — what is
+ * asserted throughout is that both addresses are turned on, that whichever one
+ * THIS Mac can reach is the one it saves, and that every way the second address
+ * can fail costs a sentence rather than a setup.
+ */
+describe("a custom domain", () => {
+  const CUSTOM_HOST = `wwb.${FAKE_ZONE_NAME}`;
+  const CUSTOM_URL = `https://${CUSTOM_HOST}`;
+  const DEV_URL = `https://wwb-sync.${FAKE_SUBDOMAIN}.workers.dev`;
+  const DEV_HOST = `wwb-sync.${FAKE_SUBDOMAIN}.workers.dev`;
+
+  const withDomain = async (
+    over: Parameters<typeof setup>[0] = {},
+    domain: CustomDomainRequest = { label: "wwb", zone: { id: FAKE_ZONE_ID, name: FAKE_ZONE_NAME } },
+  ): Promise<CloudSetupOutcome> =>
+    await runCloudSetup(setup(over), { accountId: FAKE_ACCOUNT_ID, customDomain: domain });
+
+  const attachCalls = () =>
+    cloud.calls.filter((c) => c.method === "PUT" && c.path.endsWith("/workers/domains"));
+
+  it("turns on BOTH addresses — the workers.dev one is never traded away", async () => {
+    const out = await withDomain();
+    expect(out.ok).toBe(true);
+    // Both, in Cloudflare. Which one this Mac uses is a separate question and
+    // a different Mac may answer it differently.
+    expect(cloud.workersDevEnabled).toBe(true);
+    expect(cloud.workerDomains.map((d) => d.hostname)).toEqual([CUSTOM_HOST]);
+    expect(cloud.workerDomains[0]?.service).toBe("wwb-sync");
+  });
+
+  it("prefers the custom domain when both answer, and remembers the other", async () => {
+    const out = await withDomain();
+    expect(out.workerUrl).toBe(CUSTOM_URL);
+    expect(out.altWorkerUrl).toBe(DEV_URL);
+    expect(out.addresses).toHaveLength(2);
+    expect(out.addresses.every((a) => a.reachable)).toBe(true);
+    expect(committed[0]).toMatchObject({ workerUrl: CUSTOM_URL, altWorkerUrl: DEV_URL });
+  });
+
+  it("uses workers.dev when the custom domain never answers, and still succeeds", async () => {
+    const out = await withDomain({ hosts: { [CUSTOM_HOST]: { blocked: true } } });
+    expect(out.ok).toBe(true);
+    expect(out.workerUrl).toBe(DEV_URL);
+    const custom = out.addresses.find((a) => a.kind === "custom");
+    expect(custom?.reachable).toBe(false);
+    expect(custom?.error).toMatch(/proxy dropped it/);
+  });
+
+  it("uses the custom domain when WORKERS.DEV is the blocked one", async () => {
+    // The work-Mac scenario, and the entire reason this feature exists. Before
+    // this, a Mac in this situation had no address at all and no way to say so.
+    const out = await withDomain({ hosts: { [DEV_HOST]: { blocked: true } } });
+    expect(out.ok).toBe(true);
+    expect(out.workerUrl).toBe(CUSTOM_URL);
+    expect(out.altWorkerUrl).toBe(DEV_URL);
+    expect(out.addresses.find((a) => a.kind === "workers.dev")?.error).toMatch(
+      /proxy dropped it/,
+    );
+  });
+
+  it("fails, commits nothing, and names both reasons when neither answers", async () => {
+    const out = await withDomain({
+      hosts: { [CUSTOM_HOST]: { blocked: true }, [DEV_HOST]: { healthFailures: 99 } },
+    });
+    expect(out.ok).toBe(false);
+    expect(committed).toEqual([]);
+    expect(out.error).toContain(CUSTOM_URL);
+    expect(out.error).toContain(DEV_URL);
+    expect(out.error).toMatch(/proxy dropped it/);
+    expect(out.error).toMatch(/does not resolve from this Mac/);
+    // Reaching verify at all proves the API calls got through, which rules out
+    // "the network is down" without asking anyone to test anything.
+    expect(out.error).toMatch(/api\.cloudflare\.com WAS reachable/);
+    // The report survives the failure — that is when it is worth most.
+    expect(out.addresses).toHaveLength(2);
+  });
+
+  it("is idempotent: a second run makes no second attach", async () => {
+    await withDomain();
+    expect(attachCalls()).toHaveLength(1);
+    const second = await withDomain();
+    expect(second.ok).toBe(true);
+    expect(second.workerUrl).toBe(CUSTOM_URL);
+    // Re-running setup must be free. The cheapest way for a re-attach to be
+    // harmless is for it not to happen.
+    expect(attachCalls()).toHaveLength(1);
+    expect(cloud.workerDomains).toHaveLength(1);
+    expect(second.steps.find((s) => s.id === "url")?.detail).toContain("already on");
+  });
+
+  it("attaches by zone NAME when the zones could not be listed", async () => {
+    // This is what makes `Zone: Read` optional rather than required: the owner
+    // types the domain and the request carries `zone_name`.
+    cloud.denied.add("Zone: Read");
+    const out = await withDomain({}, { label: "wwb", zone: { name: FAKE_ZONE_NAME } });
+    expect(out.ok).toBe(true);
+    expect(out.workerUrl).toBe(CUSTOM_URL);
+    const body = JSON.parse(attachCalls().at(-1)?.body ?? "{}") as Record<string, unknown>;
+    expect(body).toMatchObject({ zone_name: FAKE_ZONE_NAME });
+    expect(body).not.toHaveProperty("zone_id");
+  });
+
+  it("leaves a hostname belonging to another Worker alone, and still succeeds", async () => {
+    cloud.workerDomains.push({
+      id: "domain-someone-else",
+      cert_id: "00000000-0000-0000-0000-0000000000ff",
+      hostname: CUSTOM_HOST,
+      zone_id: FAKE_ZONE_ID,
+      zone_name: FAKE_ZONE_NAME,
+      service: "somebody-elses-worker",
+    });
+    const out = await withDomain();
+    expect(out.ok).toBe(true);
+    expect(out.workerUrl).toBe(DEV_URL);
+    expect(out.steps.find((s) => s.id === "url")?.detail).toContain("somebody-elses-worker");
+    // NOT ONE WRITE. The other Worker's address is not something to try and
+    // find out about by attempting to take it.
+    expect(attachCalls()).toEqual([]);
+  });
+
+  it("does not fail the run when a DNS record is already at that name", async () => {
+    cloud.dnsRecords.push(CUSTOM_HOST);
+    const out = await withDomain();
+    expect(out.ok).toBe(true);
+    expect(out.workerUrl).toBe(DEV_URL);
+    const detail = out.steps.find((s) => s.id === "url")?.detail ?? "";
+    // Our sentence, not Cloudflare's — its text has already changed once and
+    // currently recommends a flag this endpoint does not have.
+    expect(detail).toContain("a DNS record already exists at that name");
+    expect(detail).not.toContain("override_existing_dns_record");
+  });
+
+  it("refuses a label that is not a label, without failing anything", async () => {
+    const out = await withDomain({}, { label: "not a label", zone: { name: FAKE_ZONE_NAME } });
+    expect(out.ok).toBe(true);
+    expect(out.workerUrl).toBe(DEV_URL);
+    expect(out.steps.find((s) => s.id === "url")?.detail).toMatch(/lowercase letters/);
+    expect(attachCalls()).toEqual([]);
+  });
+
+  it("waits out a certificate that has not been issued yet", async () => {
+    const slept: number[] = [];
+    const out = await runCloudSetup(
+      {
+        ...setup({ hosts: { [CUSTOM_HOST]: { tlsNotReady: 3 } } }),
+        sleep: async (ms: number) => {
+          slept.push(ms);
+        },
+      },
+      {
+        accountId: FAKE_ACCOUNT_ID,
+        customDomain: { label: "wwb", zone: { id: FAKE_ZONE_ID, name: FAKE_ZONE_NAME } },
+      },
+    );
+    expect(out.ok).toBe(true);
+    expect(out.workerUrl).toBe(CUSTOM_URL);
+    expect(slept.length).toBeGreaterThan(0);
+  });
+
+  it("stops retrying immediately on a refusal — a three-minute wait for one is a bug", async () => {
+    const slept: number[] = [];
+    const out = await runCloudSetup(
+      {
+        ...setup({ hosts: { [CUSTOM_HOST]: { blocked: true } } }),
+        sleep: async (ms: number) => {
+          slept.push(ms);
+        },
+      },
+      {
+        accountId: FAKE_ACCOUNT_ID,
+        customDomain: { label: "wwb", zone: { id: FAKE_ZONE_ID, name: FAKE_ZONE_NAME } },
+      },
+    );
+    expect(out.ok).toBe(true);
+    // An ECONNRESET is an ANSWER, not a certificate still being issued. The
+    // fresh ladder is ten rungs long; this must not climb it.
+    expect(slept.length).toBeLessThan(5);
+  });
+
+  it("names the zone's security settings when it answers a challenge page", async () => {
+    // THE WORST FAILURE THIS FEATURE COULD PRODUCE. A custom domain routes
+    // through the zone and workers.dev does not, so Bot Fight Mode, a WAF rule
+    // or Access on that domain would suddenly apply to sync traffic and answer
+    // an unsolvable 403 to a token that is perfectly good.
+    const out = await withDomain({ hosts: { [CUSTOM_HOST]: { challenge: true } } });
+    expect(out.ok).toBe(true);
+    expect(out.workerUrl).toBe(DEV_URL);
+    const custom = out.addresses.find((a) => a.kind === "custom");
+    expect(custom?.error).toMatch(/Bot Fight Mode/);
+    expect(custom?.error).toMatch(/not the token/);
+    // The body is never read into the message: an HTML page in an error toast
+    // tells the reader nothing and could echo the request back at them.
+    expect(custom?.error).not.toContain("<");
+    expect(custom?.error).not.toMatch(/Checking your browser/);
+  });
+
+  it("changes nothing at all when no custom domain is asked for", async () => {
+    const out = await run();
+    expect(out.altWorkerUrl).toBeNull();
+    expect(out.addresses).toHaveLength(1);
+    expect(out.addresses[0]).toMatchObject({ kind: "workers.dev", reachable: true });
+    expect(out.workerUrl).toBe(DEV_URL);
+    expect(cloud.workerDomains).toEqual([]);
+    expect(attachCalls()).toEqual([]);
+    // The step list is untouched: no new step, no sub-menu.
+    expect(out.steps).toHaveLength(9);
+  });
+
+  it("finishes a half-done attach on the next run", async () => {
+    // The domain went on, then the run died before it saved — here because
+    // neither address answered from this Mac. The second run must find its own
+    // hostname and adopt it rather than making a second one.
+    const first = await withDomain({
+      hosts: { [CUSTOM_HOST]: { blocked: true }, [DEV_HOST]: { blocked: true } },
+    });
+    expect(first.ok).toBe(false);
+    expect(cloud.workerDomains).toHaveLength(1);
+
+    const second = await withDomain();
+    expect(second.ok).toBe(true);
+    expect(second.workerUrl).toBe(CUSTOM_URL);
+    expect(cloud.workerDomains).toHaveLength(1);
+    expect(attachCalls()).toHaveLength(1);
+  });
+});
+
+describe("the zone scope is data, never an error banner", () => {
+  it("reports a missing Zone: Read as a scope and lists no domains", async () => {
+    cloud.denied.add("Zone: Read");
+    const probe = await probeAs(THIS_MAC, FAKE_ACCOUNT_ID);
+    expect(probe.scopes?.zones).toBe("missing");
+    expect(probe.deployment?.zones).toEqual([]);
+    // Not an error. The same shape as the existing D1/Workers scope tests: a
+    // missing OPTIONAL permission reaches the screen as something it can render
+    // properly, never as a red banner using the words for a different failure.
+    expect(probe.error).toBeNull();
+    expect(probe.deployment).not.toBeNull();
+  });
+
+  it("lists this account's domains, and only this account's", async () => {
+    const probe = await probeAs(THIS_MAC, FAKE_ACCOUNT_ID);
+    expect(probe.scopes?.zones).toBe("ok");
+    expect(probe.deployment?.zones.map((z) => z.name)).toEqual([
+      FAKE_ZONE_NAME,
+      OTHER_ZONE_NAME,
+    ]);
+  });
+
+  it("separates an account with no domains from a token that may not look", async () => {
+    cloud.zones = [];
+    const probe = await probeAs(THIS_MAC, FAKE_ACCOUNT_ID);
+    // `ok` with an empty list. The screen says "this account has no domains on
+    // it", which is a completely different sentence from "add Zone: Read".
+    expect(probe.scopes?.zones).toBe("ok");
+    expect(probe.deployment?.zones).toEqual([]);
   });
 });

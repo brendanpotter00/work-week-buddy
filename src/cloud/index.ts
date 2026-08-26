@@ -54,6 +54,7 @@ export {
   readEnrolledMachines,
   revokeMachine,
   runCloudSetup,
+  type AddressProbe,
   type BringupDeps,
   type CloudDeploymentState,
   type CloudProbe,
@@ -62,6 +63,7 @@ export {
   type CloudSetupRequest,
   type CloudStep,
   type CloudStepId,
+  type CustomDomainRequest,
   type EnrolledMachineRow,
   type StepState,
 } from "./bringup";
