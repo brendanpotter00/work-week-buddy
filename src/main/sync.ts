@@ -52,6 +52,7 @@ import {
   type SilenceState,
   type WorkerClient,
 } from "../sync";
+import { describeFetchFailure } from "../cloud/errors";
 import { pendingCount } from "../store";
 import { getSyncState, upsertMachine } from "../store/sync-state";
 import type { FlushResult, SyncTestResult } from "../shared/ipc-types";
@@ -195,7 +196,10 @@ export async function probeSyncConfig(
               "44 characters ending in “=”; if what you pasted is 40 characters with no " +
               "“=”, that is a Cloudflare API token, which is a different credential. Run " +
               "“Set up cloud sync” to mint this Mac’s own token"
-            : `the Worker is reachable but the authenticated read failed: ${messageOf(err)}`,
+            : // `describeFetchFailure`, not the message: everything that reaches
+              // here without an HTTP status is a `fetch failed` whose only
+              // detail is on `cause`.
+              `the Worker is reachable but the authenticated read failed: ${describeFetchFailure(err)}`,
     };
   }
 
@@ -215,8 +219,9 @@ function reachErrorOf(err: unknown, baseUrl: string): string {
   }
   // A DNS failure, a refused connection, a proxy and an 8-second abort all land
   // here, and on the work Mac the proxy is the likely one. Say so: it is the
-  // reason `/health` is unauthenticated in the first place.
-  return `could not reach ${baseUrl} (${messageOf(err)}) — check the URL, and on a work Mac check whether the proxy allows workers.dev`;
+  // reason `/health` is unauthenticated in the first place — and say WHICH,
+  // which `messageOf` could not, because all four say "fetch failed".
+  return `could not reach ${baseUrl} (${describeFetchFailure(err)}) — check the URL, and on a work Mac check whether the proxy allows workers.dev`;
 }
 
 export interface SyncServiceDeps {
@@ -366,7 +371,11 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
         }
         if (page.ingested > 0) onChange?.("rows-pulled");
       } catch (err) {
-        lastPullError = messageOf(err);
+        // The ongoing-sync path, and the one this matters most on: setup runs
+        // once, this runs for ever. A pull that starts failing months later
+        // reports here and nowhere else, and "fetch failed" would be the whole
+        // of what the owner ever learned about it.
+        lastPullError = describeFetchFailure(err);
         log.warn("pull failed", err);
       }
     } else {
@@ -648,6 +657,3 @@ function destinationOf(dir: string): "icloud" | "documents" {
   return dir.includes(ICLOUD_RELATIVE) ? "icloud" : "documents";
 }
 
-function messageOf(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
-}

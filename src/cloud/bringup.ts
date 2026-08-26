@@ -59,7 +59,7 @@ import {
   type D1DatabaseSummary,
   type WorkerBinding,
 } from "./api";
-import { describeCloudError } from "./errors";
+import { describeCloudError, describeFetchFailure } from "./errors";
 import {
   WORKER_BUNDLE,
   WORKER_COMPATIBILITY_DATE,
@@ -759,7 +759,10 @@ async function verifyWorker(o: {
       }
       last = `GET ${o.baseUrl}/health answered ${String(res.status)}`;
     } catch (err) {
-      last = describeCloudError(err);
+      // NOT `describeCloudError`. That returns `err.message`, which for every
+      // one of these is the literal string "fetch failed" — the exact reason
+      // the work Mac's failed setup could report nothing useful.
+      last = describeFetchFailure(err);
     }
   }
   throw new Error(

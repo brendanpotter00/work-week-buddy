@@ -14,7 +14,12 @@
 import { describe, it, expect, beforeEach } from "vitest";
 
 import { createCloudflareApi, toSubdomainLabel, workersDevUrl } from "../../src/cloud/api";
-import { CloudflareApiError, redactSecrets } from "../../src/cloud/errors";
+import {
+  CloudflareApiError,
+  describeFetchFailure,
+  isTlsNotReady,
+  redactSecrets,
+} from "../../src/cloud/errors";
 import {
   FAKE_ACCOUNT_ID,
   FAKE_API_TOKEN,
@@ -305,5 +310,188 @@ describe("redaction is the last line of defence", () => {
   it("leaves ordinary prose alone", () => {
     const plain = "the Worker is reachable but rejected this token";
     expect(redactSecrets(plain)).toBe(plain);
+  });
+});
+
+/**
+ * The whole diagnosis, and the reason commit 1 ships on its own.
+ *
+ * A work Mac failed setup's final reachability check and the only thing it
+ * could report was `fetch failed`. Four different faults produce exactly that
+ * string, they need four different fixes, and every one of them is
+ * distinguishable — the evidence is on `err.cause` and every caller was
+ * throwing it away.
+ */
+describe("naming a failed fetch", () => {
+  /** What undici actually throws: the message is useless, the cause is not. */
+  function fetchFailed(cause: unknown): TypeError {
+    return Object.assign(new TypeError("fetch failed"), { cause });
+  }
+
+  const cases = [
+    ["ENOTFOUND", "does not resolve"],
+    ["EAI_AGAIN", "does not resolve"],
+    ["ERR_NAME_NOT_RESOLVED", "does not resolve"],
+    ["ECONNREFUSED", "refused"],
+    ["ERR_CONNECTION_REFUSED", "refused"],
+    ["ECONNRESET", "proxy dropped it"],
+    ["ERR_CONNECTION_RESET", "proxy dropped it"],
+    ["ERR_CONNECTION_CLOSED", "proxy dropped it"],
+    ["UND_ERR_CONNECT_TIMEOUT", "timed out"],
+    ["ETIMEDOUT", "timed out"],
+    ["ERR_CONNECTION_TIMED_OUT", "timed out"],
+    ["SELF_SIGNED_CERT_IN_CHAIN", "does not read macOS's trust store"],
+    ["DEPTH_ZERO_SELF_SIGNED_CERT", "does not read macOS's trust store"],
+    ["UNABLE_TO_VERIFY_LEAF_SIGNATURE", "does not read macOS's trust store"],
+    ["UNABLE_TO_GET_ISSUER_CERT_LOCALLY", "does not read macOS's trust store"],
+    ["ERR_CERT_AUTHORITY_INVALID", "Chrome would refuse this address too"],
+    ["ERR_TLS_CERT_ALTNAME_INVALID", "does not name that hostname"],
+    ["ERR_CERT_COMMON_NAME_INVALID", "does not name that hostname"],
+    ["CERT_HAS_EXPIRED", "certificate has expired"],
+    ["ERR_CERT_DATE_INVALID", "certificate has expired"],
+    ["EPROTO", "TLS handshake failed"],
+    ["ERR_SSL_PROTOCOL_ERROR", "TLS handshake failed"],
+    ["ERR_SSL_VERSION_OR_CIPHER_MISMATCH", "TLS handshake failed"],
+    ["ERR_PROXY_CONNECTION_FAILED", "proxy this Mac is configured to use"],
+    ["ERR_TUNNEL_CONNECTION_FAILED", "proxy this Mac is configured to use"],
+    ["ERR_PROXY_AUTH_REQUESTED", "asked for credentials"],
+    ["ERR_BLOCKED_BY_ADMINISTRATOR", "device management rather than the network"],
+    ["ERR_INTERNET_DISCONNECTED", "no network connection at all"],
+  ] as const;
+
+  it.each(cases)("turns cause code %s into words", (code, expected) => {
+    expect(describeFetchFailure(fetchFailed({ code }))).toContain(expected);
+  });
+
+  it("never answers “fetch failed”, which is the whole point", () => {
+    for (const [code] of cases) {
+      expect(describeFetchFailure(fetchFailed({ code }))).not.toContain("fetch failed");
+    }
+  });
+
+  it("separates the four the owner's Mac could be in", () => {
+    // Measured on Node 22: these four are what NXDOMAIN, a self-signed cert, an
+    // untrusted corporate root and a wrong hostname come back as. They want
+    // four different actions, so they must not read alike.
+    const four = [
+      "ENOTFOUND",
+      "DEPTH_ZERO_SELF_SIGNED_CERT",
+      "SELF_SIGNED_CERT_IN_CHAIN",
+      "ERR_TLS_CERT_ALTNAME_INVALID",
+    ].map((code) => describeFetchFailure(fetchFailed({ code })));
+    expect(new Set(four).size).toBe(3);
+    // The two untrusted-root codes are one world and say one thing; the other
+    // two are worlds of their own.
+    expect(four[1]).toBe(four[2]);
+  });
+
+  it("reads Chromium's vocabulary, which lives in the message and not in a code", () => {
+    // MEASURED under Electron 43.4.1: `net.fetch` rejects a dead hostname with
+    // a plain `Error("net::ERR_NAME_NOT_RESOLVED")` — no `code`, no `cause`.
+    // Nothing about that shape was guessable, and reading only `code` would
+    // have quietly downgraded every diagnosis the moment main switched stacks.
+    expect(describeFetchFailure(new Error("net::ERR_NAME_NOT_RESOLVED"))).toContain(
+      "does not resolve",
+    );
+    expect(describeFetchFailure(new Error("net::ERR_CONNECTION_RESET"))).toContain(
+      "proxy dropped it",
+    );
+    expect(describeFetchFailure(new Error("net::ERR_PROXY_CONNECTION_FAILED"))).toContain(
+      "proxy this Mac is configured to use",
+    );
+    expect(isTlsNotReady(new Error("net::ERR_SSL_PROTOCOL_ERROR"))).toBe(true);
+  });
+
+  it("keeps the two trust failures apart, because they mean opposite things", () => {
+    // Node's: the browser loads the same URL fine, because macOS trusts the
+    // issuer and Node never asked macOS. Chromium's: macOS does NOT trust it,
+    // so Chrome would refuse too. Sending someone to hunt a difference that
+    // does not exist is the failure mode here.
+    const node = describeFetchFailure(fetchFailed({ code: "SELF_SIGNED_CERT_IN_CHAIN" }));
+    const chromium = describeFetchFailure(new Error("net::ERR_CERT_AUTHORITY_INVALID"));
+    expect(node).toContain("does not read macOS's trust store");
+    expect(chromium).toContain("Chrome would refuse this address too");
+    expect(chromium).not.toContain("does not read macOS's trust store");
+  });
+
+  it("names a timeout on Chromium's stack, where the code is the number 23", () => {
+    // MEASURED: `AbortSignal.timeout` under `net.fetch` rejects with
+    // `TimeoutError`, `code: 23`. A numeric code must not be read as a code.
+    const chromiumTimeout = Object.assign(
+      new Error("The operation was aborted due to timeout"),
+      { name: "TimeoutError", code: 23 },
+    );
+    expect(describeFetchFailure(chromiumTimeout)).toContain("did not answer within the timeout");
+  });
+
+  it("finds the code however deep the cause chain goes", () => {
+    const deep = fetchFailed(fetchFailed(fetchFailed({ code: "ECONNREFUSED" })));
+    expect(describeFetchFailure(deep)).toContain("refused");
+  });
+
+  it("reads the first member of an AggregateError, which multi-address connects throw", () => {
+    const aggregate = Object.assign(new AggregateError([Object.assign(new Error("x"), { code: "ENOTFOUND" })]), {});
+    expect(describeFetchFailure(fetchFailed(aggregate))).toContain("does not resolve");
+  });
+
+  it("survives a cause chain that points at itself", () => {
+    const looped: { cause?: unknown } = new TypeError("fetch failed");
+    looped.cause = looped;
+    expect(describeFetchFailure(looped)).toBe("fetch failed");
+  });
+
+  it("names a timeout, which arrives as a name rather than a code", () => {
+    // `AbortSignal.timeout` rejects with a DOMException. Its `code` is the
+    // NUMBER 20; only the name identifies it.
+    const aborted = Object.assign(new Error("The operation was aborted"), {
+      name: "TimeoutError",
+      code: 20,
+    });
+    expect(describeFetchFailure(aborted)).toContain("did not answer within the timeout");
+  });
+
+  it("still says something specific for a code it has never seen", () => {
+    const out = describeFetchFailure(fetchFailed({ code: "ESOMETHINGNEW" }));
+    expect(out).toBe("ESOMETHINGNEW");
+    expect(out).not.toContain("[object Object]");
+  });
+
+  it("falls back to the deepest message when there is no code anywhere", () => {
+    expect(describeFetchFailure(new Error("the schema was never applied"))).toBe(
+      "the schema was never applied",
+    );
+    expect(describeFetchFailure(fetchFailed({ message: "socket hang up" }))).toBe(
+      "socket hang up",
+    );
+    expect(describeFetchFailure(fetchFailed({}))).toBe("fetch failed");
+  });
+
+  it("redacts, because a cause message is a string from a library", () => {
+    const leaky = fetchFailed({ message: `rejected Bearer ${"a1b2c3d4".repeat(6)}` });
+    expect(describeFetchFailure(leaky)).not.toContain("a1b2c3d4");
+    expect(describeFetchFailure(leaky)).toContain("***");
+  });
+
+  it("classifies only a certificate that may not exist yet as worth retrying", () => {
+    // A three-minute wait for a connection that was REFUSED is a bug, not
+    // patience. Retry only what a minute-old address does.
+    for (const code of ["EPROTO", "ERR_SSL_PROTOCOL_ERROR", "ERR_TLS_CERT_ALTNAME_INVALID", "ENOTFOUND"]) {
+      expect(isTlsNotReady(fetchFailed({ code }))).toBe(true);
+    }
+    for (const code of ["ECONNRESET", "ECONNREFUSED", "SELF_SIGNED_CERT_IN_CHAIN"]) {
+      expect(isTlsNotReady(fetchFailed({ code }))).toBe(false);
+    }
+    expect(isTlsNotReady(new Error("no code here"))).toBe(false);
+  });
+
+  it("reaches the sentence a failed Cloudflare call shows", async () => {
+    const dead = createCloudflareApi({
+      apiToken: FAKE_API_TOKEN,
+      baseUrl: FAKE_BASE,
+      fetchImpl: () => Promise.reject(fetchFailed({ code: "SELF_SIGNED_CERT_IN_CHAIN" })),
+    });
+    const err = await dead.verifyToken().then(() => null, (e: unknown) => e);
+    expect((err as Error).message).toContain("does not read macOS's trust store");
+    expect((err as Error).message).not.toContain("fetch failed");
   });
 });
