@@ -159,13 +159,25 @@ export function hoursThisWeek(
 }
 
 /**
- * The same arithmetic for TODAY, so the tray TITLE, the stopwatch card and the
- * tray menu can answer "and how much today?" without any of them inventing a
- * number.
+ * The same arithmetic for TODAY, so the tray TITLE, the tray menu's "Today"
+ * line, the stopwatch card and the dashboard's "Today" stat card can answer
+ * "and how much today?" without any of them inventing a number.
  *
- * `closedHoursToday` alone would disagree with "This week" — that one already
- * includes the open interval — and two totals on the same screen that disagree
- * about the last two hours is a support ticket.
+ * FOUR SURFACES, ONE FUNCTION. That is not tidiness — it is the only reason
+ * they cannot drift. Each of them is a number a person reads while glancing at
+ * another one of them, and two "today" figures minutes apart that differ by a
+ * few tenths is a bug report nobody can close, because neither figure is wrong.
+ *
+ * WHAT "TODAY" INCLUDES, precisely:
+ *  - every CLOSED countable interval whose `local_date` is the owner's local
+ *    day, merged across machines so two Macs awake at once are one hour and
+ *    not two (`closedHoursToday`, filled by `hoursOnDate()`);
+ *  - plus the interval that is OPEN right now, if it will survive
+ *    `v_countable` — credited up to its LAST REAL SIGNAL, never up to `now()`.
+ *
+ * `closedHoursToday` alone would disagree with the tray's "This week" — that
+ * one already includes the open interval — and two totals in one menu that
+ * disagree about the last two hours is a support ticket.
  */
 export function hoursToday(
   status: LiveStatus,
@@ -299,12 +311,40 @@ export function formatCount(n: number | null): string {
   return n === null ? "—" : n.toLocaleString();
 }
 
+/**
+ * '+4.2h vs last week' · '−1.1h vs yesterday' · null when there is no baseline.
+ *
+ * U+2212 MINUS SIGN, not a hyphen: at 12px beside tabular digits a hyphen reads
+ * as a dash in the text rather than as the sign of the number.
+ */
+function formatDelta(current: number | null, baseline: number | null, against: string): string | null {
+  if (current === null || baseline === null) return null;
+  const d = current - baseline;
+  const sign = d >= 0 ? "+" : "−";
+  return `${sign}${Math.abs(d).toFixed(1)}h vs ${against}`;
+}
+
 /** '+4.2h vs last week' · '−1.1h vs last week' · null when there is no baseline. */
 export function formatWeekDelta(thisWeek: number | null, lastWeek: number | null): string | null {
-  if (thisWeek === null || lastWeek === null) return null;
-  const d = thisWeek - lastWeek;
-  const sign = d >= 0 ? "+" : "−";
-  return `${sign}${Math.abs(d).toFixed(1)}h vs last week`;
+  return formatDelta(thisWeek, lastWeek, "last week");
+}
+
+/**
+ * '+1.2h vs yesterday' — the Today card's sub-line, the same shape "This week"
+ * carries beside it.
+ *
+ * Both sides are partial-versus-whole for most of the period, and deliberately
+ * so: "This week" spends Monday morning saying −30h against a finished week and
+ * that is the comparison the owner asked for. A card whose sub-line said
+ * something structurally different from its neighbour would read as unfinished,
+ * and the alternative — no sub-line — makes the row's baselines ragged.
+ *
+ * `today` is the LIVE figure (`hoursToday()`, open interval included);
+ * `yesterday` is necessarily closed, because a day that is over has no open
+ * interval to credit.
+ */
+export function formatDayDelta(today: number | null, yesterday: number | null): string | null {
+  return formatDelta(today, yesterday, "yesterday");
 }
 
 /** 'Wednesday, August 19 · week 34' — the dashboard subtitle. */

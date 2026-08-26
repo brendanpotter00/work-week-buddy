@@ -41,6 +41,31 @@ export function hoursThisWeek(
   return nOrZero(row as Row | undefined, "hours_this_week");
 }
 
+/**
+ * 1b) HOURS ON ONE LOCAL DAY — query 1 with a day's bounds instead of a week's.
+ *
+ * Deliberately the SAME `v_merged_day` union, not a `SUM(duration_s)`: a plain
+ * sum double-counts the half-hour where the work Mac and the personal Mac were
+ * both awake, and `docs/DATA_MODEL.md` measured that at 10% error on a single
+ * three-interval day. A day cannot contain more than 24 hours of "was working",
+ * however many Macs were on.
+ *
+ * The stray-bump floor and the jiggler exclusion arrive the only way they ever
+ * do — through `policyCte()` — so "today" and "this week" cannot end up
+ * disagreeing about which intervals count.
+ */
+export function hoursOnDate(db: DatabaseSync, p: Policy, localDate: string): number {
+  const row = db
+    .prepare(
+      `${policyCte(p)}
+       SELECT ROUND(SUM(e_ms - s_ms) / 3600000.0, 2) AS hours
+       FROM v_merged_day
+       WHERE local_date = ?`,
+    )
+    .get(localDate);
+  return nOrZero(row as Row | undefined, "hours");
+}
+
 export interface AvgInterval {
   readonly minutes: number;
   readonly n: number;

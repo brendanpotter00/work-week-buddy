@@ -17,6 +17,7 @@ import {
   formatHours,
   formatStopwatch,
   formatTrayTitle,
+  formatDayDelta,
   formatWeekDelta,
   hoursThisWeek,
   hoursToday,
@@ -265,6 +266,22 @@ describe("display formatters", () => {
     expect(formatWeekDelta(40, 35.8)).toBe("+4.2h vs last week");
     expect(formatWeekDelta(34.7, 35.8)).toBe("−1.1h vs last week");
     expect(formatWeekDelta(40, null)).toBeNull();
+  });
+
+  it("the day delta is the same shape, so the two cards read alike", () => {
+    // The Today card sits beside This week, and a sub-line that was
+    // structurally different from its neighbour's would read as unfinished.
+    expect(formatDayDelta(7.8, 6.6)).toBe("+1.2h vs yesterday");
+    expect(formatDayDelta(6.6, 7.8)).toBe("−1.2h vs yesterday");
+    // U+2212, not a hyphen: at 12px beside tabular digits a hyphen reads as
+    // punctuation rather than as the sign of the number.
+    expect(formatDayDelta(6.6, 7.8)?.startsWith("\u2212")).toBe(true);
+    // A dead heat is '+0.0', never a bare '0' — the sign is what says which
+    // way the comparison ran.
+    expect(formatDayDelta(5, 5)).toBe("+0.0h vs yesterday");
+    // No baseline, no claim. A first-ever day has no yesterday.
+    expect(formatDayDelta(7.8, null)).toBeNull();
+    expect(formatDayDelta(null, 6.6)).toBeNull();
   });
 
   it("the header date carries the ISO week number", () => {

@@ -20,6 +20,7 @@ import {
   byMachine,
   countIntervals,
   heatmap,
+  hoursOnDate,
   hoursThisWeek,
   localDateOf,
   longestInterval,
@@ -120,6 +121,16 @@ export function buildMetrics(
   // The previous week's bounds are this week's, shifted seven calendar days.
   const prevWeek = empty ? null : hoursThisWeek(db, p, tz, nowMs - WEEK_MS);
 
+  // `localDateOf`, not a UTC slice and not `date('now','localtime')`: "today"
+  // is the OWNER'S local day, and it has to be the same notion of a day the
+  // rows were stamped with at close. Yesterday is one CALENDAR day back
+  // (`addDays` goes through `Date.UTC`), so a DST boundary cannot turn it into
+  // the day before that.
+  const todayDate = localDateOf(nowMs, tz);
+  const yesterdayDate = addDays(todayDate, -1);
+  const todayH = empty ? null : hoursOnDate(db, p, todayDate);
+  const prevDayH = empty ? null : hoursOnDate(db, p, yesterdayDate);
+
   const thisWeekAvg = avgIntervalThisWeek(db, p, tz, nowMs);
   const allAvg = avgIntervalAllTime(db, p);
   const totals = allTimeTotals(db, p);
@@ -136,14 +147,18 @@ export function buildMetrics(
   const totalMachineHours = machines.reduce((a, m) => a + m.hours, 0);
   const meta = machineMeta(db);
 
-  const today = localDateOf(nowMs, tz);
-  const honesty = unionVsSum(db, p, today);
+  const honesty = unionVsSum(db, p, todayDate);
 
   return {
     generatedAtMs: nowMs,
     policy: wire,
     weekStart: wk.from,
     week: { hours: week, prevHours: prevWeek },
+    // Built exactly the way `week` is, one line above, and for the same
+    // reason: the Today card and the This week card beside it must not be able
+    // to disagree about which intervals count or about how two overlapping
+    // Macs are merged. `hoursOnDate()` is `hoursThisWeek()` with a day's bounds.
+    today: { date: todayDate, hours: todayH, prevHours: prevDayH },
     interval: {
       avgMin: thisWeekAvg.n === 0 ? null : thisWeekAvg.minutes,
       nIntervals: thisWeekAvg.n,
@@ -181,7 +196,7 @@ export function buildMetrics(
       lastSeenMs: meta.get(m.machineId)?.lastSeenMs ?? null,
     })),
     honesty: {
-      date: today,
+      date: todayDate,
       naiveSumH: empty ? null : honesty.naiveSumH,
       unionH: empty ? null : honesty.unionH,
     },
