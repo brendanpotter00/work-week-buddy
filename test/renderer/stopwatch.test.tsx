@@ -116,6 +116,39 @@ describe("while working", () => {
     expect(today?.textContent).toContain("7.8");
     expect(today?.textContent).toContain("counted so far");
   });
+
+  it("credits the open interval to the last real signal, not to the wall clock", async () => {
+    // AGENTS.md, the rule that outranks everything: an interval is worth time
+    // up to its LAST REAL SIGNAL, never up to now(). The status strip used to
+    // carry this assertion, through a `data-slot="credited-open"` readout that
+    // printed `creditedOpenMs()` under the label "counted". That readout was
+    // removed as a duplicate of the digits on the left of this very card, so
+    // the assertion moved here — to the one figure on the dashboard that is
+    // still built on `creditedOpenMs()`.
+    //
+    // The gap has to be big enough to survive rounding to one decimal, which
+    // is why this is twelve minutes of silence and not the twelve seconds the
+    // old test used: at twelve seconds both answers render "7.8" and the test
+    // proves nothing at all.
+    const { container } = await mount(
+      liveStatus({
+        closedHoursToday: 5.1,
+        openedAtMs: AS_OF - 3 * 3600_000,
+        lastSignalMs: AS_OF - 12 * MIN,
+      }),
+    );
+
+    // The session has been OPEN for three hours — that is a wall clock, and
+    // the digits are allowed to say so.
+    expect(digits(container)).toBe("3:00:00");
+
+    // But only 2h48m of it will be written when it closes, so Today is
+    // 5.1 + 2.8. If this figure were built on the wall clock it would read
+    // 8.1, and it would SHRINK by 0.2 the moment the interval closed.
+    const today = container.querySelector('[data-slot="stopwatch-today"]');
+    expect(today?.textContent).toContain("7.9");
+    expect(today?.textContent).not.toContain("8.1");
+  });
 });
 
 describe("while paused", () => {

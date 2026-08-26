@@ -1,8 +1,11 @@
 /**
  * The tray — `docs/IMPL_UI.md` §3.
  *
- * THE TITLE RULE: the title is HOURS THIS WEEK (PRD D3), updated once a minute
+ * THE TITLE RULE: the title is HOURS TODAY (PRD D3), updated once a minute
  * FROM THE MAIN PROCESS while an interval is open, and frozen otherwise.
+ *
+ * It was hours-this-week until the owner reversed D3. The week total did not
+ * go away — it is the "This week" line in the dropdown, one glance further in.
  *
  * Three sub-rules, each of which is a bug if you get it wrong:
  *
@@ -15,9 +18,12 @@
  * 2. The open interval contributes NOTHING when it will not be countable — the
  *    same `v_countable` filters, applied to the row that does not exist yet.
  * 3. "Frozen" means the minute timer DOES NOT EXIST, not that it ticks and
- *    no-ops. While frozen a one-shot week-rollover timer is armed instead;
- *    without it an idle Monday 00:00 leaves last week's total on the menu bar
- *    until the next keystroke.
+ *    no-ops. While frozen a one-shot day-rollover timer is armed instead;
+ *    without it an idle midnight leaves YESTERDAY's total on the menu bar
+ *    until the next keystroke. It has to be every midnight, not Monday's:
+ *    a today figure goes stale seven nights a week, and the dropdown's
+ *    "This week" still rolls over correctly because Monday 00:00 is one of
+ *    the midnights this timer already stops at.
  *
  * `setTitle(text, { fontType: "monospacedDigit" })` is not optional: it is the
  * menu bar's `tabular-nums`, and without it the title jitters horizontally
@@ -36,7 +42,7 @@ import {
   formatTrayTitle,
   hoursThisWeek,
   hoursToday,
-  nextIsoWeekStart,
+  nextLocalMidnight,
 } from "../shared/format";
 import { traySessionLabel } from "../shared/stopwatch";
 import type { DegradedReason, LiveStatus, PermissionKey } from "../shared/ipc-types";
@@ -57,7 +63,7 @@ export type RefreshReason =
   | "unlock"
   /** Sync was configured or unconfigured — the "Set up cloud sync…" item changes. */
   | "sync-config"
-  | "week-rollover";
+  | "day-rollover";
 
 type IconName = "trayTemplate" | "trayIdleTemplate" | "trayAlertTemplate";
 
@@ -203,7 +209,7 @@ export class TrayController {
     }
 
     const policy = this.deps.settings.all();
-    const hours = hoursThisWeek(status, policy, this.now());
+    const hours = hoursToday(status, policy, this.now());
     const degraded = status.degraded.length > 0;
     const first = status.degraded[0];
 
@@ -220,7 +226,7 @@ export class TrayController {
     this.tray.setToolTip(
       first !== undefined
         ? `Work Week Buddy — ${DEGRADED_COPY[first].menu}`
-        : `Work Week Buddy — ${formatHours(hours)}h this week`,
+        : `Work Week Buddy — ${formatHours(hours)}h today`,
     );
 
     this.armTimers(status, reason);
@@ -228,7 +234,7 @@ export class TrayController {
 
   /**
    * The minute timer exists ONLY while an interval is open. While it is frozen,
-   * a one-shot week-rollover timer keeps Monday 00:00 honest.
+   * a one-shot day-rollover timer keeps every local midnight honest.
    */
   private armTimers(status: LiveStatus, reason: RefreshReason): void {
     const open = status.state === "working";
@@ -243,7 +249,7 @@ export class TrayController {
       clearRepeating(this.minuteTimer);
       this.minuteTimer = null;
     }
-    if (reason === "week-rollover" || reason === "resume") {
+    if (reason === "day-rollover" || reason === "resume") {
       // A timer that slept through the boundary is not to be trusted.
       this.clearRollover();
     }
@@ -252,11 +258,11 @@ export class TrayController {
 
   private armRollover(): void {
     const schedule = this.deps.schedule ?? setTimeout;
-    const delay = Math.max(1000, nextIsoWeekStart(this.now()) - this.now());
-    // ≤ 7 days: no 32-bit setTimeout overflow risk.
+    const delay = Math.max(1000, nextLocalMidnight(this.now()) - this.now());
+    // ≤ 25 hours (DST): no 32-bit setTimeout overflow risk.
     this.rolloverTimer = schedule(() => {
       this.rolloverTimer = null;
-      this.refresh("week-rollover");
+      this.refresh("day-rollover");
     }, delay);
   }
 

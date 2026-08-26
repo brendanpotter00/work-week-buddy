@@ -120,8 +120,9 @@ describe("the order of the blocks down the page", () => {
     // as well, above the GitHub graph thing".
     //
     // The stopwatch was the first card on the page. What is true RIGHT NOW
-    // (which Mac, counted, last signal, the two switches) and the week's
-    // totals now come first, and the live session sits between them and the
+    // (which Mac, last signal, the two switches — the "counted" figure has
+    // since gone, see "the status strip" below) and the week's totals now
+    // come first, and the live session sits between them and the
     // heatmap. This is asserted rather than merely done, because an order
     // nothing checks is an order that drifts back to whatever reads best in
     // the source file.
@@ -190,7 +191,6 @@ describe("tabular-nums", () => {
       if (!el) throw new Error(`no span reading "${text}"`);
       return el;
     };
-    expect(spanWith("2h 41m").className).toContain("tabular-nums"); // the open interval
     // The last-signal cell reads '4m ago' rather than '12s ago': it settles to
     // the minute and no longer ticks at all. `last-signal.test.tsx` owns that
     // behaviour; this line only checks it kept the class.
@@ -400,7 +400,7 @@ describe("an IPC failure", () => {
 });
 
 describe("live status", () => {
-  it("pulses only while working, and credits the open interval to the last signal", async () => {
+  it("pulses once, and only while working", async () => {
     const asOf = Date.parse("2026-08-19T14:41:00-05:00");
     vi.spyOn(Date, "now").mockReturnValue(asOf);
     const status = liveStatus({
@@ -419,11 +419,13 @@ describe("live status", () => {
     await waitFor(() =>
       expect(container.querySelector('[data-slot="stopwatch-ping"]')).not.toBeNull(),
     );
-    // lastSignalMs − openedAtMs = 2h 41m. NOT nowMs − openedAtMs, which would
-    // be 2h 41m plus however long the countdown has been running. AGENTS.md,
-    // the rule that outranks everything.
-    expect(container.querySelector('[data-slot="credited-open"]')?.textContent).toBe("2h 41m");
-    expect(container.textContent).toContain("2h 41m");
+    // The strip used to print `creditedOpenMs()` here, and this test used to
+    // assert it was lastSignalMs − openedAtMs rather than nowMs − openedAtMs
+    // (AGENTS.md, the rule that outranks everything). The readout was removed
+    // as a duplicate of the stopwatch's own digits; that assertion did not go
+    // with it. It lives in `stopwatch.test.tsx`, "credits the open interval to
+    // the last real signal", where the gap is made big enough to actually tell
+    // the two apart — which the 12 seconds here never could.
     // 12 seconds since the last signal now reads 'just now', not '12s': the
     // strip settled to minute resolution so the stopwatch above is the only
     // thing on the page that moves. `last-signal.test.tsx` owns that.
@@ -500,6 +502,54 @@ describe("live status", () => {
     await waitFor(() =>
       expect(cardByLabel(container, "This week").textContent).toContain("⚠︎"),
     );
+  });
+});
+
+describe("the status strip", () => {
+  /** The strip's own direct children, named by `data-slot` or by tag. */
+  function stripParts(container: HTMLElement): string[] {
+    const strip = container.querySelector('[data-slot="status-strip"]');
+    if (!strip) throw new Error("no status strip");
+    return [...strip.children].map(
+      (el) => el.getAttribute("data-slot") ?? el.tagName.toLowerCase(),
+    );
+  }
+
+  it("does not print the counted figure a second time", async () => {
+    // The owner's words: "in the top bar where the jiggler and keep awake
+    // toggles are, can you remove the 'counted ten minutes' — I can already
+    // see the amount of time that's counted in the timer, I don't need to see
+    // it again up there."
+    const bridge = makeBridge(defaultHandlers(metricsBundle(), liveStatus()));
+    installBridge(bridge);
+
+    const { container } = renderApp(<App />);
+    await waitFor(() => expect(cardValue(cardByLabel(container, "This week"))).toBe("36.5"));
+
+    const strip = container.querySelector('[data-slot="status-strip"]')!;
+    expect(strip.querySelector('[data-slot="credited-open"]')).toBeNull();
+    expect(strip.textContent).not.toContain("counted");
+    // The stopwatch still shows the session — this is a removed duplicate, not
+    // a removed number. `stopwatch.test.tsx` owns what that figure is worth.
+    expect(container.querySelector('[data-slot="stopwatch-digits"]')).not.toBeNull();
+  });
+
+  it("has no doubled and no dangling separator", async () => {
+    // Deleting a cell out of a divider-separated row is how the row ends up
+    // with two rules side by side, or one hanging off the end. Nothing about
+    // that throws, and at 13px nobody files it — the app just looks broken.
+    const bridge = makeBridge(defaultHandlers(metricsBundle(), liveStatus()));
+    installBridge(bridge);
+
+    const { container } = renderApp(<App />);
+    await waitFor(() => expect(cardValue(cardByLabel(container, "This week"))).toBe("36.5"));
+
+    const parts = stripParts(container);
+    expect(parts.at(0)).not.toBe("separator");
+    expect(parts.at(-1)).not.toBe("separator");
+    expect(parts.some((x, i) => x === "separator" && parts[i + 1] === "separator")).toBe(false);
+    // machine, one rule, last signal, then the toggles.
+    expect(parts.filter((x) => x === "separator").length).toBe(1);
   });
 });
 

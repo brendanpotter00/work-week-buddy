@@ -46,6 +46,25 @@ export function nextIsoWeekStart(ms: number): number {
   return d.getTime();
 }
 
+/**
+ * Midnight at the start of the NEXT local day.
+ *
+ * This is what the tray's rollover timer sleeps until. The title is an hours-
+ * TODAY figure, so EVERY local midnight makes it stale, not only Monday's —
+ * and a machine that is idle overnight has no other reason to redraw. It is
+ * also a superset of `nextIsoWeekStart()`: every Monday 00:00 is a midnight,
+ * so the dropdown's "This week" rolls over on the same timer.
+ *
+ * Goes through `startOfLocalDay()` for the same reason `startOfIsoWeek()`
+ * does: `setDate` can cross a DST edge and leave 23:00 or 01:00 behind.
+ */
+export function nextLocalMidnight(ms: number): number {
+  const d = new Date(startOfLocalDay(ms));
+  d.setDate(d.getDate() + 1);
+  d.setHours(0, 0, 0, 0);
+  return d.getTime();
+}
+
 /** ISO-8601 week number, for the "week 34" line in the dashboard header. */
 export function isoWeekNumber(ms: number): number {
   const d = new Date(startOfLocalDay(ms));
@@ -121,7 +140,8 @@ export function isHoldCapped(
 const round1 = (n: number): number => Math.round(n * 10) / 10;
 
 /**
- * Hours this week for the tray title and the "This week" stat card.
+ * Hours this week for the tray menu's "This week" line and the "This week"
+ * stat card. NOT the tray title — that is `hoursToday()` (PRD D3, revised).
  *
  * The open interval is credited to `lastSignalMs`, not to `now`: crediting to
  * `now` makes the headline number SHRINK by up to fifteen minutes the moment
@@ -139,8 +159,9 @@ export function hoursThisWeek(
 }
 
 /**
- * The same arithmetic for TODAY, so the stopwatch card and the tray menu can
- * answer "and how much today?" without either of them inventing a number.
+ * The same arithmetic for TODAY, so the tray TITLE, the stopwatch card and the
+ * tray menu can answer "and how much today?" without any of them inventing a
+ * number.
  *
  * `closedHoursToday` alone would disagree with "This week" — that one already
  * includes the open interval — and two totals on the same screen that disagree
