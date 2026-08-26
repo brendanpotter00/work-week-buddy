@@ -35,6 +35,16 @@ These throw nothing and look fine. Each has a required mitigation.
 
 > **A recovery is not a loss.** If the tap goes down and comes back inside one liveness beat, nothing is closed. The tap goes down *because events were arriving faster than the callback returned* — which means the owner was at the keyboard. Closing his interval over two seconds of blindness is what turned a real working day into a pile of two-minute fragments. Only a tap that cannot be revived is a `tap_lost`, and it is reported once per outage, not once per beat.
 
+## The rule about the gates themselves
+
+> **A gate that fails during normal use is a gate its owner learns to bypass.** Every check must be measurable under the conditions it actually runs in.
+
+`--selftest` runs from `install.sh` one line after a command the owner typed, and from `runtime.ts` the instant the jiggler is switched on. Both are moments a human is demonstrably at the machine, so "the Mac is idle" is the one assumption no check there may make. The cursor-stillness check made it, failed two real installs over a quarter of a pixel of trackpad drift, and left the tracker not running until the gate was bypassed by hand — while every check that actually discriminates passed.
+
+The fix is never to delete the check or to print "do not touch the mouse". It is a third state: `ok` / `failed` / **could not be measured**, where the last one does not stop the install and is not reported as green either. Add one only where a verdict is genuinely unreachable, and only alongside evidence that a real fault still fails — see `src/native/cursor-stillness.ts` and its tests. It is not a softer way to fail.
+
+Also: a gate's failure message must name the check that failed rather than assume which one did. `install.sh` used to say "could not tell its own synthetic jiggle from human input" for every failure, including the one where discrimination was fine.
+
 ## Structural rules
 
 - **`src/core/` imports nothing from `electron`.** Enforced by `no-restricted-imports`. The interval machine is a pure reducer over timestamps-as-data, which is why a 15-minute test is arithmetic and runs in microseconds.

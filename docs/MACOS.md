@@ -127,6 +127,44 @@ The reset is **asynchronous** — a read taken immediately after `CGEventPost` r
 
 This is strictly better than a mouse jiggler: no cursor drift, no accidental drags, nothing fighting the pointer.
 
+### Proving that on a Mac somebody is using
+
+"The cursor did not move" is a real promise and `--selftest` checks it, but the first version of that check was wrong in a way worth recording, because the failure mode is not the usual one for this project — it was **loud and wrong**, not silent and wrong.
+
+It read the cursor, posted, read it again, and failed if the two differed. That is a correct measurement of an idle Mac. `--selftest` never runs on an idle Mac: `install.sh` invokes it one line after a command the owner typed, and `runtime.ts` invokes it the instant the jiggler is switched on. Measured on the owner's machine, twice, minutes apart:
+
+```
+FAIL cursor did not move · -974.13671875,495.265625 → -974.37890625,495.265625   (37 real signals in the run)
+FAIL cursor did not move · -1293.9921875,826.9453125 → -1271.59375,816.27734375  (14 real signals in the run)
+```
+
+A quarter of a pixel in the first one. Both runs passed every check that actually discriminates. The install stopped, the LaunchAgent was never written, and the tracker sat there not running until the gate was bypassed by hand. **A safety gate that fails during normal use trains its owner to bypass it**, which is strictly worse than not having the gate.
+
+The fix is not to delete the check or to ask the owner to keep his hands still. It is that the tap already knows who moved the pointer:
+
+| cursor | foreign pointer events in the window | verdict |
+|---|---|---|
+| moved | none | **FAIL** — the only thing that moved it was us |
+| still | none | **pass** |
+| either | one or more | **void** — measure again |
+| — | void every time | **could not be measured** |
+
+Load-bearing, and the reason this cannot hide a real regression: **our own tagged jiggle never reaches that counter**, because the callback returns at the `isOurs` branch above it. A jiggler that really does drag the cursor therefore produces *clean* windows with movement in them, and fails on the first one. Contamination can cost it an attempt; it cannot buy it a pass. Keystrokes are excluded for the same reason from the other direction — a key press cannot move a cursor, and the human running `install.sh` has their hands on the keyboard by definition.
+
+Each attempt first waits for the pointer counter to go flat for 120 ms, which costs an idle machine nothing and finds the gap on a busy one. Six attempts, then "could not be measured" — which is neither `ok` nor `FAIL` in the transcript, does not stop the install, and does not report green. See `src/native/cursor-stillness.ts`; the decision logic is behind a probe interface and is the one part of `--selftest` with real unit tests.
+
+Measured 2026-08-25, arm64, macOS 26.5.1, against the real tap, with a synthetic hand posting untagged `kCGEventMouseMoved` at 100 Hz (a trackpad's own report rate) to stand in for a person:
+
+```
+old check, ~100 Hz of movement    →  FAIL cursor did not move · -653.09,609.00 → -652.59,609.00   exit 1
+new check, ~100 Hz for 2 s        →  ok   · 2 attempts, nothing else moving                       exit 0
+new check, ~100 Hz for 9 s        →  ?    could not measure: foreign pointer input in all 6        exit 0
+new check, jiggler warps 1 px     →  FAIL · the jiggle moved it — zero foreign pointer events      exit 1  (4 of 4 runs)
+new check, machine merely in use  →  ok   · 1 attempt                                              exit 0  (6 of 6 runs, 1–63 signals)
+```
+
+Half a pixel is what the old check died on, which is the same order as the quarter-pixel that failed the owner's install. The regression row is the one that matters: a `postJiggle` patched to `CGWarpMouseCursorPosition` one pixel — a warp posts no event, so the window stays clean, which is exactly what a real regression looks like from the check's side — failed **every** run, including runs with 39, 45 and 107 real signals arriving. Verdicts came in 1–3 attempts at up to 208 signals; only 355 signals, which took saturating the tap on purpose, ran the budget out.
+
 **Corollary, and it is why the watchdog is read-only:** since even a null event resets the idle clock, there is no side-effect-free canary. Any periodic self-probe would double as an always-on jiggler — no screensaver, no display sleep, permanently green in Slack.
 
 ---

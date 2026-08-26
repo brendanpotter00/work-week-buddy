@@ -10,9 +10,15 @@
 #     A TCC grant binds to (bundle id + designated requirement + on-disk path),
 #     so a bundle run from ~/Downloads or from release/ has no permissions and
 #     tracks nothing — silently.
-#   * The self-test is a HARD GATE. If it fails, the app cannot tell its own
-#     synthetic jiggle from human input, and hours inflate with fake time
-#     without anything looking wrong.
+#   * The self-test is a HARD GATE, over two separate promises: that the app can
+#     tell its own synthetic jiggle from human input (fail that and hours inflate
+#     with fake time without anything looking wrong), and that the jiggle moves
+#     nothing on screen. The failure message names the check rather than assuming
+#     which one broke.
+#   * It runs one line after an install the owner just typed, so it runs WHILE
+#     SOMEBODY IS USING THE MAC. A check that cannot get a verdict under those
+#     conditions reports COULD NOT BE MEASURED and does not stop the install: a
+#     gate that fails during normal use is a gate its owner learns to bypass.
 #   * The LaunchAgent goes last, so a failed install never leaves a broken app
 #     wired to launch at every login.
 #
@@ -411,18 +417,53 @@ fi
 
 # ── 5. the hard gate ────────────────────────────────────────────────────────
 hdr "5. Self-test (hard gate)"
+#
+# THIS RUNS WHILE SOMEBODY IS AT THE KEYBOARD. It is one line after an install
+# the owner just typed, so "the Mac is idle" is the one assumption no check here
+# may make. The checks that need an undisturbed machine report COULD NOT BE
+# MEASURED rather than failing — see src/native/cursor-stillness.ts. Nothing
+# below asks the owner to keep his hands off the mouse: an instruction he has to
+# obey is a gate that fails when he forgets.
+#
+# The transcript is captured as well as shown, so the pass path can tell a clean
+# green run from one that could not measure something.
 if [ "$DRY_RUN" = "1" ]; then
   printf "  + \"%s\" --selftest\n" "$APP_BIN"
   info "a non-zero exit here aborts the install"
-elif "$APP_BIN" --selftest; then
-  ok "self-test passed"
 else
-  bad "SELF-TEST FAILED — stopping before launch-at-login is installed."
-  info "The app could not prove it can tell its own synthetic jiggle from human"
-  info "input. Left running, the jiggler would be counted as work and your hours"
-  info "would inflate with fake time, silently."
-  info "Run \"$APP_BIN\" --selftest by hand to see which check failed."
-  exit 1
+  SELFTEST_LOG="$(mktemp -t wwb-selftest)"
+  # shellcheck disable=SC2064 -- expand SELFTEST_LOG now, not at trap time.
+  trap "rm -f '$SELFTEST_LOG'" EXIT
+  # `2>&1 |` and not a redirect to the file alone: the owner watches this step,
+  # and a gate that prints nothing for eight seconds and then aborts is a gate
+  # nobody trusts. pipefail (set at the top) is what keeps the app's exit status
+  # rather than tee's.
+  if "$APP_BIN" --selftest 2>&1 | tee "$SELFTEST_LOG"; then
+    if grep -q "COULD NOT BE MEASURED" "$SELFTEST_LOG"; then
+      # Deliberately not the words "self-test passed": nothing failed, but
+      # something was not proven, and those are different facts.
+      warn "no check failed, but one COULD NOT BE MEASURED (marked ? above)."
+      info "That is neither a pass nor a failure. It happens when the Mac was in"
+      info "use while the check ran — most likely you were moving the mouse."
+      info "The install continues. For a verdict, re-run the self-test with your"
+      info "hands off the trackpad:"
+      info "  \"$APP_BIN\" --selftest"
+    else
+      ok "self-test passed"
+    fi
+  else
+    # NOT "the app could not tell its own jiggle from human input" — that names
+    # one of the two promises this gate covers, and it is the wrong one about
+    # half the time. Say which check failed instead of guessing why.
+    bad "SELF-TEST FAILED — stopping before launch-at-login is installed."
+    info "Read the FAIL line above; it names the check. Two promises are gated:"
+    info "  · DISCRIMINATION (round-trip, userData, srcPid, kCGEventNull) — if"
+    info "    one of those failed, the jiggler counts as work and your hours"
+    info "    inflate with fake time, silently."
+    info "  · UNOBTRUSIVENESS ('cursor did not move') — the jiggler is dragging"
+    info "    your pointer."
+    exit 1
+  fi
 fi
 
 # ── 6. doctor (advisory) ────────────────────────────────────────────────────

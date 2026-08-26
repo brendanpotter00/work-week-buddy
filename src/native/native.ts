@@ -26,6 +26,12 @@
  */
 import koffi, { type LibraryHandle } from "koffi";
 import { WWB_MAGIC } from "../shared/constants";
+import {
+  cursorStillnessCheck,
+  measureCursorStillness,
+  type PostOutcome,
+  type StillnessProbe,
+} from "./cursor-stillness";
 import type {
   AccessState,
   Permissions,
@@ -736,6 +742,14 @@ const DRAIN_LATE_MS = 50;
 
 export const counters = {
   realEvents: 0,
+  /**
+   * Of those, the ones that were not a keystroke — anything that could have
+   * moved the pointer. Read by the self-test's cursor-stillness check, which
+   * has to know whether anything OTHER than our own jiggle was moving the
+   * cursor inside its measurement window. Our own event never reaches this
+   * line: `isOurs` returns above it.
+   */
+  realPointerEvents: 0,
   ourEvents: 0,
   foreignNullEvents: 0,
   disableNotices: 0,
@@ -871,6 +885,13 @@ function tapCallback(_proxy: bigint | null, type: number, event: bigint | null):
       pending.keyCount++;
       if (ns > pending.keyLastNs) pending.keyLastNs = ns;
     } else {
+      // Everything that is not a keystroke, counted separately: a key press
+      // cannot move a cursor, and the self-test's stillness window would
+      // otherwise be voided by the owner simply typing. One increment, no
+      // branching on individual mouse types — a list of "which types move the
+      // pointer" would be a list to get subtly wrong, and being over-inclusive
+      // here only ever costs an extra retry.
+      counters.realPointerEvents++;
       pending.mouseCount++;
       if (ns > pending.mouseLastNs) pending.mouseLastNs = ns;
     }
@@ -1489,6 +1510,54 @@ const GATE_BURST = 60;
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * Long enough for a post to come back through our own tap, short enough that a
+ * handful of them are not a wait. Measured round trips are single-digit
+ * milliseconds; this is two orders of magnitude of headroom.
+ */
+const ROUND_TRIP_MS = 500;
+
+/**
+ * Post one tagged jiggle and wait for our own tap to hand it back.
+ *
+ * The round trip is what makes "the cursor is still where it was" mean
+ * anything: until the event has been through the WindowServer and back, an
+ * unmoved cursor only says the WindowServer has not got to it yet. So a post
+ * that does not come back voids the window rather than passing it.
+ *
+ * `selfTestSaw` is cleared on every exit, including the not-posted one. A stale
+ * hook left armed would fire on the next jiggle the app makes in production.
+ */
+async function postAndAwaitRoundTrip(): Promise<PostOutcome> {
+  const seen = new Promise<boolean>((resolve) => {
+    selfTestSaw = () => {
+      resolve(true);
+    };
+  });
+  const posted = postJiggle();
+  if (!posted) {
+    selfTestSaw = null;
+    return { posted: false, roundTripped: false };
+  }
+  const roundTripped = await Promise.race([seen, sleep(ROUND_TRIP_MS).then(() => false)]);
+  selfTestSaw = null;
+  return { posted: true, roundTripped };
+}
+
+/**
+ * The macOS half of the cursor-stillness check. Everything it can see is a
+ * CoreGraphics read or a counter the tap callback owns — which is exactly why
+ * the decision logic on the other side of this seam can be unit-tested with no
+ * Mac, no koffi and no TCC grant.
+ */
+const stillnessProbe: StillnessProbe = {
+  cursor: cursorPosition,
+  pointerEvents: () => counters.realPointerEvents,
+  tapAlive: isTapEnabled,
+  postAndSettle: postAndAwaitRoundTrip,
+  sleep,
+};
+
 function timed<T>(fn: () => T): { value: T; ms: number } {
   const at = Date.now();
   const value = fn();
@@ -1618,7 +1687,6 @@ export async function selfTest(): Promise<SelfTestReport> {
   );
 
   // 4 ─ The round trip: a tagged jiggle must come back identified as ours.
-  const before = cursorPosition();
   const arrived = new Promise<SeenJiggle | null>((resolve) => {
     selfTestSaw = (ev, type) => {
       const rawUser = CGEventGetIntegerValueField(ev, kCGEventSourceUserData);
@@ -1668,12 +1736,13 @@ export async function selfTest(): Promise<SelfTestReport> {
   );
 
   // 5 ─ M5 gate (a): the cursor did not move one pixel.
-  const after = cursorPosition();
-  add(
-    "cursor did not move",
-    after.x === before.x && after.y === before.y,
-    `${before.x},${before.y} → ${after.x},${after.y}`,
-  );
+  //
+  // Measured on a machine somebody is using, because that is the only kind of
+  // machine this ever runs on — `install.sh` calls `--selftest` the instant the
+  // install finishes. The window is voided rather than failed when foreign
+  // pointer input lands in it, and retried; see src/native/cursor-stillness.ts
+  // for why that cannot hide a jiggler which really does move the cursor.
+  checks.push(cursorStillnessCheck(await measureCursorStillness(stillnessProbe)));
 
   // 5b ─ M1 GATE (d). THE ONE THAT WAS NEVER RUN.
   //

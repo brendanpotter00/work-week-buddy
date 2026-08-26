@@ -230,6 +230,29 @@ describe("trap #13 — the disable notice is handled before any field read", () 
     expect(ours).toBeLessThan(body.indexOf("counters.realEvents++"));
   });
 
+  it("counts foreign pointer input separately, and below the isOurs branch", () => {
+    // The cursor-stillness check reads this counter to decide whether anything
+    // OTHER than our own jiggle could have moved the pointer inside its
+    // measurement window. Two things have to hold or that decision inverts:
+    //
+    //   * our own event must never reach it — otherwise every window we create
+    //     looks contaminated, the check can never reach a verdict, and a
+    //     jiggler that really does drag the cursor passes forever;
+    //   * a keystroke must never reach it — otherwise the owner typing (which
+    //     is the normal state of the machine `install.sh` runs on) voids every
+    //     window for something that cannot move a cursor.
+    const ours = body.indexOf("isOurs(ev)");
+    const pointer = body.indexOf("counters.realPointerEvents++");
+    expect(pointer).toBeGreaterThan(-1);
+    expect(ours).toBeLessThan(pointer);
+    // It lives in the else branch of the key/mouse split, so keyboard types
+    // cannot reach it.
+    const keyBranch = body.indexOf("pending.keyCount++");
+    expect(keyBranch).toBeGreaterThan(-1);
+    expect(keyBranch).toBeLessThan(pointer);
+    expect(body.slice(keyBranch, pointer)).toContain("} else {");
+  });
+
   it("does no I/O in the callback — the budget is 1.6 microseconds", () => {
     // A 1.6-second block gets the tap disabled by the OS. Everything heavy
     // happens on the setImmediate turn.
@@ -387,5 +410,40 @@ describe("the close rule, in the drain path", () => {
     // A stale anchor can push a computed time into the future; the clamp stops
     // that. It can never move a time later, so it can never add minutes.
     expect(body).toMatch(/Math\.round\(Math\.min\(ms, Date\.now\(\)\)\)/);
+  });
+});
+
+describe("the cursor check measures a Mac somebody is using", () => {
+  it("never compares two bare cursor reads in the self-test", () => {
+    // What it used to do: read the cursor, post, read it again, fail if they
+    // differ. Correct on an idle Mac, a coin flip on a used one — and
+    // `--selftest` runs one line after an install the owner just typed. It
+    // failed his install twice while every discrimination check passed, and the
+    // only way past it was to bypass the gate by hand.
+    expect(CODE).not.toMatch(/after\.x === before\.x/);
+    expect(CODE).not.toMatch(/cursorPosition\(\)[\s\S]{0,400}cursorPosition\(\)/);
+  });
+
+  it("routes the check through the testable decision logic", () => {
+    // Everything that decides anything lives in cursor-stillness.ts, behind a
+    // probe interface — which is the only reason any of this has tests at all.
+    // native.ts contributes the four CoreGraphics reads and nothing else.
+    expect(CODE).toMatch(/measureCursorStillness\(stillnessProbe\)/);
+    expect(CODE).toMatch(/cursorStillnessCheck\(/);
+    const probe = CODE.slice(CODE.indexOf("const stillnessProbe"));
+    expect(probe).toMatch(/pointerEvents: \(\) => counters\.realPointerEvents/);
+    expect(probe).toMatch(/tapAlive: isTapEnabled/);
+  });
+
+  it("clears the round-trip hook on every path out, including the not-posted one", () => {
+    // `selfTestSaw` is a single global slot. Left armed, it would fire on the
+    // next jiggle the app posts in production, long after the self-test ended.
+    const body = functionBody(CODE, "postAndAwaitRoundTrip");
+    const notPosted = body.indexOf("if (!posted)");
+    expect(notPosted).toBeGreaterThan(-1);
+    expect(body.slice(notPosted, body.indexOf("return { posted: false"))).toContain(
+      "selfTestSaw = null",
+    );
+    expect(body.match(/selfTestSaw = null/g) ?? []).toHaveLength(2);
   });
 });
