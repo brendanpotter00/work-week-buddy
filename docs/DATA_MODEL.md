@@ -78,7 +78,14 @@ CREATE TABLE IF NOT EXISTS sync_state (k TEXT PRIMARY KEY, v TEXT);
 
 ## Worker API
 
-`https://wwb-sync.<subdomain>.workers.dev`
+`https://wwb-sync.<subdomain>.workers.dev` — and, optionally, a second hostname
+on a domain the owner already has. **Both reach the same script and the same
+database**, and the Worker stamps `machine_id` from the credential rather than
+from the host, so which address a request arrives on is invisible to everything
+below. Nothing keyed to a URL exists: `pull_watermark`, `last_cloud_write_ms`,
+`synced_at_ms` and the `machine_token` registry are all keyed to a `seq`, a
+machine or a digest, which is why changing the address a Mac uses moves no data
+and needs no migration.
 
 | Route | Purpose |
 |---|---|

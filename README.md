@@ -139,14 +139,21 @@ contents. It runs in CI's macOS job. `docs/IMPL_UI.md` §7.3 has the full list.
 **Menu-bar icon → *Set up cloud sync…***, and paste one Cloudflare API token.
 That is the whole of it: no terminal, no `wrangler login`, no Node toolchain on
 the Mac being set up. It is on the tray whenever sync is unconfigured, and in
-Settings → Cloud sync either way. `docs/CLOUDFLARE.md` has the three permissions
-the token needs and how to make one.
+Settings → Cloud sync either way. `docs/CLOUDFLARE.md` has the permissions the
+token needs — two required, two you can skip — and how to make one.
 
 Setup creates or **adopts** the D1 database, applies `worker/schema.sql`,
-**enrols this Mac**, deploys the Worker, turns on the workers.dev address, proves
-the Worker answers, and stores this Mac's token in the Keychain. Pasting the
-token starts nothing — a read-only probe runs first, and the next screen says
-what is already on the account, including which Macs are already enrolled.
+**enrols this Mac**, deploys the Worker, turns on its addresses, proves they
+answer, and stores this Mac's token in the Keychain. Pasting the token starts
+nothing — a read-only probe runs first, and the next screen says what is already
+on the account, including which Macs are already enrolled.
+
+**Addresses, plural.** The `workers.dev` one is always on. You can also put the
+Worker on a domain you already have on the same Cloudflare account, and then
+both are live: each Mac uses whichever it can reach, and the app reports what
+each one did. Some work networks block `*.workers.dev` because everybody's
+Workers share it. Nothing is traded away for the second address — both reach the
+same script and the same database — and it needs no extra permission.
 
 **Each Mac enrols itself, and only itself.** It mints its own token, keeps the
 plaintext in its own Keychain, and sends Cloudflare only the SHA-256 — recorded

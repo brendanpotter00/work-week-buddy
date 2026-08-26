@@ -302,25 +302,46 @@ read-only probe runs, and the next screen tells you what is already on that
 account: an existing `wwb` database and how many intervals are in it, an existing
 Worker, and which Macs are already enrolled.
 
+Before you press it, the **Address** section is worth a look. The workers.dev
+address is always turned on; ticking *Also put it on a domain you own* adds a
+second one on a domain already on the same Cloudflare account. Both go live,
+this Mac saves whichever it can reach, and the other is remembered.
+
 Press **Set it up**. In order: the database is created or adopted →
 `worker/schema.sql` is applied → **this Mac is enrolled** → the Worker is
-deployed → the workers.dev address is turned on → the Worker is asked whether it
+deployed → its addresses are turned on → **every** address is asked whether it
 answers → sync is turned on here, with no relaunch.
 
 **You should see** every step ticked and *Sync is on.*
 
-**If the token is missing a permission**, the wizard says which one, by name, and
-tells you to edit the token you already have rather than making a new one. Do
-that — a new token would need all three set again.
+**If the token is missing a permission**, the wizard says which one, by name,
+**and which level to add it at** — the Zone row goes in the other half of that
+form — and tells you to edit the token you already have rather than making a new
+one. Do that: a new token would need every row set again.
 
 **If `GET /health` takes a while on a brand-new address**, that is the
 workers.dev TLS certificate being issued. DNS resolves before TLS is ready —
 about two minutes on the first setup. The wizard waits it out rather than
 reporting it.
 
-**If nothing answers from the work Mac**, its proxy is blocking `workers.dev`.
-The Worker is fine; that Mac cannot reach it. `/health` is unauthenticated
-precisely so this can be tested before any token is involved.
+**If nothing answers from the work Mac**, read the address report on the last
+screen rather than guessing — that is what it is for. It says, per address, what
+happened, and the answers point at different fixes:
+
+| What it says | What that means |
+|---|---|
+| *does not resolve from this Mac* | DNS. On a work Mac usually a filtered hostname — the case a second address on your own domain is for |
+| *closed mid-request … a proxy dropped it* | the proxy sees the connection and kills it. A different hostname may or may not help |
+| *signed by an authority this app does not trust* | a corporate root CA that macOS trusts and Node does not. **Chrome will load the same URL fine**, and no change of hostname fixes it |
+| *the TLS handshake failed* | on a minutes-old address, usually the certificate still being issued. Try again later |
+| *a Cloudflare challenge page* | your ZONE's own settings — Bot Fight Mode, a WAF rule, Access — now apply, because a custom domain routes through the zone and workers.dev does not |
+
+Worth doing alongside it: open both `/health` URLs in Chrome on that Mac. **A
+browser that succeeds where the app fails is the signature of the trust-store
+case**, which is a completely different fix from a blocked domain.
+
+`/health` is unauthenticated precisely so all of this can be tested before any
+token is involved.
 
 **Re-running this is safe.** An existing database is adopted rather than
 recreated, every statement in the schema is `CREATE TABLE IF NOT EXISTS`, and
