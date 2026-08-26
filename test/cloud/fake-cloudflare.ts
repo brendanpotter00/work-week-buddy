@@ -39,6 +39,21 @@ export const FAKE_ACCOUNT_NAME = "Test Account";
 export const FAKE_SUBDOMAIN = "test-subdomain";
 export const FAKE_BASE = "https://fake-cloudflare.test/client/v4";
 
+/**
+ * The zones this fake account owns.
+ *
+ * `.test` is reserved by RFC 6761 and can never be a real domain, so nothing in
+ * here can ever accidentally name something that exists. AGENTS.md: no real
+ * domain, account id or credential in a tracked file, ever.
+ */
+export const FAKE_ZONE_ID = "00000000000000000000000000000010";
+export const FAKE_ZONE_NAME = "example.test";
+export const OTHER_ZONE_ID = "00000000000000000000000000000011";
+export const OTHER_ZONE_NAME = "other.test";
+/** A zone on somebody ELSE's account, so the client-side filter is exercised. */
+export const FOREIGN_ZONE_ID = "00000000000000000000000000000012";
+export const FOREIGN_ZONE_NAME = "not-yours.test";
+
 /** This Mac, and another one. Neither is a real IOPlatformUUID. */
 export const THIS_MAC = "00000000-0000-0000-0000-00000000AAAA";
 export const OTHER_MAC = "00000000-0000-0000-0000-00000000BBBB";
@@ -85,6 +100,16 @@ interface Database {
   schemaApplied: boolean;
 }
 
+/** One row of the account's Worker custom domains. */
+export interface WorkerDomainRow {
+  id: string;
+  cert_id: string;
+  hostname: string;
+  zone_id: string;
+  zone_name: string;
+  service: string;
+}
+
 /** A recorded request body against the D1 query endpoint. */
 export interface QueryBody {
   sql: string;
@@ -106,6 +131,31 @@ export class FakeCloudflare {
   /** null until something has been uploaded. */
   script: { bindings: StoredBinding[]; body: UploadRecord } | null = null;
   workersDevEnabled = false;
+
+  /**
+   * Zones. Two on this account and one on another, so a client-side filter that
+   * stopped working shows up as a test failure rather than as somebody else's
+   * domain in a picker.
+   */
+  zones: Array<{ id: string; name: string; status: string; account: { id: string } }> = [
+    { id: FAKE_ZONE_ID, name: FAKE_ZONE_NAME, status: "active", account: { id: FAKE_ACCOUNT_ID } },
+    { id: OTHER_ZONE_ID, name: OTHER_ZONE_NAME, status: "active", account: { id: FAKE_ACCOUNT_ID } },
+    {
+      id: FOREIGN_ZONE_ID,
+      name: FOREIGN_ZONE_NAME,
+      status: "active",
+      account: { id: "00000000000000000000000000000099" },
+    },
+  ];
+  /** Custom domains already attached to Workers. Empty is the first run. */
+  workerDomains: WorkerDomainRow[] = [];
+  /**
+   * Hostnames that already carry a DNS record belonging to something else.
+   *
+   * Cloudflare REFUSES a custom domain on one of these — code 100117 — rather
+   * than overwriting it, and this is how a test reaches that branch.
+   */
+  dnsRecords: string[] = [];
 
   /** Every request, so a test can assert what was and was not called. */
   readonly calls: Array<{ method: string; path: string; body?: string }> = [];
@@ -254,6 +304,19 @@ export class FakeCloudflare {
       return ok({ id: "token-id", status: this.tokenStatus });
     }
 
+    // ── zones ────────────────────────────────────────────────────────────
+    if (method === "GET" && path === "/zones") {
+      const denied = this.deny("Zone: Read");
+      if (denied) return denied;
+      const wantAccount = url.searchParams.get("account.id");
+      const wantName = url.searchParams.get("name");
+      return ok(
+        this.zones
+          .filter((z) => wantAccount === null || z.account.id === wantAccount)
+          .filter((z) => wantName === null || z.name === wantName),
+      );
+    }
+
     // ── accounts ─────────────────────────────────────────────────────────
     if (method === "GET" && path === "/accounts") {
       const denied = this.deny("Account Settings: Read");
@@ -338,6 +401,21 @@ export class FakeCloudflare {
       if (this.subdomain === null) return err(404, [{ code: 10007, message: "not found" }]);
       return ok({ subdomain: this.subdomain });
     }
+    // ── Worker custom domains ────────────────────────────────────────────
+    if (rest === "/workers/domains" && method === "GET") {
+      const denied = this.deny("Workers Scripts: Read");
+      if (denied) return denied;
+      const wanted = url.searchParams.get("hostname");
+      return ok(
+        this.workerDomains.filter((d) => wanted === null || d.hostname === wanted),
+      );
+    }
+    if (rest === "/workers/domains" && method === "PUT") {
+      const denied = this.deny("Workers Scripts: Edit");
+      if (denied) return denied;
+      return this.attachDomain(init);
+    }
+
     if (rest === "/workers/subdomain" && method === "PUT") {
       const denied = this.deny("Workers Scripts: Edit");
       if (denied) return denied;
@@ -347,6 +425,85 @@ export class FakeCloudflare {
     }
 
     return err(404, [{ code: 7003, message: "no route" }]);
+  }
+
+  /**
+   * `PUT /accounts/{id}/workers/domains`.
+   *
+   * A FAKE THAT FAILS OUR MISTAKES, not one that models Cloudflare. The first
+   * check has no counterpart at Cloudflare at all: it refuses any body key this
+   * documented endpoint does not have. `override_existing_dns_record` is the
+   * one that matters — wrangler sends it on a different, undocumented endpoint,
+   * it reads like it could clobber a DNS record belonging to something else on
+   * the owner's zone, and the only guarantee worth having is that this app
+   * cannot send it even by accident.
+   */
+  private attachDomain(init: RequestInit | undefined): Response {
+    const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+    const forbidden = Object.keys(body).filter(
+      (k) => k.startsWith("override_") || k === "environment",
+    );
+    if (forbidden.length > 0) {
+      return err(400, [
+        {
+          code: 9999,
+          message:
+            `this fake refuses flags the documented endpoint does not have: ` +
+            `${forbidden.join(", ")}`,
+        },
+      ]);
+    }
+
+    const hostname = String(body["hostname"] ?? "");
+    const service = String(body["service"] ?? "");
+    const zone =
+      typeof body["zone_id"] === "string"
+        ? this.zones.find((z) => z.id === body["zone_id"])
+        : this.zones.find((z) => z.name === body["zone_name"]);
+    if (zone === undefined) {
+      return err(400, [
+        {
+          code: 10025,
+          message: `workers.api.error.origin_hostname_mismatch_zone`,
+        },
+      ]);
+    }
+
+    // Something else already answers at that name. Cloudflare refuses; it does
+    // not replace. The exact text has already changed once, so nothing in the
+    // app may read it — only the code.
+    if (this.dnsRecords.includes(hostname)) {
+      return err(400, [
+        {
+          code: 100117,
+          message:
+            `Hostname '${hostname}' already has externally managed DNS records ` +
+            `(A, CNAME, etc).`,
+        },
+      ]);
+    }
+
+    const existing = this.workerDomains.find((d) => d.hostname === hostname);
+    if (existing !== undefined) {
+      // Already ours: a PUT of the same thing is a no-op that answers with the
+      // same record. Attaching to a DIFFERENT Worker is an origin conflict —
+      // status and code here are INFERRED, so no test may assert on them.
+      if (existing.service !== service) {
+        return err(409, [{ code: 100117, message: "origin conflict" }]);
+      }
+      return ok(existing);
+    }
+
+    const row: WorkerDomainRow = {
+      id: `domain-${String(this.workerDomains.length + 1)}`,
+      cert_id: `00000000-0000-0000-0000-00000000000${String(this.workerDomains.length + 1)}`,
+      hostname,
+      zone_id: zone.id,
+      zone_name: zone.name,
+      service,
+    };
+    this.workerDomains.push(row);
+    return ok(row);
   }
 
   /**
@@ -534,6 +691,36 @@ function err(status: number, errors: Array<{ code: number; message: string }>): 
  * token this run just enrolled is the one that works — and that a revoked one
  * stops working immediately.
  */
+/**
+ * How ONE hostname behaves, when a Mac has more than one address to try.
+ *
+ * This is the fake that proves the whole custom-domain feature: the point of
+ * having two addresses is that a given Mac may reach one and not the other, and
+ * every interesting case is a difference between two hosts rather than a
+ * property of the Worker.
+ */
+export interface FakeHostBehaviour {
+  /** `/health` fails this many times before answering. */
+  healthFailures?: number;
+  /**
+   * This hostname is unreachable from this Mac, for ever. A corporate proxy
+   * that drops the connection — which is world 1, the reason this exists.
+   */
+  blocked?: boolean;
+  /**
+   * The certificate is not issued yet: fails this many times with `EPROTO`,
+   * then answers. Worth WAITING on, unlike everything else here.
+   */
+  tlsNotReady?: number;
+  /**
+   * A Cloudflare challenge page: 403 with an HTML body. A custom domain routes
+   * through the ZONE, so Bot Fight Mode, a WAF rule or Access on that domain
+   * would suddenly apply to sync traffic — and answer a client that cannot
+   * solve a challenge with an unsolvable, permanent 403.
+   */
+  challenge?: boolean;
+}
+
 export function workerFetchFor(
   cloud: FakeCloudflare,
   opts: {
@@ -541,6 +728,8 @@ export function workerFetchFor(
     authFailures?: number;
     /** Model a Worker whose database has no registry table: 503, not 401. */
     noRegistry?: boolean;
+    /** Per-hostname behaviour, keyed by host. Anything absent behaves normally. */
+    hosts?: Record<string, FakeHostBehaviour>;
   } = {},
 ): typeof fetch {
   let remaining = opts.healthFailures ?? 0;
@@ -548,8 +737,43 @@ export function workerFetchFor(
   // so an authenticated read right after a redeploy can hit the PREVIOUS
   // version and reject a token that is completely correct.
   let staleVersion = opts.authFailures ?? 0;
+  const hostState = new Map<string, { tls: number; health: number }>(
+    Object.entries(opts.hosts ?? {}).map(([host, b]) => [
+      host,
+      { tls: b.tlsNotReady ?? 0, health: b.healthFailures ?? 0 },
+    ]),
+  );
   return async (input, init) => {
     const url = new URL(typeof input === "string" ? input : String(input));
+    const host = opts.hosts?.[url.hostname];
+    if (host !== undefined) {
+      const state = hostState.get(url.hostname) ?? { tls: 0, health: 0 };
+      if (host.blocked === true) {
+        // Exactly what undici throws when a proxy drops the connection: the
+        // message says nothing and the cause says everything.
+        throw Object.assign(new TypeError("fetch failed"), {
+          cause: { code: "ECONNRESET" },
+        });
+      }
+      if (state.tls > 0) {
+        state.tls -= 1;
+        hostState.set(url.hostname, state);
+        throw Object.assign(new TypeError("fetch failed"), { cause: { code: "EPROTO" } });
+      }
+      if (state.health > 0) {
+        state.health -= 1;
+        hostState.set(url.hostname, state);
+        throw Object.assign(new TypeError("fetch failed"), {
+          cause: { code: "ENOTFOUND" },
+        });
+      }
+      if (host.challenge === true && url.pathname !== "/health") {
+        return new Response("<!DOCTYPE html><html><body>Checking your browser…</body></html>", {
+          status: 403,
+          headers: { "content-type": "text/html; charset=UTF-8" },
+        });
+      }
+    }
     if (url.pathname === "/health") {
       if (remaining > 0) {
         remaining -= 1;

@@ -511,7 +511,12 @@ describe("this Mac's id must be real", () => {
 describe("scope preflight", () => {
   it("reports every scope present for a full token", async () => {
     const probe = await probeAs(THIS_MAC, FAKE_ACCOUNT_ID);
-    expect(probe.scopes).toEqual({ d1: "ok", workers: "ok", accountRead: "ok" });
+    expect(probe.scopes).toEqual({
+      d1: "ok",
+      workers: "ok",
+      accountRead: "ok",
+      zones: "ok",
+    });
     expect(probe.deployment).not.toBeNull();
   });
 

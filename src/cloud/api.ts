@@ -53,6 +53,26 @@ export interface D1DatabaseSummary {
   readonly name: string;
 }
 
+/** One domain on this Cloudflare account. */
+export interface CloudflareZone {
+  readonly id: string;
+  readonly name: string;
+  /** `active` is the only status that serves traffic. Reported, not enforced. */
+  readonly status: string;
+}
+
+/** One hostname attached to one Worker script. */
+export interface WorkerDomain {
+  readonly id: string;
+  readonly hostname: string;
+  readonly zoneId: string;
+  readonly zoneName: string;
+  /** The SCRIPT this hostname routes to. Ours is `wwb-sync`. */
+  readonly service: string;
+  /** The edge certificate Cloudflare issued for it. Recorded, never used. */
+  readonly certId: string | null;
+}
+
 export interface TokenStatus {
   readonly id: string;
   /** `active` is the only one that works. A token can verify 200 and be expired. */
@@ -86,6 +106,16 @@ export interface CloudScopes {
   readonly workers: ScopeState;
   /** `GET /accounts` — optional; it only decides whether we can list accounts. */
   readonly accountRead: ScopeState;
+  /**
+   * `GET /zones` — optional, and it decides LESS than it looks like it does.
+   *
+   * `missing` means setup cannot LIST your domains. It does not mean you cannot
+   * use one: attaching is authorised by `Workers Scripts: Edit`, which the token
+   * already has, and the request can carry `zone_name` in place of `zone_id`.
+   * So this chooses between a picker and a text field on the review screen, and
+   * nothing else.
+   */
+  readonly zones: ScopeState;
 }
 
 /**
@@ -174,6 +204,67 @@ export interface CloudflareApi {
   createAccountSubdomain(accountId: string, subdomain: string): Promise<string>;
   /** Turn this script on at `<script>.<subdomain>.workers.dev`. */
   enableWorkersDev(accountId: string, scriptName: string): Promise<boolean>;
+  /**
+   * `GET /zones?account.id=…` — the domains this token can see.
+   *
+   * `account.id` is dotted, and that is not a typo: it is what the published
+   * schema says and what wrangler's own `zones.ts` sends. The result is filtered
+   * again HERE on `account.id`, for the reason `findDatabase` documents about
+   * the D1 `name` filter — a server-side filter that silently matched the wrong
+   * thing would present an account's zones as somebody else's.
+   *
+   * Resolves to an EMPTY LIST on 401/403, exactly like `listAccounts`. A token
+   * without `Zone: Read` is an ordinary supported state: the wizard asks for the
+   * domain name instead. An empty list is never an error.
+   */
+  listZones(accountId: string): Promise<CloudflareZone[]>;
+  /**
+   * `GET /accounts/{id}/workers/domains?hostname=…` — is this hostname taken?
+   *
+   * THREE OUTCOMES, THREE VALUES, and the third is the point:
+   *
+   *   undefined   nothing is attached there — it is free
+   *   a record    something is attached there, and `service` says what
+   *   null        the token may not look, so this does not KNOW
+   *
+   * "Nothing there" and "cannot tell" must not be the same value, or a caller
+   * would attach a hostname it had never actually checked. In practice a token
+   * that can deploy can also read these — both are `Workers Scripts` — so `null`
+   * should be unreachable. It is modelled anyway, because "should be
+   * unreachable" is how the last one got out.
+   */
+  findWorkerDomain(
+    accountId: string,
+    hostname: string,
+  ): Promise<WorkerDomain | null | undefined>;
+  /**
+   * `PUT /accounts/{id}/workers/domains` — attach one hostname to one script.
+   *
+   * THE DOCUMENTED, SINGLE-HOSTNAME FORM, DELIBERATELY. wrangler uses a bulk
+   * `/workers/scripts/{script}/domains/records` spelling that appears NOWHERE in
+   * Cloudflare's published OpenAPI schema and whose body carries
+   * `override_existing_dns_record` — the flag that reads like it could overwrite
+   * a DNS record belonging to something else on the owner's zone. This form has
+   * no such field, so a conflict FAILS (code 100117) instead of replacing. The
+   * zone this points at may already host unrelated services on other hostnames;
+   * that is not a thing to be careful about, it is a thing to make impossible.
+   *
+   * `environment` is NOT sent. The generated SDK's example shows it and
+   * wrangler's older path uses it; the schema marks it `deprecated, readOnly`.
+   * The schema has been right all three previous times this project has caught
+   * the two disagreeing.
+   *
+   * Exactly one of `zone.id` / `zone.name` goes out. `zone.name` is the path
+   * that needs no `Zone: Read` at all.
+   */
+  attachWorkerDomain(
+    accountId: string,
+    o: {
+      hostname: string;
+      service: string;
+      zone: { readonly id: string } | { readonly name: string };
+    },
+  ): Promise<WorkerDomain>;
 }
 
 export interface CloudflareApiConfig {
@@ -395,9 +486,12 @@ export function createCloudflareApi(cfg: CloudflareApiConfig): CloudflareApi {
         }
       };
 
-      const [d1, workers] = await Promise.all([
+      const [d1, workers, zones] = await Promise.all([
         read(`/accounts/${enc(accountId)}/d1/database?per_page=1`),
         read(`/accounts/${enc(accountId)}/workers/subdomain`),
+        // Account-filtered so a token scoped to one account does not report
+        // somebody else's zones as evidence it can read this one's.
+        read(`/zones?account.id=${enc(accountId)}&per_page=1`),
       ]);
 
       let accountRead: ScopeState;
@@ -407,7 +501,7 @@ export function createCloudflareApi(cfg: CloudflareApiConfig): CloudflareApi {
         accountRead = "unknown";
       }
 
-      return { d1, workers, accountRead };
+      return { d1, workers, accountRead, zones };
     },
 
     async getWorkerBindings(accountId, scriptName) {
@@ -507,6 +601,148 @@ export function createCloudflareApi(cfg: CloudflareApiConfig): CloudflareApi {
       );
       return asRecord(result)["enabled"] === true;
     },
+
+    async listZones(accountId) {
+      const { status, result } = await call(
+        "GET",
+        // Dotted. Confirmed twice: the published schema, and wrangler's
+        // `zones.ts`, which builds `{ name, "account.id": accountId }`.
+        `/zones?account.id=${enc(accountId)}&per_page=50`,
+        {
+          operation: "listing the domains on this Cloudflare account",
+          permission: PERMISSION.zoneRead,
+          tolerate: [401, 403],
+        },
+      );
+      if (status === 401 || status === 403) return [];
+      return asArray(result)
+        .map((row) => {
+          const o = asRecord(row);
+          return {
+            id: str(o["id"]) ?? "",
+            name: str(o["name"]) ?? "",
+            status: str(o["status"]) ?? "unknown",
+            accountId: str(asRecord(o["account"])["id"]) ?? "",
+          };
+        })
+        .filter((z) => z.id !== "" && z.name !== "" && z.accountId === accountId)
+        .map(({ id, name, status: zoneStatus }) => ({ id, name, status: zoneStatus }));
+    },
+
+    async findWorkerDomain(accountId, hostname) {
+      const { status, result } = await call(
+        "GET",
+        // `hostname` is a documented filter on this operation. There is no
+        // `page`/`per_page` on it — the SDK types the response `SinglePage`.
+        `/accounts/${enc(accountId)}/workers/domains?hostname=${enc(hostname)}`,
+        {
+          operation: `checking whether “${hostname}” is already in use`,
+          permission: PERMISSION.workersRead,
+          tolerate: [401, 403, 404],
+        },
+      );
+      // Cannot tell. NOT the same as "nothing there" — see the interface.
+      if (status === 401 || status === 403) return null;
+      const rows = asArray(result);
+      const match = rows
+        .map((raw) => toWorkerDomain(raw, { hostname, service: "" }))
+        // Cloudflare filters server-side; matching again here means a filter
+        // that silently stopped working cannot make a taken hostname look free.
+        .find((d) => d.hostname === hostname);
+      return match;
+    },
+
+    async attachWorkerDomain(accountId, o) {
+      const { result } = await call("PUT", `/accounts/${enc(accountId)}/workers/domains`, {
+        operation: `putting the Worker on “${o.hostname}”`,
+        permission: PERMISSION.workersEdit,
+        // EXACTLY these keys. No `environment` (deprecated + readOnly in the
+        // schema), and no `override_*` of any kind — the documented endpoint has
+        // no such field, and a hostname that is already spoken for must fail
+        // rather than be taken over. A test asserts on the recorded body.
+        json: {
+          hostname: o.hostname,
+          service: o.service,
+          ..."id" in o.zone ? { zone_id: o.zone.id } : { zone_name: o.zone.name },
+        },
+      });
+      return toWorkerDomain(result, { hostname: o.hostname, service: o.service });
+    },
+  };
+}
+
+/**
+ * `https://<label>.<zone>` — the address the two halves of the review screen
+ * add up to.
+ */
+export function customDomainUrl(label: string, zoneName: string): string {
+  return `https://${label.trim()}.${zoneName.trim()}`;
+}
+
+/**
+ * Is this a hostname label we will send? Returns the reason it is not, or null.
+ *
+ * One DNS label: 1–63 characters, `a-z0-9-`, no leading or trailing dash. An
+ * EMPTY label is rejected ON PURPOSE. Cloudflare accepts "either the zone apex
+ * or a subdomain of the zone", which is exactly why this refuses the apex: it is
+ * the one name most likely to already be wanted for something else, and taking
+ * it over is not a mistake this wizard gets to make on the owner's behalf.
+ */
+export function hostnameLabelError(label: string): string | null {
+  const value = label.trim();
+  if (value === "") {
+    return (
+      "A name is needed. Setup will not take over the domain itself — that is " +
+      "the address your other things use."
+    );
+  }
+  if (value.length > 63) {
+    return "That is too long for one part of a hostname (63 characters is the limit).";
+  }
+  if (value.startsWith("-") || value.endsWith("-")) {
+    return "It cannot start or end with a dash.";
+  }
+  if (!/^[a-z0-9-]+$/.test(value)) {
+    return "Use lowercase letters, numbers and dashes only — no dots, no spaces. “wwb” is a good one.";
+  }
+  return null;
+}
+
+/**
+ * A bare registrable domain, for the path that has no `Zone: Read`.
+ *
+ * Deliberately loose: this is a spelling check on something the owner is
+ * copying from their own Cloudflare dashboard, not an attempt to own the public
+ * suffix list. Cloudflare is the authority on whether the zone exists, and it
+ * says so in a sentence.
+ */
+export function zoneNameError(name: string): string | null {
+  const value = name.trim().toLowerCase();
+  if (value === "") return "Type the domain this should go on.";
+  if (!/^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(value) || value.includes("..")) {
+    return "That does not look like a domain. It should be something like example.com.";
+  }
+  return null;
+}
+
+/**
+ * Read a domain back, every field through `str()`, falling back to what was
+ * sent — the same posture `toDatabase` takes, and for the same reason: the
+ * schema types most of the response optional, so a missing field is reachable
+ * without anything having gone wrong on the wire.
+ */
+function toWorkerDomain(
+  raw: unknown,
+  sent: { hostname: string; service: string },
+): WorkerDomain {
+  const o = asRecord(raw);
+  return {
+    id: str(o["id"]) ?? "",
+    hostname: str(o["hostname"]) ?? sent.hostname,
+    zoneId: str(o["zone_id"]) ?? "",
+    zoneName: str(o["zone_name"]) ?? "",
+    service: str(o["service"]) ?? sent.service,
+    certId: str(o["cert_id"]),
   };
 }
 
