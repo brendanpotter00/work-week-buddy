@@ -32,6 +32,18 @@ export type SignalSink = (signal: RawSignal) => void;
 
 export interface NativeCountersSnapshot {
   readonly realEvents: number;
+  /**
+   * Of those, the ones that were NOT a keystroke — moves, drags, clicks,
+   * scrolls, tablet input.
+   *
+   * Split out for the cursor-stillness check in the self-test, which needs to
+   * know whether anything other than us could have moved the pointer inside its
+   * measurement window. A keystroke cannot move a cursor, and the human running
+   * `install.sh` has their hands on the keyboard by definition, so counting
+   * typing there would void every window for no reason. See
+   * `src/native/cursor-stillness.ts`.
+   */
+  readonly realPointerEvents: number;
   readonly ourEvents: number;
   /**
    * kCGEventNull events that were NOT ours — another app's jiggler, or the one
@@ -143,8 +155,34 @@ export interface Permissions {
 
 export interface SelfTestCheck {
   readonly name: string;
+  /**
+   * The gate. `ok: false` stops `scripts/install.sh` before launch-at-login is
+   * wired up, and switches the jiggler back off if it happens at toggle time.
+   *
+   * It answers ONE question — "does this fail the install?" — which is why an
+   * inconclusive check carries `ok: true`. See below.
+   */
   readonly ok: boolean;
   readonly detail: string;
+  /**
+   * The check ran and could not reach a verdict. Neither a pass nor a failure.
+   *
+   * Some things cannot be measured while a person is using the Mac, and
+   * `--selftest` runs at exactly the moment one is: `install.sh` invokes it the
+   * instant the install finishes, and `runtime.ts` invokes it the instant the
+   * jiggler is switched on. A check that cannot separate "the app is broken"
+   * from "the owner moved the mouse" must say so rather than pick one.
+   *
+   * FAILING would train the owner to bypass the gate — measured, twice, on his
+   * own Mac, and the bypass is what got his tracker running again. PASSING
+   * silently would let a real regression through under cover of a busy machine.
+   * So it does neither: `ok` stays true so the install proceeds, `inconclusive`
+   * is true so `--selftest` prints `?` instead of `ok` and `install.sh` warns.
+   *
+   * Only ever set on a check that has genuinely no verdict. It is not a
+   * softer way to fail.
+   */
+  readonly inconclusive?: boolean;
 }
 
 export interface SelfTestReport {

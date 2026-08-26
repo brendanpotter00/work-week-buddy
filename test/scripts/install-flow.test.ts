@@ -55,7 +55,14 @@ const REAL_SUPPORT = join(homedir(), "Library/Application Support/Work Week Budd
 
 let root = "";
 
-/** A .app whose executable answers `--selftest` with whatever we tell it to. */
+/**
+ * A .app whose executable answers `--selftest` with whatever we tell it to.
+ *
+ * `WWB_STUB_SELFTEST_EXIT` is the verdict; `WWB_STUB_SELFTEST_OUT` is a line of
+ * the report, on stderr, where the real `--selftest` writes its readable
+ * rendering. The two are independent on purpose: a run that could not measure
+ * something exits ZERO and still has to be noticed.
+ */
 function stubBundle(at: string, marker: string): string {
   const app = join(at, "Work Week Buddy.app");
   mkdirSync(join(app, "Contents", "MacOS"), { recursive: true });
@@ -63,7 +70,12 @@ function stubBundle(at: string, marker: string): string {
   const bin = join(app, "Contents", "MacOS", "Work Week Buddy");
   writeFileSync(
     bin,
-    '#!/bin/sh\n[ "${1:-}" = "--selftest" ] && exit "${WWB_STUB_SELFTEST_EXIT:-0}"\nexit 0\n',
+    '#!/bin/sh\n' +
+      'if [ "${1:-}" = "--selftest" ]; then\n' +
+      '  [ -n "${WWB_STUB_SELFTEST_OUT:-}" ] && printf "%s\\n" "$WWB_STUB_SELFTEST_OUT" >&2\n' +
+      '  exit "${WWB_STUB_SELFTEST_EXIT:-0}"\n' +
+      "fi\n" +
+      "exit 0\n",
   );
   chmodSync(bin, 0o755);
   writeFileSync(join(app, "Contents", "Resources", "marker.txt"), marker);
@@ -196,6 +208,83 @@ describe.runIf(isMac)("install.sh, executed end to end into a scratch tree", () 
     // one whose TCC grants are the real ones.
     expect(existsSync(dest)).toBe(true);
     expect(existsSync(join(root, "LaunchAgents/com.bpotter.workweekbuddy.plist"))).toBe(false);
+  });
+
+  it("shows the report it gated on instead of swallowing it", () => {
+    // The gate captures the transcript so it can tell a clean pass from one
+    // that could not measure something. Capturing it must not stop the owner
+    // seeing it: a gate that prints nothing for eight seconds and then aborts
+    // is one nobody trusts.
+    const src = stubBundle(join(root, "src-echo"), "v1");
+    const dest = join(root, "echo", "Work Week Buddy.app");
+
+    const r = install(dest, src, [], {
+      WWB_STUB_SELFTEST_OUT: "  FAIL posted event was kCGEventNull · 5",
+      WWB_STUB_SELFTEST_EXIT: "1",
+    });
+
+    expect(r.code).toBe(1);
+    expect(r.out).toContain("FAIL posted event was kCGEventNull");
+  });
+
+  it("does not blame discrimination for a check that is about the cursor", () => {
+    // The old message said the app "could not prove it can tell its own
+    // synthetic jiggle from human input" whatever had failed. For the cursor
+    // check that is simply untrue — discrimination passed in both of the
+    // owner's failing runs — and a gate that misdescribes its own failure sends
+    // whoever reads it after the wrong bug.
+    const src = stubBundle(join(root, "src-msg"), "v1");
+    const dest = join(root, "msg", "Work Week Buddy.app");
+
+    const r = install(dest, src, [], { WWB_STUB_SELFTEST_EXIT: "1" });
+
+    expect(r.code).toBe(1);
+    expect(r.out).not.toContain("could not prove it can tell its own synthetic jiggle");
+    // It names both promises and points at the line that says which one broke.
+    expect(r.out).toContain("DISCRIMINATION");
+    expect(r.out).toContain("UNOBTRUSIVENESS");
+    expect(r.out).toContain("Read the FAIL line above");
+  });
+
+  it("warns but installs when a check COULD NOT BE MEASURED", () => {
+    // The whole point of the third state. `--selftest` runs one line after an
+    // install the owner just typed, so the Mac is in use by definition; a check
+    // that cannot get a verdict under those conditions must not stop the
+    // install. A gate that fails during normal use is one its owner learns to
+    // bypass — which is exactly what happened, twice, before this existed.
+    const src = stubBundle(join(root, "src-inconclusive"), "v1");
+    const dest = join(root, "inconclusive", "Work Week Buddy.app");
+    const plistDir = join(root, "LaunchAgents");
+    rmSync(plistDir, { recursive: true, force: true });
+
+    const r = install(dest, src, [], {
+      WWB_STUB_SELFTEST_OUT: "  self-test: 25 checks · 24 ok · 1 COULD NOT BE MEASURED",
+      WWB_STUB_SELFTEST_EXIT: "0",
+    });
+
+    expect(r.code, r.out).toBe(0);
+    expect(r.out).toContain("COULD NOT BE MEASURED");
+    // Not reported as a clean pass…
+    expect(r.out).not.toContain("self-test passed");
+    // …and not treated as a failure either.
+    expect(r.out).not.toContain("SELF-TEST FAILED");
+    // The install really did continue: launch-at-login is wired up.
+    expect(existsSync(join(plistDir, "com.bpotter.workweekbuddy.plist"))).toBe(true);
+  });
+
+  it("still reports a clean run as a clean pass", () => {
+    // If every run warned, the warning would stop meaning anything.
+    const src = stubBundle(join(root, "src-clean"), "v1");
+    const dest = join(root, "clean", "Work Week Buddy.app");
+
+    const r = install(dest, src, [], {
+      WWB_STUB_SELFTEST_OUT: "  self-test: 25 checks · 25 ok",
+      WWB_STUB_SELFTEST_EXIT: "0",
+    });
+
+    expect(r.code, r.out).toBe(0);
+    expect(r.out).toContain("self-test passed");
+    expect(r.out).not.toContain("COULD NOT BE MEASURED");
   });
 
   it("writes a plist launchd will accept, pointing at what it just installed", () => {

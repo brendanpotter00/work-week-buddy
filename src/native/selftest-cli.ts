@@ -53,7 +53,7 @@ export async function runNativeSelfTest(): Promise<SelfTestCliResult> {
       {
         name: "real signals observed during the run (informational)",
         ok: true,
-        detail: String(keyOrMouse),
+        detail: `${String(keyOrMouse)} — a human at the keyboard is expected here, not a problem`,
       },
     ];
   } catch (err) {
@@ -72,9 +72,50 @@ export async function runNativeSelfTest(): Promise<SelfTestCliResult> {
   return { report, exitCode: report.ok ? 0 : 1 };
 }
 
-/** Runs the self-test and prints the report as one JSON object on stdout. */
+/** The marker `scripts/install.sh` greps for. Changing it changes that too. */
+export const INCONCLUSIVE_MARKER = "COULD NOT BE MEASURED";
+
+/**
+ * The report, as something a person can read.
+ *
+ * It exists because `install.sh` gates on this and then leaves a 4 kB line of
+ * JSON on the terminal. The owner's failing run was diagnosed by hand-parsing
+ * that blob; a gate whose output has to be decoded before it can be acted on is
+ * a gate that gets bypassed instead. Three states, three prefixes, one summary:
+ *
+ *     ok    posted event was kCGEventNull · 0
+ *     FAIL  cursor did not move · 100,200 → 105,200 · the jiggle moved it …
+ *     ?     cursor did not move · could not measure: …
+ */
+export function formatSelfTestReport(report: SelfTestReport): string {
+  const lines = report.checks.map((c) => {
+    const tag = !c.ok ? "FAIL" : c.inconclusive === true ? "?   " : "ok  ";
+    return `  ${tag} ${c.name}${c.detail === "" ? "" : ` · ${c.detail}`}`;
+  });
+  const failed = report.checks.filter((c) => !c.ok).length;
+  const unmeasured = report.checks.filter((c) => c.ok && c.inconclusive === true).length;
+  const parts = [
+    `${String(report.checks.length)} checks`,
+    `${String(report.checks.length - failed - unmeasured)} ok`,
+  ];
+  if (failed > 0) parts.push(`${String(failed)} FAILED`);
+  // Named in full so the install script can find it without parsing JSON, and
+  // so the owner reading the transcript sees the distinction rather than a tick.
+  if (unmeasured > 0) parts.push(`${String(unmeasured)} ${INCONCLUSIVE_MARKER}`);
+  return [...lines, `  self-test: ${parts.join(" · ")}`].join("\n");
+}
+
+/**
+ * Runs the self-test, prints the report as one JSON object on stdout, and the
+ * readable rendering on stderr.
+ *
+ * The split is deliberate: stdout stays exactly one machine-readable object, so
+ * anything that ever wants to parse this keeps working, while the thing a human
+ * runs at 11pm because their tracker stopped prints something they can act on.
+ */
 export async function runSelfTestCli(): Promise<number> {
   const { report, exitCode } = await runNativeSelfTest();
   process.stdout.write(`${JSON.stringify(report)}\n`);
+  process.stderr.write(`${formatSelfTestReport(report)}\n`);
   return exitCode;
 }

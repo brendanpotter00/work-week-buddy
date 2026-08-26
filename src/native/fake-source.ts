@@ -94,6 +94,7 @@ export class FakeSignalSource implements SignalSource {
       probedAtMs: at,
       counters: {
         realEvents: this.realEvents,
+        realPointerEvents: this.realPointerEvents,
         ourEvents: this.jiggles.length,
         foreignNullEvents: 0,
         disableNotices: this.disableNotices,
@@ -195,6 +196,8 @@ export class FakeSignalSource implements SignalSource {
 
   // ── the test driver ─────────────────────────────────────────────────────
   private realEvents = 0;
+  /** Parity with the real tap: mouse input counts here, a keystroke does not. */
+  private realPointerEvents = 0;
   private lastRealSignalMs = 0;
 
   key(atMs: number, count = 1): void {
@@ -212,6 +215,7 @@ export class FakeSignalSource implements SignalSource {
 
   private emit(s: { kind: "key" | "mouse"; atMs: number; count: number }): void {
     this.realEvents += s.count;
+    if (s.kind === "mouse") this.realPointerEvents += s.count;
     if (s.atMs > this.lastRealSignalMs) this.lastRealSignalMs = s.atMs;
     this.sink(s);
   }
