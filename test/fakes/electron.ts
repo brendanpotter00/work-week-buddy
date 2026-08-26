@@ -194,6 +194,8 @@ export const appEvents = new Emitter();
 export const app = {
   name: "Work Week Buddy",
   isPackaged: false,
+  /** `net.fetch` does not exist before this is true. See `src/main/net.ts`. */
+  ready: true,
   exitCode: null as number | null,
   quitCalls: 0,
   relaunchCalls: 0,
@@ -206,6 +208,7 @@ export const app = {
   setName: (n: string) => {
     app.name = n;
   },
+  isReady: () => app.ready,
   requestSingleInstanceLock: () => true,
   dock: { hide: () => undefined },
   exit: (code: number) => {
@@ -253,7 +256,12 @@ export const protocol = {
 };
 
 export const net = {
-  fetch: async () => new Response("", { status: 200 }),
+  calls: [] as Array<{ input: unknown; init: unknown }>,
+  nextStatus: 200,
+  fetch: async (input?: unknown, init?: unknown) => {
+    net.calls.push({ input, init });
+    return new Response("", { status: net.nextStatus });
+  },
 };
 
 export const contextBridge = {

@@ -226,6 +226,13 @@ export function createSyncConfigGateway(deps: {
   tokens: TokenStore;
   sync: Pick<SyncService, "reconfigure">;
   /**
+   * What `test()` reaches the Worker with. Production passes `appFetch`, so the
+   * Test-connection button answers about the same network stack the flusher
+   * uses — a button that succeeded where the flusher fails would be worse than
+   * no button.
+   */
+  fetchImpl?: typeof fetch;
+  /**
    * Fired after every successful `write()`, with the complete new state.
    *
    * This function is the SINGLE FUNNEL both paths already pass through — the
@@ -261,7 +268,9 @@ export function createSyncConfigGateway(deps: {
       // `write()` does, so the test and the save agree on what was entered.
       const workerUrl = patch.workerUrl ?? deps.settings.get("syncWorkerUrl");
       const token = patch.token ?? deps.tokens.read();
-      return await probeSyncConfig(workerUrl, token);
+      return await probeSyncConfig(workerUrl, token, {
+        ...(deps.fetchImpl ? { fetchImpl: deps.fetchImpl } : {}),
+      });
     },
 
     async write(patch) {
@@ -322,6 +331,16 @@ export async function createCoreServices(opts: {
    * write could land unannounced.
    */
   onSyncConfigChange?: (state: SyncConfigState) => void;
+  /**
+   * The outbound HTTP the sync layer uses.
+   *
+   * Passed IN rather than imported, so this file keeps its `import type` on
+   * electron and its unit tests keep running in plain Node. `index.ts` supplies
+   * `appFetch` — Chromium's stack, which reads the macOS proxy configuration
+   * and the macOS trust store, neither of which Node's `fetch` does. Undefined
+   * leaves the previous behaviour exactly as it was.
+   */
+  fetchImpl?: typeof fetch;
 }): Promise<CoreServices> {
   const dbPath = defaultDbPath(opts.userDataDir);
   const policy = policyFromSettings(opts.settings);
@@ -367,6 +386,7 @@ export async function createCoreServices(opts: {
   const currentLabel = (): string => opts.settings.get("machineLabel");
   const sync = createSyncService({
     db,
+    ...(opts.fetchImpl ? { fetchImpl: opts.fetchImpl } : {}),
     ...(opts.backupDir === undefined ? {} : { backupDir: opts.backupDir }),
     config: resolved.config,
     configError: resolved.error,
@@ -445,6 +465,10 @@ export async function createCoreServices(opts: {
     settings: opts.settings,
     tokens,
     sync,
+    // The same stack the flusher will use. A Test-connection button that
+    // answered about a different network layer than the one that actually
+    // syncs would be worse than no button at all.
+    ...(opts.fetchImpl ? { fetchImpl: opts.fetchImpl } : {}),
     ...(opts.onSyncConfigChange === undefined
       ? {}
       : { onChange: opts.onSyncConfigChange }),
