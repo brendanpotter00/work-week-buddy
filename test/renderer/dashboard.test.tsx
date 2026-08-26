@@ -11,6 +11,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { act, waitFor } from "@testing-library/react";
 
 import { App } from "@/renderer/App";
+import { WINDOW_SIZE } from "@/shared/constants";
 import { DEFAULT_METRICS_POLICY, type MetricsBundle } from "@/shared/ipc-types";
 import {
   cardByLabel,
@@ -30,8 +31,23 @@ import {
   statCards,
 } from "./harness";
 
+/**
+ * The four cards whose value comes out of the METRICS BUNDLE. "Today" is
+ * deliberately not among them: its number is `hoursToday()` over `LiveStatus`,
+ * which is what makes it the same figure the menu bar shows, and it therefore
+ * survives a metrics query that fails.
+ */
 const LABELS = [
   "This week",
+  "Avg interval · week",
+  "Avg interval · all time",
+  "Longest interval",
+] as const;
+
+/** All five, in the order they render. */
+const ALL_LABELS = [
+  "This week",
+  "Today",
   "Avg interval · week",
   "Avg interval · all time",
   "Longest interval",
@@ -100,6 +116,195 @@ describe("stat cards render the values the IPC client returned", () => {
     const { container } = renderApp(<App />);
     await waitFor(() => expect(cardValue(cardByLabel(container, "This week"))).toBe("0.0"));
     expect(cardSub(cardByLabel(container, "This week"))).toBe("+0.0h vs last week");
+  });
+});
+
+describe("Today — the card, and the number the menu bar is showing", () => {
+  it("counts the OPEN interval, so it is the menu bar's figure and not the database's", async () => {
+    const bridge = makeBridge(defaultHandlers(metricsBundle()));
+    installBridge(bridge);
+
+    const { container } = renderApp(<App />);
+    await waitFor(() => expect(cardValue(cardByLabel(container, "This week"))).toBe("36.5"));
+
+    // 5.1 closed hours today (`closedHoursToday`, and `metrics.today.hours`
+    // carries the same 5.1) plus the open interval, credited to its last real
+    // signal: 2h41m − 12s = 2.683h. 7.783 → 7.8.
+    //
+    // The database figure alone would render "5.1", which is what the tray
+    // title would then be contradicting by 2.7 hours. That is the whole reason
+    // this card is built on `hoursToday()` and not on `metrics.today.hours`.
+    expect(cardValue(cardByLabel(container, "Today"))).toBe("7.8");
+    expect(cardValue(cardByLabel(container, "Today"))).not.toBe("5.1");
+  });
+
+  it("shows the same string the stopwatch card shows, six inches down the page", async () => {
+    // Two "today" figures in one window. They are the same call on the same
+    // snapshot — this asserts they stay that way.
+    const bridge = makeBridge(
+      defaultHandlers(
+        metricsBundle({ today: { date: "2026-08-19", hours: 1.25, prevHours: 4.3 } }),
+        liveStatus({ closedHoursToday: 1.25 }),
+      ),
+    );
+    installBridge(bridge);
+
+    const { container } = renderApp(<App />);
+    await waitFor(() => expect(cardValue(cardByLabel(container, "This week"))).toBe("36.5"));
+
+    const card = cardValue(cardByLabel(container, "Today"));
+    const stopwatch = container.querySelector('[data-slot="stopwatch-today"]');
+    expect(card).toBe("3.9");
+    expect(stopwatch?.textContent).toContain(card);
+  });
+
+  it("compares itself against yesterday, the way This week compares against last week", async () => {
+    const bridge = makeBridge(defaultHandlers(metricsBundle()));
+    installBridge(bridge);
+
+    const { container } = renderApp(<App />);
+    await waitFor(() => expect(cardValue(cardByLabel(container, "This week"))).toBe("36.5"));
+
+    // 7.8 today against 4.3 yesterday. The LIVE figure is the left-hand side,
+    // or the sub-line would be contradicting the number directly above it.
+    expect(cardSub(cardByLabel(container, "Today"))).toBe("+3.5h vs yesterday");
+    expect(cardSub(cardByLabel(container, "This week"))).toBe("+4.2h vs last week");
+  });
+
+  it("has no yesterday to compare against on the first day, and says nothing", async () => {
+    const bridge = makeBridge(
+      defaultHandlers(metricsBundle({ today: { date: "2026-08-19", hours: 5.1, prevHours: null } })),
+    );
+    installBridge(bridge);
+
+    const { container } = renderApp(<App />);
+    await waitFor(() => expect(cardValue(cardByLabel(container, "Today"))).toBe("7.8"));
+    // A non-breaking space, not a "+7.8h vs yesterday" invented out of a null.
+    expect(cardSub(cardByLabel(container, "Today")).trim()).toBe("");
+  });
+
+  it("wears the same ⚠︎ as This week when the keyboard bits are missing", async () => {
+    // An hours figure that is silently low is the failure this app is built
+    // against, and Today is as exposed to it as the week is.
+    const bridge = makeBridge(
+      defaultHandlers(metricsBundle(), liveStatus({ degraded: ["keyboard_permission_missing"] })),
+    );
+    installBridge(bridge);
+
+    const { container } = renderApp(<App />);
+    await waitFor(() => expect(cardValue(cardByLabel(container, "Today"))).toBe("7.8"));
+    expect(cardByLabel(container, "Today").textContent).toContain("⚠︎");
+  });
+});
+
+describe("the stat row tiles with no orphan, at every width the window can be", () => {
+  /** Tailwind's breakpoint minimums. A prefix applies at and above its width. */
+  const BREAKPOINTS: Record<string, number> = {
+    sm: 640,
+    md: 768,
+    lg: 1024,
+    xl: 1280,
+    "2xl": 1536,
+  };
+
+  /**
+   * The value of `pattern` in effect at `width`: the bare class, overridden by
+   * the largest breakpoint prefix the width has reached. Exactly what the
+   * cascade does, because the utilities are emitted in breakpoint order.
+   */
+  function resolve(className: string, pattern: string, width: number): number | null {
+    let best: number | null = null;
+    let bestAt = -1;
+    for (const cls of className.split(/\s+/)) {
+      const m = /^(?:([a-z0-9]+):)?(.+)-(\d+)$/.exec(cls);
+      if (!m || m[2] !== pattern) continue;
+      const at = m[1] === undefined ? 0 : (BREAKPOINTS[m[1]] ?? Infinity);
+      if (at <= width && at >= bestAt) {
+        bestAt = at;
+        best = Number(m[3]);
+      }
+    }
+    return best;
+  }
+
+  /**
+   * Walk the cards the way CSS grid auto-placement does — row-major, no
+   * back-filling — and report every hole. A card that does not fit in what is
+   * left of a row moves to the next one and STRANDS those columns; a last row
+   * that ends short strands its own. Both read as one card adrift, which is
+   * exactly what five cards in a four-column grid look like.
+   */
+  function holes(cols: number, spans: number[]): string[] {
+    const out: string[] = [];
+    let cursor = 0;
+    spans.forEach((span, i) => {
+      if (span > cols) out.push(`card ${i} spans ${span} of ${cols} columns`);
+      if (cursor + span > cols) {
+        out.push(`card ${i} leaves ${cols - cursor} empty columns behind it`);
+        cursor = 0;
+      }
+      cursor = (cursor + span) % cols;
+    });
+    if (cursor !== 0) out.push(`the last row ends ${cols - cursor} columns short`);
+    return out;
+  }
+
+  it("fills every row at the minimum width, the default width and wider", async () => {
+    const bridge = makeBridge(defaultHandlers(metricsBundle()));
+    installBridge(bridge);
+
+    const { container } = renderApp(<App />);
+    await waitFor(() => expect(statCards(container)).toHaveLength(5));
+
+    const row = container.querySelector('[data-slot="stat-row"]');
+    expect(row).not.toBeNull();
+    const rowClass = (row as Element).className;
+    const cardClasses = statCards(container).map((c) => c.className);
+
+    // 880 is the window's own minimum, 1100 is where it opens, and 1600 is a
+    // large display. Below `sm` the grid is one column, which five cards fill
+    // perfectly by definition.
+    for (const width of [WINDOW_SIZE.dashboard.minWidth, WINDOW_SIZE.dashboard.width, 1600]) {
+      const cols = resolve(rowClass, "grid-cols", width);
+      expect(cols, `no grid-cols in effect at ${width}px`).not.toBeNull();
+      const spans = cardClasses.map((c) => resolve(c, "col-span", width) ?? 1);
+      expect(holes(cols as number, spans), `at ${width}px`).toEqual([]);
+    }
+  });
+
+  it("switches to the multi-column shape BELOW the window's minimum width", async () => {
+    // The trap this exists for: `lg:` is 1024px and the dashboard's minimum is
+    // 880px, so an `lg:` grid quietly falls back to the `sm:` one for every
+    // window between 880 and 1023 — the range nobody screenshots. Whatever
+    // breakpoint the row uses has to have taken effect by 880.
+    const bridge = makeBridge(defaultHandlers(metricsBundle()));
+    installBridge(bridge);
+
+    const { container } = renderApp(<App />);
+    await waitFor(() => expect(statCards(container)).toHaveLength(5));
+
+    const rowClass = (container.querySelector('[data-slot="stat-row"]') as Element).className;
+    expect(resolve(rowClass, "grid-cols", WINDOW_SIZE.dashboard.minWidth)).toBeGreaterThan(1);
+  });
+
+  it("gives the two totals the top row and the three interval figures the second", async () => {
+    // Not decoration: five is prime, so the only equal-column grids that leave
+    // no orphan are one column and five, and five columns at 880px gives each
+    // card 122px of content. The 3+3 / 2+2+2 split is what buys the room, and
+    // it is also the meaning — "how much have I worked" over "what shape are
+    // my sessions".
+    const bridge = makeBridge(defaultHandlers(metricsBundle()));
+    installBridge(bridge);
+
+    const { container } = renderApp(<App />);
+    await waitFor(() => expect(statCards(container)).toHaveLength(5));
+
+    const labels = statCards(container).map((c) => c.firstElementChild?.textContent);
+    expect(labels).toEqual([...ALL_LABELS]);
+
+    const width = WINDOW_SIZE.dashboard.minWidth;
+    const spans = statCards(container).map((c) => resolve(c.className, "col-span", width) ?? 1);
+    expect(spans).toEqual([3, 3, 2, 2, 2]);
   });
 });
 
@@ -204,13 +409,28 @@ describe("tabular-nums", () => {
 
 describe("the first-run empty state", () => {
   it("renders every card at full size with an em-dash", async () => {
-    const bridge = makeBridge(defaultHandlers(emptyMetricsBundle()));
+    // A first-run STATUS as well as a first-run bundle: "Today" is the one
+    // card that reads `LiveStatus`, so a fixture that left 5.1 closed hours on
+    // it would be describing a machine whose database is simultaneously empty
+    // and not.
+    const bridge = makeBridge(
+      defaultHandlers(
+        emptyMetricsBundle(),
+        liveStatus({
+          state: "idle",
+          openedAtMs: null,
+          lastSignalMs: null,
+          closedHoursThisWeek: null,
+          closedHoursToday: null,
+        }),
+      ),
+    );
     installBridge(bridge);
 
     const { container } = renderApp(<App />);
 
-    await waitFor(() => expect(statCards(container)).toHaveLength(4));
-    for (const label of LABELS) {
+    await waitFor(() => expect(statCards(container)).toHaveLength(5));
+    for (const label of ALL_LABELS) {
       const card = cardByLabel(container, label);
       expect(cardValue(card)).toBe("—");
       // The sub line always renders — a non-breaking space when empty — so the
@@ -361,7 +581,12 @@ describe("an IPC failure", () => {
     for (const label of LABELS) {
       expect(cardValue(cardByLabel(container, label))).toBe("—");
     }
-    expect(statCards(container)).toHaveLength(4);
+    // …but Today is NOT em-dashed, because its number did not come from the
+    // query that failed. `wwb:status:get` answered, and 5.1 closed hours plus
+    // the open interval is still exactly what the menu bar is showing. Blanking
+    // a figure we hold would be throwing away good data to look consistent.
+    expect(cardValue(cardByLabel(container, "Today"))).toBe("7.8");
+    expect(statCards(container)).toHaveLength(5);
   });
 
   it("retries every query when the banner's Retry is pressed", async () => {

@@ -280,6 +280,9 @@ export function metricsBundle(over: Partial<MetricsBundle> = {}): MetricsBundle 
     policy: { minIntervalS: 90, countJigglerTime: 0, graceS: 0, heatmapThresholdsH: [2, 5, 8] },
     weekStart: "2026-08-17",
     week: { hours: 36.5, prevHours: 32.3 },
+    // 5.1 closed today — the same number `liveStatus()` carries as
+    // `closedHoursToday`, because main computes both with `hoursOnDate()`.
+    today: { date: "2026-08-19", hours: 5.1, prevHours: 4.3 },
     interval: { avgMin: 112, nIntervals: 20 },
     allTime: {
       avgMin: 98,
@@ -331,6 +334,7 @@ export function metricsBundle(over: Partial<MetricsBundle> = {}): MetricsBundle 
 export function emptyMetricsBundle(): MetricsBundle {
   return metricsBundle({
     week: { hours: null, prevHours: null },
+    today: { date: "2026-08-19", hours: null, prevHours: null },
     interval: { avgMin: null, nIntervals: 0 },
     allTime: { avgMin: null, nIntervals: 0, hoursTracked: null, sinceDate: null },
     longest: {

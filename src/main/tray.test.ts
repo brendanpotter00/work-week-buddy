@@ -24,7 +24,9 @@ import { onWindowAllClosed } from "./bootstrap";
 import { TrayController, type TrayDeps } from "./tray";
 import { countIntervals } from "../store";
 import { seed } from "../../test/fakes/seed-db";
-import { hoursThisWeek, hoursToday } from "../shared/format";
+import { formatHours, hoursThisWeek, hoursToday } from "../shared/format";
+import { buildMetrics } from "./metrics";
+import { DEFAULT_METRICS_POLICY } from "../shared/ipc-types";
 import { MIN, T0, fakeSettings, makeHarness, type Harness } from "../../test/helpers/runtime";
 import { privacyPaneUrl } from "./onboarding";
 import { traySessionLabel } from "../shared/stopwatch";
@@ -119,6 +121,70 @@ describe("the title", () => {
     expect(instance().title).not.toBe("3.1h");
     // And the hover text does not describe it as the week's.
     expect(instance().tooltip).toBe("Work Week Buddy — 0.1h today");
+  });
+
+  it("is the same number the dashboard's Today card shows — all four of them", async () => {
+    // THE POINT OF THE WHOLE FEATURE. There are four "today" figures a person
+    // can see within seconds of each other:
+    //
+    //   1. the menu-bar TITLE
+    //   2. the tray dropdown's "Today" line
+    //   3. the stopwatch card's Today, on the dashboard
+    //   4. the "Today" stat card, added beside "This week"
+    //
+    // All four are `hoursToday(status, policy, now)` over the SAME LiveStatus,
+    // which is why this test can assert them equal rather than hope. If a
+    // future change gives any of them its own arithmetic, this fails.
+    h = await makeHarness();
+    seed(h.db, [
+      {
+        id: "mon",
+        machineId: "machine-a",
+        start: "2023-11-13T09:00:00Z",
+        end: "2023-11-13T12:00:00Z",
+      },
+      {
+        id: "earlier-today",
+        machineId: "machine-b",
+        start: "2023-11-14T08:00:00Z",
+        end: "2023-11-14T10:00:00Z",
+      },
+    ]);
+
+    tray = makeTray();
+    // A live session on top of the closed rows, so the figure under test is
+    // the interesting one: closed union + the interval that is open right now.
+    h.source.key(Date.now());
+    vi.advanceTimersByTime(5 * MIN);
+    h.source.key(Date.now());
+    // One minute tick, because the TITLE is deliberately a once-a-minute
+    // figure (a per-second title reflows every icon left of it). The menu and
+    // the dashboard are current sooner; the title catches up on the tick, and
+    // the number it catches up to is what this test is about.
+    vi.advanceTimersByTime(MIN);
+
+    const status = h.runtime.liveStatus();
+    const policy = fakeSettings().all();
+    const now = Date.now();
+
+    // What the dashboard's cards render, character for character.
+    const card = `${formatHours(hoursToday(status, policy, now))}`;
+    expect(card).toBe("2.1");
+
+    // 1 + 2: the menu bar.
+    expect(instance().title).toBe(`${card}h`);
+    expect(labels(tray).some((x) => x.startsWith("Today") && x.includes(`${card}h`))).toBe(true);
+
+    // And the closed half of it is the same query on both sides of the IPC
+    // boundary: `LiveStatus.closedHoursToday` for the tray and the stopwatch,
+    // `MetricsBundle.today.hours` for the stat card's no-status fallback.
+    // Two hours from the OTHER Mac, merged, not summed.
+    const metrics = buildMetrics(h.db, DEFAULT_METRICS_POLICY, h.policy, "UTC", now);
+    expect(metrics.today.hours).toBe(2);
+    expect(status.closedHoursToday).toBe(metrics.today.hours);
+    expect(metrics.today.date).toBe("2023-11-14");
+    // Monday's three hours are yesterday's, and they stay there.
+    expect(metrics.today.prevHours).toBe(3);
   });
 
   it("keeps the week in the dropdown, beside Today", async () => {

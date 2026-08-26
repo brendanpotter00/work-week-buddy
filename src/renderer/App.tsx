@@ -76,10 +76,12 @@ import { useThemeMirror } from "@/renderer/lib/use-theme-mirror";
 import { DEFAULT_METRICS_POLICY, type DegradedReason } from "@/shared/ipc-types";
 import {
   formatCount,
+  formatDayDelta,
   formatDuration,
   formatHeaderDate,
   formatHours,
   formatWeekDelta,
+  hoursToday,
 } from "@/shared/format";
 
 const chartConfig = {
@@ -106,6 +108,7 @@ function StatCard({
   unit,
   sub,
   warn = false,
+  className = "",
 }: {
   label: string;
   /** `null` renders '—'. A real 0 renders '0'. They are different things. */
@@ -113,9 +116,14 @@ function StatCard({
   unit?: string;
   sub?: string | null;
   warn?: boolean;
+  /** The card's share of the stat row's grid — see the row's own comment. */
+  className?: string;
 }): React.ReactElement {
   return (
-    <div data-slot="stat-card" className="rounded-lg border border-border bg-card px-4 py-3.5">
+    <div
+      data-slot="stat-card"
+      className={`rounded-lg border border-border bg-card px-4 py-3.5 ${className}`}
+    >
       <div className="text-[11px] font-medium tracking-[0.06em] text-muted-foreground uppercase">
         {label}
       </div>
@@ -184,6 +192,19 @@ export function App(): React.ReactElement {
 
   const degraded = status?.degraded ?? [];
   const keyboardBroken = degraded.includes("keyboard_permission_missing");
+
+  // ONE policy for every hours figure on this page, and it is the one the
+  // BUNDLE was computed under rather than whatever the settings pane holds
+  // now — so the caveat the stopwatch shows and the numbers the stat cards
+  // show were decided by the same `v_countable` filters. The stopwatch card
+  // is handed this same object, which is what makes its "Today" and the Today
+  // stat card the same expression rather than two that merely agree today.
+  const metricsPolicy = metrics?.policy ?? DEFAULT_METRICS_POLICY;
+  // The delta's own left-hand side: the LIVE figure the card prints, not the
+  // closed one, or the sub-line would contradict the number above it.
+  const todayHours = status
+    ? hoursToday(status, metricsPolicy, nowMs)
+    : (metrics?.today.hours ?? null);
 
   const errors = [statusQ.error, metricsQ.error, appInfoQ.error, togglesQ.error].filter(
     (e): e is string => e !== null,
@@ -310,19 +331,58 @@ export function App(): React.ReactElement {
           </div>
         </section>
 
-        {/* Stat row */}
+        {/* Stat row — TWO ROWS OF A SIX-COLUMN GRID, not five columns.
+            Five is prime, so any equal-column grid that is not 1 or 5 wide
+            leaves the last card stranded on a row of its own, and five equal
+            columns at the window's own minimum (880px, `WINDOW_SIZE.dashboard`)
+            gives each card 122px of content — an 11px uppercase label like
+            "AVG INTERVAL · ALL TIME" wraps to two lines in that.
+
+            So: `span-3 + span-3` fills row one and `span-2 × 3` fills row two,
+            exactly, at every width. The split is also the meaning — the two
+            TOTALS ("how much have I worked") lead, and the three per-interval
+            figures ("what shape are my sessions") sit under them.
+
+            `sm:`, not `lg:`. The dashboard's minWidth is 880px, which is BELOW
+            Tailwind's lg breakpoint of 1024 — so an `lg:` grid silently falls
+            back to `sm:grid-cols-2` for every window between 880 and 1023, and
+            that is the range the orphan would have appeared in. */}
         <section
           data-slot="stat-row"
-          className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4"
+          className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-6"
         >
           <StatCard
+            className="sm:col-span-3"
             label="This week"
             value={metrics ? formatHours(metrics.week.hours) : null}
             unit="h"
             sub={metrics ? formatWeekDelta(metrics.week.hours, metrics.week.prevHours) : null}
             warn={keyboardBroken}
           />
+          {/* TODAY, AND IT IS THE MENU BAR'S NUMBER.
+              `hoursToday()` from `src/shared/format.ts` — the same call the
+              tray title, the tray dropdown's "Today" line and the stopwatch
+              card three blocks down all make, on the same `LiveStatus` and the
+              same policy. Same function, same arguments, same answer: there is
+              no arithmetic here for the four of them to drift apart in.
+
+              That means the card counts the interval that is OPEN right now,
+              credited to its last real signal (AGENTS.md's rule that outranks
+              everything), on top of the closed union total for the local day.
+              `metrics.today.hours` is the same closed total straight from the
+              database — it is what this shows if the live snapshot has not
+              arrived, and being closed-only it can only ever be behind, never
+              ahead of what the close rule will write. */}
           <StatCard
+            className="sm:col-span-3"
+            label="Today"
+            value={formatHours(todayHours)}
+            unit="h"
+            sub={metrics ? formatDayDelta(todayHours, metrics.today.prevHours) : null}
+            warn={keyboardBroken}
+          />
+          <StatCard
+            className="sm:col-span-2"
             label="Avg interval · week"
             value={
               metrics?.interval.avgMin != null
@@ -332,6 +392,7 @@ export function App(): React.ReactElement {
             sub={metrics ? `${formatCount(metrics.interval.nIntervals)} intervals` : null}
           />
           <StatCard
+            className="sm:col-span-2"
             label="Avg interval · all time"
             value={
               metrics?.allTime.avgMin != null
@@ -341,6 +402,7 @@ export function App(): React.ReactElement {
             sub={metrics ? `${formatCount(metrics.allTime.nIntervals)} intervals` : null}
           />
           <StatCard
+            className="sm:col-span-2"
             label="Longest interval"
             value={
               metrics?.longest.singleHours != null
@@ -367,11 +429,7 @@ export function App(): React.ReactElement {
             the two switches) and the week's totals now come first. The order
             is asserted in `test/renderer/dashboard.test.tsx`, because an order
             nothing checks is an order that drifts back. */}
-        <LiveStopwatch
-          status={status}
-          policy={metrics?.policy ?? DEFAULT_METRICS_POLICY}
-          nowMs={nowMs}
-        />
+        <LiveStopwatch status={status} policy={metricsPolicy} nowMs={nowMs} />
 
         {/* Heatmap */}
         <section

@@ -192,6 +192,23 @@ export interface MetricsBundle {
   weekStart: LocalDate;
   /** DATA_MODEL query 1 */
   week: { hours: number | null; prevHours: number | null };
+  /**
+   * Query 1, over ONE local day instead of a week — the same `v_merged_day`
+   * union, so two Macs awake at once count as one hour and not two.
+   *
+   * `hours` EXCLUDES the interval that is open right now, exactly as
+   * `week.hours` does: a `MetricsBundle` is what the database holds. The open
+   * interval is added on the way to the screen by `hoursToday()` in
+   * `src/shared/format.ts`, which is the one function the tray title, the tray
+   * menu, the stopwatch card and the Today stat card all go through — which is
+   * why those four figures cannot disagree.
+   *
+   * `date` is the local day `hours` is for, in the display timezone, and it is
+   * what makes the midnight rollover visible on the wire rather than implied.
+   * `prevHours` is the day before it: the Today card's delta baseline, and
+   * necessarily a closed figure because yesterday has no open interval.
+   */
+  today: { date: LocalDate; hours: number | null; prevHours: number | null };
   /** query 2 */
   interval: { avgMin: number | null; nIntervals: number };
   allTime: {

@@ -151,6 +151,13 @@ SELECT ROUND(SUM(e_ms - s_ms) / 3600000.0, 2) AS hours_this_week
 FROM v_merged_day, wk
 WHERE local_date >= wk.mon AND local_date < date(wk.mon, '+7 days');
 
+-- 1b) HOURS ON ONE LOCAL DAY. Query 1 with a day's bounds instead of a week's,
+--     and it is the SAME union: a plain SUM(duration_s) double-counts the
+--     stretch where both Macs were awake. This is the dashboard's "Today" card
+--     and, through LiveStatus.closedHoursToday, the menu-bar title.
+SELECT ROUND(SUM(e_ms - s_ms) / 3600000.0, 2) AS hours
+FROM v_merged_day WHERE local_date = :d;
+
 -- 2) AVERAGE INTERVAL LENGTH — over raw intervals, NOT merged islands.
 --    The interval is the unit; merging would blend two machines into one "interval".
 WITH wk AS (SELECT date('now','localtime','-6 days','weekday 1') AS mon)

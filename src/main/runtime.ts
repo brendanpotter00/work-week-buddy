@@ -48,8 +48,8 @@ import {
   recover,
   rowFromClosed,
   snapshotFromOpen,
-  unionVsSum,
   writeJournal,
+  hoursOnDate as closedHoursOnDateQuery,
   hoursThisWeek as closedHoursThisWeekQuery,
   type Policy,
 } from "../store";
@@ -826,7 +826,12 @@ class Runtime implements AppRuntime {
     try {
       if (countIntervals(this.o.db) > 0) {
         week = closedHoursThisWeekQuery(this.o.db, this.o.policy, this.o.tz, nowMs);
-        day = unionVsSum(this.o.db, this.o.policy, today).unionH;
+        // The SAME query `buildMetrics()` fills `MetricsBundle.today.hours`
+        // with, over the same day. It used to be `unionVsSum().unionH`, which
+        // is the same union but UNROUNDED — so the dashboard's Today card and
+        // the menu-bar title could land either side of a tenth of an hour and
+        // print different numbers for the same state. One query, one rounding.
+        day = closedHoursOnDateQuery(this.o.db, this.o.policy, today);
       }
     } catch (err) {
       console.error("[runtime] closed-hours query failed", err);

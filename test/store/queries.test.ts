@@ -17,6 +17,7 @@ import {
   avgIntervalThisWeek,
   byMachine,
   heatmap,
+  hoursOnDate,
   hoursThisWeek,
   longestInterval,
   unionVsSum,
@@ -38,6 +39,47 @@ describe("metrics", () => {
     const db = openTestDb();
     seedWeek(db);
     expect(hoursThisWeek(db, P, "UTC", t("2026-09-07T12:00:00Z"))).toBe(0);
+  });
+
+  it("1c) hours on one day — the two Macs' overlap counts once, not twice", () => {
+    const db = openTestDb();
+    seedWeek(db);
+    // Monday holds personal 09:00–10:00 and work 09:30–10:30. The union is
+    // 09:00–10:30 = 1.5 h. A SUM(duration_s) would say 2.0 h — a 33% overcount
+    // out of one half-hour of two Macs being awake at the same time, which is
+    // the whole reason this reads v_merged_day.
+    expect(hoursOnDate(db, P, "2026-08-17")).toBe(1.5);
+    expect(hoursOnDate(db, P, "2026-08-18")).toBe(1);
+  });
+
+  it("1d) hours on one day — the same v_countable filters the week uses", () => {
+    const db = openTestDb();
+    seedWeek(db);
+    // Wednesday's only row is 60 s, under the 90 s stray-bump floor.
+    expect(hoursOnDate(db, P, "2026-08-19")).toBe(0);
+    // Thursday's only row is four hours WHOLLY covered by our own jiggler.
+    expect(hoursOnDate(db, P, "2026-08-20")).toBe(0);
+    // Both come back the moment policy says they should — proof the filters
+    // arrive through policyCte() rather than being hand-rolled here.
+    expect(hoursOnDate(db, { ...P, minIntervalS: 30 }, "2026-08-19")).toBe(0.02);
+    expect(hoursOnDate(db, { ...P, countJigglerTime: true }, "2026-08-20")).toBe(4);
+  });
+
+  it("1e) hours on one day — an empty day is 0, and days do not bleed into each other", () => {
+    const db = openTestDb();
+    seedWeek(db);
+    expect(hoursOnDate(db, P, "2026-08-16")).toBe(0);
+    expect(hoursOnDate(db, P, "2026-09-09")).toBe(0);
+  });
+
+  it("1f) hours on one day — the days of a week sum to what the week reports", () => {
+    const db = openTestDb();
+    seedWeek(db);
+    // 1.5 (Mon) + 1.0 (Tue) + 0 + 0 = 2.5, which is query 1's answer for the
+    // same week. "Today" and "This week" cannot be built on different rules.
+    const days = ["2026-08-17", "2026-08-18", "2026-08-19", "2026-08-20"];
+    const total = days.reduce((a, d) => a + hoursOnDate(db, P, d), 0);
+    expect(total).toBe(hoursThisWeek(db, P, "UTC", NOW_IN_WEEK));
   });
 
   it("2) average interval length — over raw intervals, not merged islands", () => {
