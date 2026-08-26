@@ -344,7 +344,7 @@ describe("naming a failed fetch", () => {
     ["DEPTH_ZERO_SELF_SIGNED_CERT", "does not read macOS's trust store"],
     ["UNABLE_TO_VERIFY_LEAF_SIGNATURE", "does not read macOS's trust store"],
     ["UNABLE_TO_GET_ISSUER_CERT_LOCALLY", "does not read macOS's trust store"],
-    ["ERR_CERT_AUTHORITY_INVALID", "does not read macOS's trust store"],
+    ["ERR_CERT_AUTHORITY_INVALID", "Chrome would refuse this address too"],
     ["ERR_TLS_CERT_ALTNAME_INVALID", "does not name that hostname"],
     ["ERR_CERT_COMMON_NAME_INVALID", "does not name that hostname"],
     ["CERT_HAS_EXPIRED", "certificate has expired"],
@@ -352,6 +352,11 @@ describe("naming a failed fetch", () => {
     ["EPROTO", "TLS handshake failed"],
     ["ERR_SSL_PROTOCOL_ERROR", "TLS handshake failed"],
     ["ERR_SSL_VERSION_OR_CIPHER_MISMATCH", "TLS handshake failed"],
+    ["ERR_PROXY_CONNECTION_FAILED", "proxy this Mac is configured to use"],
+    ["ERR_TUNNEL_CONNECTION_FAILED", "proxy this Mac is configured to use"],
+    ["ERR_PROXY_AUTH_REQUESTED", "asked for credentials"],
+    ["ERR_BLOCKED_BY_ADMINISTRATOR", "device management rather than the network"],
+    ["ERR_INTERNET_DISCONNECTED", "no network connection at all"],
   ] as const;
 
   it.each(cases)("turns cause code %s into words", (code, expected) => {
@@ -378,6 +383,45 @@ describe("naming a failed fetch", () => {
     // The two untrusted-root codes are one world and say one thing; the other
     // two are worlds of their own.
     expect(four[1]).toBe(four[2]);
+  });
+
+  it("reads Chromium's vocabulary, which lives in the message and not in a code", () => {
+    // MEASURED under Electron 43.4.1: `net.fetch` rejects a dead hostname with
+    // a plain `Error("net::ERR_NAME_NOT_RESOLVED")` — no `code`, no `cause`.
+    // Nothing about that shape was guessable, and reading only `code` would
+    // have quietly downgraded every diagnosis the moment main switched stacks.
+    expect(describeFetchFailure(new Error("net::ERR_NAME_NOT_RESOLVED"))).toContain(
+      "does not resolve",
+    );
+    expect(describeFetchFailure(new Error("net::ERR_CONNECTION_RESET"))).toContain(
+      "proxy dropped it",
+    );
+    expect(describeFetchFailure(new Error("net::ERR_PROXY_CONNECTION_FAILED"))).toContain(
+      "proxy this Mac is configured to use",
+    );
+    expect(isTlsNotReady(new Error("net::ERR_SSL_PROTOCOL_ERROR"))).toBe(true);
+  });
+
+  it("keeps the two trust failures apart, because they mean opposite things", () => {
+    // Node's: the browser loads the same URL fine, because macOS trusts the
+    // issuer and Node never asked macOS. Chromium's: macOS does NOT trust it,
+    // so Chrome would refuse too. Sending someone to hunt a difference that
+    // does not exist is the failure mode here.
+    const node = describeFetchFailure(fetchFailed({ code: "SELF_SIGNED_CERT_IN_CHAIN" }));
+    const chromium = describeFetchFailure(new Error("net::ERR_CERT_AUTHORITY_INVALID"));
+    expect(node).toContain("does not read macOS's trust store");
+    expect(chromium).toContain("Chrome would refuse this address too");
+    expect(chromium).not.toContain("does not read macOS's trust store");
+  });
+
+  it("names a timeout on Chromium's stack, where the code is the number 23", () => {
+    // MEASURED: `AbortSignal.timeout` under `net.fetch` rejects with
+    // `TimeoutError`, `code: 23`. A numeric code must not be read as a code.
+    const chromiumTimeout = Object.assign(
+      new Error("The operation was aborted due to timeout"),
+      { name: "TimeoutError", code: 23 },
+    );
+    expect(describeFetchFailure(chromiumTimeout)).toContain("did not answer within the timeout");
   });
 
   it("finds the code however deep the cause chain goes", () => {

@@ -753,7 +753,7 @@ describe("a failed request says why", () => {
         // The push works; only the read back fails. That is what a proxy that
         // blocks one hostname intermittently actually looks like.
         return url.pathname === "/intervals" && (init?.method ?? "GET") === "GET"
-          ? await fetchFailed("ERR_CERT_AUTHORITY_INVALID")()
+          ? await fetchFailed("SELF_SIGNED_CERT_IN_CHAIN")()
           : await cloud.fetch(input, init);
       },
     });

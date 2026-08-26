@@ -251,9 +251,14 @@ export function isTlsNotReady(err: unknown): boolean {
  * one of them ("a work network that inspects HTTPS traffic") is not something
  * anyone would guess.
  *
- * Electron's `net.fetch` (Chromium's stack) reports the same conditions with
- * `ERR_*` codes instead, so both vocabularies are handled and the sentence does
- * not change when the network stack does.
+ * Electron's `net.fetch` (Chromium's stack) reports the same conditions in a
+ * completely different vocabulary, and MEASURED rather than assumed: it sets no
+ * `code` and no `cause` at all, and puts everything in the message —
+ * `Error("net::ERR_NAME_NOT_RESOLVED")`. Both are handled, so the sentence does
+ * not change when the network stack does. The two TRUST failures are the one
+ * place they must not collapse together: Chromium reads the macOS trust store
+ * and Node does not, so the same symptom means opposite things on the two
+ * stacks. See `sentenceForCode`.
  *
  * Redacted like everything else in this file: a cause message is a string from
  * a library, and this one reaches a screen.
@@ -286,10 +291,20 @@ function fetchFailureCode(err: unknown): string | null {
     const code = (link as { code?: unknown }).code;
     if (typeof code === "string" && code !== "") return code;
     // `AbortSignal.timeout` rejects with a DOMException whose only identifying
-    // mark is its NAME. It is how every timeout in this app expires, so it
-    // cannot be the one failure that reports nothing.
+    // mark is its NAME — under Chromium its `code` is the NUMBER 23. It is how
+    // every timeout in this app expires, so it cannot be the one failure that
+    // reports nothing.
     const name = (link as { name?: unknown }).name;
     if (name === "AbortError" || name === "TimeoutError") return "ABORT_ERR";
+    // MEASURED, and not what was expected: Chromium does not use `code` at
+    // all. `net.fetch` rejects a dead hostname with a plain
+    // `Error("net::ERR_NAME_NOT_RESOLVED")` — no `code`, no `cause`. The whole
+    // answer is inside the message, so it is read out of there.
+    const message = (link as { message?: unknown }).message;
+    if (typeof message === "string") {
+      const chromium = /net::(ERR_[A-Z0-9_]+)/.exec(message);
+      if (chromium !== null) return chromium[1] ?? null;
+    }
   }
   return null;
 }
@@ -342,21 +357,49 @@ function sentenceForCode(code: string): string | null {
     case "ETIMEDOUT":
     case "ERR_CONNECTION_TIMED_OUT":
       return "the connection timed out";
+    // ── The two trust failures are NOT the same failure ────────────────────
+    // These four are Node's, and Node reads neither the macOS trust store nor
+    // the macOS proxy configuration. A corporate MITM root that Chrome trusts
+    // is therefore invisible to this process: the app fails and the browser
+    // does not, on every hostname, and no custom domain would help.
     case "SELF_SIGNED_CERT_IN_CHAIN":
     case "DEPTH_ZERO_SELF_SIGNED_CERT":
     case "UNABLE_TO_VERIFY_LEAF_SIGNATURE":
     case "UNABLE_TO_GET_ISSUER_CERT_LOCALLY":
-    case "ERR_CERT_AUTHORITY_INVALID":
-      // THE ONE NOBODY GUESSES. Node reads neither the macOS trust store nor
-      // the macOS proxy configuration, so a corporate MITM root that Chrome
-      // trusts is invisible to this process — the app fails and the browser
-      // does not, on every hostname, and a custom domain would not help.
       return (
         "the TLS certificate was signed by an authority this app does not " +
         "trust. That is the signature of a work network that inspects HTTPS " +
         "traffic — the browser trusts it because macOS does, and this app does " +
         "not read macOS's trust store."
       );
+    case "ERR_CERT_AUTHORITY_INVALID":
+      // Chromium's, and it means the opposite thing. Chromium DOES read the
+      // macOS trust store, so reaching here means macOS does not trust the
+      // issuer either and Chrome would refuse the same address. Saying "this
+      // app does not read macOS's trust store" here would send the owner
+      // hunting a difference that does not exist.
+      return (
+        "the TLS certificate was signed by an authority this Mac does not " +
+        "trust. Chrome would refuse this address too, so this is the " +
+        "certificate rather than a difference between this app and the browser."
+      );
+    case "ERR_PROXY_CONNECTION_FAILED":
+    case "ERR_TUNNEL_CONNECTION_FAILED":
+      return (
+        "the proxy this Mac is configured to use refused the connection or " +
+        "could not complete it"
+      );
+    case "ERR_PROXY_AUTH_REQUESTED":
+    case "ERR_PROXY_AUTH_UNSUPPORTED":
+      return "the proxy asked for credentials, which this app cannot supply";
+    case "ERR_BLOCKED_BY_ADMINISTRATOR":
+    case "ERR_BLOCKED_BY_CLIENT":
+      return (
+        "a policy on this Mac blocked the request outright — that is device " +
+        "management rather than the network"
+      );
+    case "ERR_INTERNET_DISCONNECTED":
+      return "this Mac has no network connection at all";
     case "ERR_TLS_CERT_ALTNAME_INVALID":
     case "ERR_CERT_COMMON_NAME_INVALID":
       return "the certificate served does not name that hostname";
