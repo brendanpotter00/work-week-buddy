@@ -32,9 +32,48 @@ export const PERMISSION = {
   d1Edit: "D1: Edit",
   d1Read: "D1: Read",
   accountRead: "Account Settings: Read",
+  zoneRead: "Zone: Read",
 } as const;
 
 export type PermissionName = (typeof PERMISSION)[keyof typeof PERMISSION];
+
+/**
+ * Which HALF of the token editor each permission is added in.
+ *
+ * Not decoration. Every permission sentence used to end "add the permission at
+ * the Account level", which was true of all of them until `Zone: Read`, and
+ * that one is added under ZONE Resources. Sending someone to the wrong half of
+ * a form they have already lost an evening to is the same class of failure as a
+ * bare 403.
+ */
+export const PERMISSION_LEVEL: Record<PermissionName, "Account" | "Zone"> = {
+  "Workers Scripts: Edit": "Account",
+  "Workers Scripts: Read": "Account",
+  "D1: Edit": "Account",
+  "D1: Read": "Account",
+  "Account Settings: Read": "Account",
+  "Zone: Read": "Zone",
+};
+
+/**
+ * Cloudflare's code for "a DNS record already exists at that hostname".
+ *
+ * MATCH THE NUMBER, NEVER THE MESSAGE. The text of this one has already been
+ * changed once by Cloudflare (`workers-sdk#9878`), and it currently ends by
+ * recommending an `override_existing_dns_record` flag that the documented
+ * endpoint does not even have — a Cloudflare engineer on that issue confirms
+ * the suggestion is simply wrong. So the message is not something to parse and
+ * not something to show.
+ */
+export const CONFLICTING_DNS_RECORD = 100117;
+
+/** Did Cloudflare refuse because something already owns that hostname? */
+export function isConflictingDnsRecord(err: unknown): boolean {
+  return (
+    err instanceof CloudflareApiError &&
+    err.errors.some((e) => e.code === CONFLICTING_DNS_RECORD)
+  );
+}
 
 /** The Cloudflare v4 envelope's error item. `code` and `message` are required. */
 export interface CloudflareErrorItem {
@@ -142,8 +181,9 @@ function describeApiFailure(opts: {
       : `The API token is real — Cloudflare accepted it — but it is missing the ` +
           `“${permission}” permission, which is what ${opts.operation} needs. ` +
           `Edit that token in the Cloudflare dashboard (My Profile → API Tokens), ` +
-          `add the permission at the Account level, and paste it again. Do not ` +
-          `create a new token: the one you have is fine.${tail}`;
+          `add the permission at the ${PERMISSION_LEVEL[permission]} level, and ` +
+          `paste it again. Do not create a new token: the one you have is ` +
+          `fine.${tail}`;
   }
 
   switch (opts.status) {
@@ -168,8 +208,9 @@ function describeApiFailure(opts: {
             `valid but is not allowed to do this.${tail}`
         : `The API token is missing the “${permission}” permission, which is what ` +
             `${opts.operation} needs. Edit the token in the Cloudflare dashboard ` +
-            `(My Profile → API Tokens), add that permission at the Account level, ` +
-            `and paste the token again.${tail}`;
+            `(My Profile → API Tokens), add that permission at the ` +
+            `${PERMISSION_LEVEL[permission]} level, and paste the token ` +
+            `again.${tail}`;
     case 404:
       return `Cloudflare could not find what ${opts.operation} referred to.${tail}`;
     case 429:

@@ -53,13 +53,21 @@
  * stops holding a live credential it never needed.
  */
 import {
+  customDomainUrl,
+  hostnameLabelError,
   workersDevUrl,
+  zoneNameError,
   type CloudScopes,
   type CloudflareApi,
   type D1DatabaseSummary,
   type WorkerBinding,
 } from "./api";
-import { describeCloudError, describeFetchFailure } from "./errors";
+import {
+  describeCloudError,
+  describeFetchFailure,
+  isConflictingDnsRecord,
+  isTlsNotReady,
+} from "./errors";
 import {
   WORKER_BUNDLE,
   WORKER_COMPATIBILITY_DATE,
@@ -92,8 +100,8 @@ export const STEP_LABEL: Record<CloudStepId, string> = {
   schema: "Apply the schema",
   enrol: "Enrol this Mac",
   deploy: "Deploy the Worker",
-  url: "Turn on the workers.dev address",
-  verify: "Check it answers",
+  url: "Turn on the addresses",
+  verify: "Check they answer",
   save: "Turn on sync here",
 };
 
@@ -137,9 +145,57 @@ export interface CloudSetupProgress {
   readonly error: string | null;
 }
 
+/**
+ * The optional second address, as the review screen collected it.
+ *
+ * A label and a zone rather than a full hostname, on purpose: a typo in a
+ * free-text hostname becomes a DNS failure minutes later with an unhelpful
+ * error, and this shape makes that state unrepresentable.
+ */
+export interface CustomDomainRequest {
+  /** One DNS label, e.g. `wwb`. Never a full hostname. */
+  readonly label: string;
+  /**
+   * The zone — by id when setup could list them, by name when it could not.
+   *
+   * The by-name form is what makes `Zone: Read` optional: the attach carries
+   * `zone_name` instead of `zone_id` and needs no zone permission at all.
+   */
+  readonly zone: { readonly id: string; readonly name: string } | { readonly name: string };
+}
+
+/** One address, and what happened when THIS Mac asked it for `/health`. */
+export interface AddressProbe {
+  readonly url: string;
+  readonly kind: "workers.dev" | "custom";
+  /** Did this Mac get a usable answer out of it? */
+  readonly reachable: boolean;
+  /** Null when reachable. Plain words, out of `describeFetchFailure`. */
+  readonly error: string | null;
+  readonly ms: number | null;
+}
+
 export interface CloudSetupOutcome extends CloudSetupProgress {
   readonly ok: boolean;
   readonly workerUrl: string | null;
+  /**
+   * EVERY address setup turned on, and what each one did from this Mac.
+   *
+   * The whole diagnostic, and the reason this feature is worth having even if
+   * the premise behind it turns out to be wrong. "workers.dev does not resolve
+   * from this Mac" and "the custom domain answered in 180 ms" are two different
+   * worlds, and before this the app could not tell them apart or say either.
+   *
+   * Present on FAILURE too — a failed run is exactly when the report is worth
+   * most.
+   */
+  readonly addresses: readonly AddressProbe[];
+  /**
+   * The other address that is live in Cloudflare and is not the one being used.
+   *
+   * Diagnostics and a one-click switch in Settings. Never used to sync.
+   */
+  readonly altWorkerUrl: string | null;
   /**
    * This Mac's token — set ONLY when it could not be stored locally, which on
    * macOS means the keychain refused. Then the owner can paste it into the
@@ -188,6 +244,21 @@ export interface CloudDeploymentState {
   readonly accountSubdomain: string | null;
   /** Intervals already in this database. Null when there is no database yet. */
   readonly rowsInCloud: number | null;
+  /**
+   * The domains on this account, for the address picker.
+   *
+   * EMPTY MEANS TWO DIFFERENT THINGS and `scopes.zones` is what separates them:
+   * `ok` with an empty list is an account with no domains on it, and `missing`
+   * is a token that may not look. The screen says something different for each.
+   */
+  readonly zones: ReadonlyArray<{ id: string; name: string }>;
+  /**
+   * Hostnames already pointed at a Worker on this account, and which one.
+   *
+   * So the review screen can refuse a name that belongs to something else
+   * before anything is created, rather than after a deploy.
+   */
+  readonly workerDomains: ReadonlyArray<{ hostname: string; service: string }>;
 }
 
 export interface BringupDeps {
@@ -212,7 +283,12 @@ export interface BringupDeps {
    * sync is live with no relaunch. Throws when there is no keychain, which is
    * the one failure the outcome answers by showing the token instead.
    */
-  readonly commit: (c: { workerUrl: string; token: string }) => Promise<void>;
+  readonly commit: (c: {
+    workerUrl: string;
+    /** The other address setup turned on. Diagnostics only; never used to sync. */
+    altWorkerUrl: string | null;
+    token: string;
+  }) => Promise<void>;
   /** Plain fetch against the deployed Worker. Injected by the tests. */
   readonly fetchImpl?: typeof fetch;
   readonly onProgress?: (p: CloudSetupProgress) => void;
@@ -232,6 +308,19 @@ export interface CloudSetupRequest {
    * whether to ask at all.
    */
   readonly subdomain?: string;
+  /**
+   * Also put the Worker on a domain the owner already has on this account.
+   *
+   * ADDITIVE. The workers.dev address is turned on either way and is never
+   * switched off — both hostnames reach the same script, the same D1 and the
+   * same `machine_token` registry, and the Worker stamps `machine_id` from the
+   * credential rather than from the host. Which hostname a request arrives on
+   * is invisible to correctness, and that property is what makes keeping the
+   * fallback free rather than awkward.
+   *
+   * Every failure in this half is a sentence, never a failed setup.
+   */
+  readonly customDomain?: CustomDomainRequest;
 }
 
 /**
@@ -367,6 +456,14 @@ async function inspectDeployment(o: {
     machines: registry.machines,
     accountSubdomain: await o.api.getAccountSubdomain(o.accountId),
     rowsInCloud: registry.rows,
+    // Tolerant, and it cannot fail the probe: `listZones` already answers
+    // `[]` rather than throwing when the token may not read zones, and a
+    // missing OPTIONAL permission must never present as a broken account.
+    zones: (await api.listZones(o.accountId)).map((z) => ({ id: z.id, name: z.name })),
+    workerDomains: (await api.listWorkerDomains(o.accountId)).map((d) => ({
+      hostname: d.hostname,
+      service: d.service,
+    })),
   };
 }
 
@@ -486,6 +583,8 @@ export async function runCloudSetup(
   const tracker = new StepTracker(deps.onProgress);
 
   let workerUrl: string | null = null;
+  let altWorkerUrl: string | null = null;
+  let addresses: readonly AddressProbe[] = [];
   let unstoredToken: string | null = null;
 
   try {
@@ -621,19 +720,63 @@ export async function runCloudSetup(
     // Composed from a subdomain READ BACK off the account and the name the
     // upload was accepted under — then proved in the next step. The API returns
     // no URL of its own, so the proof is the substitute for being told.
-    workerUrl = workersDevUrl(workerName, subdomain);
-    tracker.done("url", workerUrl);
+    const devUrl = workersDevUrl(workerName, subdomain);
 
-    // ── 7. does it answer ─────────────────────────────────────────────────
+    // ── The optional second address ───────────────────────────────────────
+    // EVERY failure in here is a note and never a throw. The `url` step ends
+    // `done` as long as workers.dev came up, because a custom domain that could
+    // not be attached costs a sentence, not a setup.
+    const custom =
+      req.customDomain === undefined
+        ? { url: null, fresh: false, note: null }
+        : await attachCustomDomain({
+            api: deps.api,
+            accountId: req.accountId,
+            workerName,
+            request: req.customDomain,
+          });
+    if (custom.note !== null) tracker.note("url", custom.note);
+
+    // Provisional: `verify` is what decides which one this Mac actually saves.
+    // Set now so a failure at the next step still reports an address.
+    workerUrl = custom.url ?? devUrl;
+    tracker.done(
+      "url",
+      custom.url === null
+        ? custom.note === null
+          ? devUrl
+          : `workers.dev is on at ${devUrl}. ${custom.note}`
+        : custom.note === null
+          ? `${custom.url} and ${devUrl}`
+          : `${custom.note}; workers.dev is on too`,
+    );
+
+    // ── 7. do they answer ─────────────────────────────────────────────────
     tracker.start("verify");
-    await verifyWorker({
-      baseUrl: workerUrl,
+    const collected: AddressProbe[] = [];
+    // Collected as they happen rather than returned, so a run that ends with
+    // NOTHING answering still carries the report out through the catch below.
+    // That is the run the report is worth most on.
+    addresses = collected;
+    const verified = await verifyAddresses({
+      collect: (probe) => collected.push(probe),
+      // The custom domain FIRST, and preferred when both answer: the point of
+      // adding it was not to depend on workers.dev.
+      candidates: [
+        ...(custom.url === null
+          ? []
+          : [{ url: custom.url, kind: "custom" as const, fresh: custom.fresh }]),
+        { url: devUrl, kind: "workers.dev" as const, fresh: false },
+      ],
       token: thisToken,
       fetchImpl: deps.fetchImpl ?? globalThis.fetch,
       sleep: deps.sleep ?? realSleep,
+      now,
       note: (detail) => tracker.note("verify", detail),
     });
-    tracker.done("verify", "reachable, and this Mac's token was accepted");
+    workerUrl = verified.chosen;
+    altWorkerUrl = collected.map((a) => a.url).find((u) => u !== verified.chosen) ?? null;
+    tracker.done("verify", verifyDetail(collected, verified.chosen));
 
     // ── 8. this Mac ───────────────────────────────────────────────────────
     // LAST, and only now: the local half is written once the deployed Worker
@@ -641,7 +784,7 @@ export async function runCloudSetup(
     // mean a green "sync is on" for a Worker that never replied.
     tracker.start("save");
     try {
-      await deps.commit({ workerUrl, token: thisToken });
+      await deps.commit({ workerUrl, altWorkerUrl, token: thisToken });
     } catch (err) {
       // The cloud half is real and correct; only the keychain refused. Handing
       // the token over is strictly better than reporting a failure for a
@@ -657,6 +800,8 @@ export async function runCloudSetup(
         ),
         ok: false,
         workerUrl,
+        altWorkerUrl,
+        addresses,
         unstoredToken,
       };
     }
@@ -693,11 +838,26 @@ export async function runCloudSetup(
     }
     tracker.done("save", revokeNote);
 
-    return { ...tracker.snapshot(null), ok: true, workerUrl, unstoredToken: null };
+    return {
+      ...tracker.snapshot(null),
+      ok: true,
+      workerUrl,
+      altWorkerUrl,
+      addresses,
+      unstoredToken: null,
+    };
   } catch (err) {
     const message = describeCloudError(err);
     tracker.failCurrent(message);
-    return { ...tracker.snapshot(message), ok: false, workerUrl, unstoredToken };
+    return {
+      ...tracker.snapshot(message),
+      ok: false,
+      workerUrl,
+      altWorkerUrl,
+      // A failed run is exactly when the address report is worth most.
+      addresses,
+      unstoredToken,
+    };
   }
 }
 
@@ -719,61 +879,286 @@ export function buildBindings(o: { databaseId: string }): WorkerBinding[] {
 }
 
 /**
- * Prove the URL, then prove the token — in that order, because they fail for
- * different reasons and the order is the diagnosis.
+ * Put the Worker on a domain the owner already owns — or say, in one sentence,
+ * why it is still only on workers.dev.
  *
- * `/health` is unauthenticated on purpose (`worker/src/routes.ts`) and is the
- * only question worth asking first: can this Mac reach the thing at all. The
- * authenticated read after it is the only way to learn that the URL is perfect
- * and the token is not.
+ * NEVER THROWS. That is the whole contract: workers.dev is already on by the
+ * time this runs, so a custom domain that could not be attached is a note on a
+ * step that still ends `done`. A second address failing must not cost anybody a
+ * working setup.
  *
- * ── THE WAIT IS NOT PADDING ─────────────────────────────────────────────────
- * A brand-new workers.dev hostname resolves in DNS before its TLS certificate
- * has been issued — measured at about two minutes on this account's first
- * setup. macOS `curl` reports that as `sslv3 alert handshake failure`, which
- * reads exactly like a real error and is not. So the first minutes of failure
- * are retried rather than reported.
+ * The `GET` runs before the `PUT` because refusing early with a sentence the
+ * owner understands beats a Cloudflare error code they have to decode — and
+ * because a hostname already pointed at somebody ELSE's Worker is a thing to
+ * leave alone rather than to try and find out about by attempting it.
  */
-async function verifyWorker(o: {
-  baseUrl: string;
+async function attachCustomDomain(o: {
+  api: CloudflareApi;
+  accountId: string;
+  workerName: string;
+  request: CustomDomainRequest;
+}): Promise<{ url: string | null; fresh: boolean; note: string | null }> {
+  const skipped = (note: string) => ({ url: null, fresh: false, note });
+
+  const label = o.request.label.trim().toLowerCase();
+  const zoneName = o.request.zone.name.trim().toLowerCase();
+  const labelProblem = hostnameLabelError(label);
+  if (labelProblem !== null) return skipped(`no custom domain was added: ${labelProblem}`);
+  const zoneProblem = zoneNameError(zoneName);
+  if (zoneProblem !== null) return skipped(`no custom domain was added: ${zoneProblem}`);
+
+  const hostname = `${label}.${zoneName}`;
+  const url = customDomainUrl(label, zoneName);
+
+  let taken: Awaited<ReturnType<CloudflareApi["findWorkerDomain"]>>;
+  try {
+    taken = await o.api.findWorkerDomain(o.accountId, hostname);
+  } catch (err) {
+    return skipped(
+      `“${hostname}” could not be checked (${describeCloudError(err)}), so setup ` +
+        `left it alone.`,
+    );
+  }
+  if (taken === null) {
+    // "Cannot tell" is not "nothing there". Attaching a hostname that was never
+    // actually checked is the one thing this branch exists to prevent.
+    return skipped(
+      `“${hostname}” could not be checked — this token may not read Worker ` +
+        `domains — so setup left it alone.`,
+    );
+  }
+  if (taken !== undefined && taken.service !== o.workerName) {
+    return skipped(
+      `“${hostname}” is already the address of a different Worker ` +
+        `(“${taken.service}”). Setup left it alone.`,
+    );
+  }
+  if (taken !== undefined) {
+    // Already ours. No PUT at all — re-running setup must be free, and the
+    // cheapest way for a re-attach to be harmless is for it not to happen.
+    return { url, fresh: false, note: `already on ${url}` };
+  }
+
+  try {
+    await o.api.attachWorkerDomain(o.accountId, {
+      hostname,
+      service: o.workerName,
+      zone: "id" in o.request.zone ? { id: o.request.zone.id } : { name: zoneName },
+    });
+    return { url, fresh: true, note: null };
+  } catch (err) {
+    if (isConflictingDnsRecord(err)) {
+      // Matched on the numeric code, never the message: Cloudflare has already
+      // changed that text once, and it currently recommends an override flag
+      // this endpoint does not have and which could not overwrite a non-Worker
+      // record even where it does.
+      return skipped(
+        `“${hostname}” was not added: a DNS record already exists at that name ` +
+          `on ${zoneName}. Cloudflare will not replace it, and neither will ` +
+          `setup. Remove it, or pick a different name and run setup again.`,
+      );
+    }
+    return skipped(`“${hostname}” was not added: ${describeCloudError(err)}`);
+  }
+}
+
+/** Today's ladder — about 79 seconds. Unchanged, and used for anything not new. */
+const VERIFY_WAITS = [0, 2000, 4000, 8000, 15_000, 20_000, 30_000];
+
+/**
+ * The ladder for an address created SECONDS ago — about three minutes.
+ *
+ * THREE MINUTES IS A JUDGEMENT, NOT A MEASUREMENT. Cloudflare documents no
+ * issuance SLA for the Advanced Certificate a custom domain generates; the
+ * launch blog says only "in seconds", and the status machine runs Initializing
+ * → Pending Validation → Pending Issuance → Pending Deployment → Active.
+ * `docs/CLOUDFLARE.md` measured about two minutes for the workers.dev
+ * certificate on this account, so three is that with room.
+ *
+ * Exhausting it is NOT a failure: setup falls back to the other address and
+ * says the new one may answer later. Do not tidy that into a hard failure.
+ */
+const FRESH_DOMAIN_WAITS = [
+  0, 3000, 5000, 10_000, 15_000, 30_000, 30_000, 30_000, 30_000, 30_000,
+];
+
+/**
+ * Ask every address this Mac now has, and KEEP the answers.
+ *
+ * One address answering is enough to proceed. The ones that did NOT answer are
+ * kept rather than discarded, and that is the whole diagnostic: an owner whose
+ * work Mac fails here now gets a sentence saying which address failed and why.
+ *
+ * The custom domain is tried first and preferred when both work, because the
+ * point of adding it was not to depend on workers.dev.
+ *
+ * ── WHY ONLY THE FIRST ONE TO ANSWER IS AUTHENTICATED ───────────────────────
+ * The token is a property of the WORKER — same script, same D1, same
+ * `machine_token` row — so proving it once proves it. `assertAuthorized`'s own
+ * retry exists for a redeploy that has not reached every colo, which is
+ * per-deployment and not per-host. The remaining addresses get one `/health`
+ * each, purely to complete the report.
+ */
+async function verifyAddresses(o: {
+  candidates: readonly { url: string; kind: AddressProbe["kind"]; fresh: boolean }[];
   token: string;
   fetchImpl: typeof fetch;
   sleep: (ms: number) => Promise<void>;
+  now: () => number;
   note: (detail: string) => void;
-}): Promise<void> {
-  const waits = [0, 2000, 4000, 8000, 15_000, 20_000, 30_000];
+  /**
+   * Handed out one at a time rather than returned in a lump, because the case
+   * that matters most is the one where this function THROWS: no address
+   * answered, and the report of what each one did is the entire value of the
+   * run.
+   */
+  collect: (probe: AddressProbe) => void;
+  // `chosen` is never null on the way out: nothing answering THROWS, so the
+  // caller does not get a "succeeded with no address" state to handle.
+}): Promise<{ chosen: string }> {
+  const probes: AddressProbe[] = [];
+  const push = (probe: AddressProbe): void => {
+    probes.push(probe);
+    o.collect(probe);
+  };
+  let chosen: string | null = null;
+
+  for (const candidate of o.candidates) {
+    const startedMs = o.now();
+    const health = await probeHealth({
+      ...o,
+      candidate,
+      // Once something has answered, the rest are one shot for the report. A
+      // second three-minute ladder on an address nobody is waiting for would
+      // be three minutes of a spinner for a line of diagnostics.
+      waits: chosen !== null ? [0] : candidate.fresh ? FRESH_DOMAIN_WAITS : VERIFY_WAITS,
+    });
+    const ms = o.now() - startedMs;
+
+    if (health !== null) {
+      push({ ...candidate, reachable: false, error: health, ms });
+      continue;
+    }
+    if (chosen !== null) {
+      push({ ...candidate, reachable: true, error: null, ms });
+      continue;
+    }
+
+    // The first address to answer proves the token. A refusal by the ZONE is
+    // the one failure that belongs to this hostname rather than to the Worker,
+    // so it is recorded and the next candidate is tried; anything else is about
+    // the deployment and throws, exactly as it did before there were two.
+    const refusal = await assertAuthorized({ ...o, baseUrl: candidate.url });
+    if (refusal !== null) {
+      push({ ...candidate, reachable: false, error: refusal, ms: o.now() - startedMs });
+      continue;
+    }
+    chosen = candidate.url;
+    push({ ...candidate, reachable: true, error: null, ms });
+  }
+
+  if (chosen === null) {
+    throw new Error(
+      `the Worker was deployed but none of its addresses answered from this Mac. ` +
+        probes.map((p) => `${p.url}/health — ${p.error ?? "no reason given"}`).join("; ") +
+        `. api.cloudflare.com WAS reachable from here a moment ago, so the network ` +
+        `is up and it is these hostnames specifically. The deployment is finished ` +
+        `and re-running setup is safe.`,
+    );
+  }
+  return { chosen };
+}
+
+/**
+ * Does this address answer `/health` at all? Null when it does; the reason when
+ * it does not.
+ *
+ * ── THE WAIT IS NOT PADDING ─────────────────────────────────────────────────
+ * A brand-new hostname resolves in DNS before its TLS certificate has been
+ * issued — measured at about two minutes on this account's first setup. macOS
+ * `curl` reports that as `sslv3 alert handshake failure`, which reads exactly
+ * like a real error and is not.
+ *
+ * ── BUT ONLY FOR THINGS THAT COULD BE A CERTIFICATE ─────────────────────────
+ * A refused connection, a reset by a proxy or an HTTP status is an ANSWER, not
+ * a certificate still being issued, and waiting three minutes on one is a bug
+ * rather than patience. So the ladder continues only while the failure is one a
+ * minute-old address would give — or while the failure cannot be identified at
+ * all, which is the case a bare `TypeError: fetch failed` with no cause leaves
+ * us in and which there is no evidence to rule out.
+ */
+async function probeHealth(o: {
+  candidate: { url: string; kind: AddressProbe["kind"]; fresh: boolean };
+  waits: readonly number[];
+  fetchImpl: typeof fetch;
+  sleep: (ms: number) => Promise<void>;
+  note: (detail: string) => void;
+}): Promise<string | null> {
+  const host = hostOf(o.candidate.url);
   let last = "";
-  for (const [i, wait] of waits.entries()) {
+  for (const [i, wait] of o.waits.entries()) {
     if (wait > 0) {
       o.note(
-        `waiting for the new address's certificate — this takes a couple of ` +
-          `minutes the first time (attempt ${String(i + 1)})`,
+        o.candidate.fresh
+          ? `waiting for ${host} — a new address's certificate usually takes a ` +
+              `couple of minutes (attempt ${String(i + 1)})`
+          : `waiting for the new address's certificate — this takes a couple of ` +
+              `minutes the first time (attempt ${String(i + 1)})`,
       );
       await o.sleep(wait);
     }
     try {
-      const res = await o.fetchImpl(`${o.baseUrl}/health`);
-      if (res.ok) {
-        await assertAuthorized(o);
-        return;
-      }
-      last = `GET ${o.baseUrl}/health answered ${String(res.status)}`;
+      const res = await o.fetchImpl(`${o.candidate.url}/health`);
+      if (res.ok) return null;
+      const challenge = challengeSentence(res, o.candidate.url);
+      if (challenge !== null) return challenge;
+      last = `${o.candidate.url}/health answered ${String(res.status)}`;
     } catch (err) {
-      // NOT `describeCloudError`. That returns `err.message`, which for every
-      // one of these is the literal string "fetch failed" — the exact reason
-      // the work Mac's failed setup could report nothing useful.
       last = describeFetchFailure(err);
+      if (!worthWaitingFor(err)) return last;
     }
   }
-  throw new Error(
-    `the Worker was deployed but ${o.baseUrl}/health never answered (${last}). ` +
-      `The deployment is done and re-running setup is safe; on a work Mac, ` +
-      `check whether the proxy allows workers.dev.`,
+  return last;
+}
+
+/** Only a certificate that may not exist yet, or a failure we cannot name. */
+function worthWaitingFor(err: unknown): boolean {
+  return isTlsNotReady(err) || describeFetchFailure(err) === "fetch failed";
+}
+
+/**
+ * A Cloudflare challenge page, rather than a refusal by the Worker.
+ *
+ * THE WORST FAILURE THIS FEATURE COULD PRODUCE is a silent, permanent 403 on a
+ * perfectly good token. A custom domain routes through the ZONE and workers.dev
+ * does not, so everything configured on that domain — Bot Fight Mode, WAF
+ * rules, rate limiting, "I'm Under Attack", Cloudflare Access — suddenly
+ * applies to sync traffic, and a challenge is unsolvable by a `fetch` client.
+ * Reported as "the token was rejected" it would send someone to re-run a setup
+ * that is already right, for ever.
+ *
+ * The CONTENT TYPE is the whole test, and the body is never read into a
+ * message: an HTML page in an error toast tells the reader nothing and could
+ * echo the request back at them.
+ */
+function challengeSentence(res: Response, baseUrl: string): string | null {
+  const html = (res.headers.get("content-type") ?? "").toLowerCase().includes("text/html");
+  if (!html || (res.status !== 403 && res.status !== 503)) return null;
+  return (
+    `${baseUrl} answered ${String(res.status)} with a Cloudflare challenge page. ` +
+    `That is the zone's security settings, not the token — check Bot Fight Mode, ` +
+    `WAF rules and Access for that domain in the Cloudflare dashboard. The ` +
+    `workers.dev address is unaffected.`
   );
 }
 
 /**
  * Does the token this run just uploaded actually work?
+ *
+ * Resolves NULL when it does, a sentence when the ZONE refused this hostname,
+ * and THROWS for anything else — because everything else is a fact about the
+ * deployment rather than about which address was used, and would be equally
+ * true of every other address.
  *
  * RETRIED, and not for the same reason `/health` is. On a REDEPLOY the hostname
  * has existed for months, so `/health` answers instantly — from whichever
@@ -790,7 +1175,7 @@ async function assertAuthorized(o: {
   token: string;
   fetchImpl: typeof fetch;
   sleep: (ms: number) => Promise<void>;
-}): Promise<void> {
+}): Promise<string | null> {
   const waits = [0, 1000, 2000, 4000, 8000];
   let status = 0;
   for (const wait of waits) {
@@ -798,8 +1183,12 @@ async function assertAuthorized(o: {
     const res = await o.fetchImpl(`${o.baseUrl}/machines`, {
       headers: { authorization: `Bearer ${o.token}` },
     });
-    if (res.ok) return;
+    if (res.ok) return null;
     status = res.status;
+    // A challenge is not a version that has not propagated yet, and no amount
+    // of waiting solves one. Out of the ladder immediately.
+    const challenge = challengeSentence(res, o.baseUrl);
+    if (challenge !== null) return challenge;
     // 401/403 and 503 are both worth waiting on, for the same reason: a version
     // that is not live everywhere yet. 503 specifically is the old Worker
     // answering before the new schema reached it.
@@ -823,6 +1212,25 @@ async function assertAuthorized(o: {
   throw new Error(
     `the Worker is reachable but an authenticated read answered ${String(status)}.`,
   );
+}
+
+/** The one line the finished `verify` step shows. */
+function verifyDetail(probes: readonly AddressProbe[], chosen: string): string {
+  if (probes.length <= 1) return "reachable, and this Mac's token was accepted";
+  const failed = probes.filter((p) => !p.reachable);
+  if (failed.length === 0) return `both addresses answered; using ${chosen}`;
+  return (
+    failed.map((p) => `${p.url} did not answer (${p.error ?? "no reason given"})`).join("; ") +
+    `; using ${chosen}`
+  );
+}
+
+function hostOf(url: string): string {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return url;
+  }
 }
 
 function realSleep(ms: number): Promise<void> {

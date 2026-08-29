@@ -95,8 +95,12 @@ export const ipc = {
    * `SyncConfigState`, which carries `tokenPresent` and never a token. Nothing
    * in the renderer may keep the typed value past this call.
    */
-  setSyncConfig: (patch: { workerUrl?: string; token?: string }): Promise<SyncConfigState> =>
-    bridge().invoke("wwb:sync:setConfig", patch),
+  setSyncConfig: (patch: {
+    workerUrl?: string;
+    /** Sent with `workerUrl` to SWAP the two addresses. Never used to sync. */
+    workerUrlAlt?: string;
+    token?: string;
+  }): Promise<SyncConfigState> => bridge().invoke("wwb:sync:setConfig", patch),
   /** Same one-way rule, and it stores nothing. Omitted halves use the stored ones. */
   testSyncConfig: (patch: { workerUrl?: string; token?: string }): Promise<SyncTestResult> =>
     bridge().invoke("wwb:sync:test", patch),

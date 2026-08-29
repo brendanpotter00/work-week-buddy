@@ -13,10 +13,20 @@
  */
 import { describe, it, expect, beforeEach } from "vitest";
 
-import { createCloudflareApi, toSubdomainLabel, workersDevUrl } from "../../src/cloud/api";
 import {
+  createCloudflareApi,
+  customDomainUrl,
+  hostnameLabelError,
+  toSubdomainLabel,
+  workersDevUrl,
+  zoneNameError,
+} from "../../src/cloud/api";
+import {
+  CONFLICTING_DNS_RECORD,
   CloudflareApiError,
+  PERMISSION,
   describeFetchFailure,
+  isConflictingDnsRecord,
   isTlsNotReady,
   redactSecrets,
 } from "../../src/cloud/errors";
@@ -24,7 +34,11 @@ import {
   FAKE_ACCOUNT_ID,
   FAKE_API_TOKEN,
   FAKE_BASE,
+  FAKE_ZONE_ID,
+  FAKE_ZONE_NAME,
+  FOREIGN_ZONE_NAME,
   FakeCloudflare,
+  OTHER_ZONE_NAME,
 } from "./fake-cloudflare";
 
 let cloud: FakeCloudflare;
@@ -202,6 +216,7 @@ describe("probeScopes tries, because scopes cannot be read", () => {
       d1: "ok",
       workers: "ok",
       accountRead: "ok",
+      zones: "ok",
     });
   });
 
@@ -493,5 +508,246 @@ describe("naming a failed fetch", () => {
     const err = await dead.verifyToken().then(() => null, (e: unknown) => e);
     expect((err as Error).message).toContain("does not read macOS's trust store");
     expect((err as Error).message).not.toContain("fetch failed");
+  });
+});
+
+/**
+ * Zones and Worker custom domains.
+ *
+ * The dangerous call in this group is `attachWorkerDomain`, and what makes it
+ * dangerous is not what it does but what it must never do: the zone it points
+ * at can host unrelated services on other hostnames, and wrangler's own
+ * (undocumented) spelling of this call carries an `override_existing_dns_record`
+ * flag. So most of what is asserted here is about the body NOT containing
+ * things.
+ */
+describe("zones", () => {
+  it("filters to this account, and sends the dotted key that does it", async () => {
+    const zones = await api().listZones(FAKE_ACCOUNT_ID);
+    expect(zones.map((z) => z.name)).toEqual([FAKE_ZONE_NAME, OTHER_ZONE_NAME]);
+    // `account.id`, not `account_id`. Confirmed twice: the published schema,
+    // and wrangler's `zones.ts`.
+    const listed = cloud.calls.filter((c) => c.path === "/zones").at(-1);
+    expect(listed).toBeDefined();
+  });
+
+  it("drops a zone on somebody else's account even if the server sent it", async () => {
+    // The filter is applied server-side AND here, for the reason findDatabase
+    // documents: a server-side filter that silently stopped matching would
+    // present another account's domains as this one's.
+    const zones = await api().listZones(FAKE_ACCOUNT_ID);
+    expect(zones.map((z) => z.name)).not.toContain(FOREIGN_ZONE_NAME);
+  });
+
+  it.each([401, 403] as const)(
+    "treats a token without Zone: Read as an empty list, not a failure (%i)",
+    async (status) => {
+      cloud.denied.add("Zone: Read");
+      cloud.denyStatus = status;
+      // Not being able to LIST domains does not stop you using one — attaching
+      // is authorised by Workers Scripts, and the request can carry
+      // `zone_name`. An empty list is a supported state, never an error.
+      expect(await api().listZones(FAKE_ACCOUNT_ID)).toEqual([]);
+    },
+  );
+
+  it("names Zone: Read at the ZONE level, not the Account level", async () => {
+    // The bug this catches: every permission sentence used to end "add the
+    // permission at the Account level", and this one is added under Zone
+    // Resources. Sending someone to the wrong half of the form is the same
+    // class of failure as a bare 403.
+    cloud.denied.add("Zone: Read");
+    const err = await api()
+      .attachWorkerDomain(FAKE_ACCOUNT_ID, {
+        hostname: `wwb.${FAKE_ZONE_NAME}`,
+        service: "wwb-sync",
+        zone: { id: FAKE_ZONE_ID },
+      })
+      .then(() => null, (e: unknown) => e);
+    // That call needs Workers Scripts: Edit, which IS an account-level row.
+    expect(err).toBeNull();
+
+    const zoneErr = new CloudflareApiError({
+      operation: "listing the domains on this Cloudflare account",
+      status: 403,
+      errors: [],
+      permission: PERMISSION.zoneRead,
+      tokenVerified: true,
+    });
+    expect(zoneErr.message).toContain("at the Zone level");
+    expect(zoneErr.message).not.toContain("at the Account level");
+  });
+});
+
+describe("finding a Worker custom domain", () => {
+  it("says undefined for a hostname nothing is attached to", async () => {
+    expect(await api().findWorkerDomain(FAKE_ACCOUNT_ID, `wwb.${FAKE_ZONE_NAME}`)).toBeUndefined();
+  });
+
+  it("says null — not undefined — when the token may not look", async () => {
+    // "Nothing there" and "cannot tell" are different values on purpose. One of
+    // them is safe to attach over and the other is not.
+    cloud.denied.add("Workers Scripts: Read");
+    expect(await api().findWorkerDomain(FAKE_ACCOUNT_ID, `wwb.${FAKE_ZONE_NAME}`)).toBeNull();
+  });
+
+  it("returns the record, naming the service that owns it", async () => {
+    cloud.workerDomains.push({
+      id: "domain-existing",
+      cert_id: "00000000-0000-0000-0000-000000000099",
+      hostname: `taken.${FAKE_ZONE_NAME}`,
+      zone_id: FAKE_ZONE_ID,
+      zone_name: FAKE_ZONE_NAME,
+      service: "somebody-elses-worker",
+    });
+    const found = await api().findWorkerDomain(FAKE_ACCOUNT_ID, `taken.${FAKE_ZONE_NAME}`);
+    expect(found?.service).toBe("somebody-elses-worker");
+    expect(found?.hostname).toBe(`taken.${FAKE_ZONE_NAME}`);
+  });
+});
+
+describe("attaching a Worker custom domain", () => {
+  const attach = (zone: { id: string } | { name: string }, hostname = `wwb.${FAKE_ZONE_NAME}`) =>
+    api().attachWorkerDomain(FAKE_ACCOUNT_ID, { hostname, service: "wwb-sync", zone });
+
+  const lastBody = (): Record<string, unknown> =>
+    JSON.parse(cloud.calls.filter((c) => c.path.endsWith("/workers/domains")).at(-1)?.body ?? "{}");
+
+  it("sends exactly hostname, service and zone_id", async () => {
+    const domain = await attach({ id: FAKE_ZONE_ID });
+    expect(domain.hostname).toBe(`wwb.${FAKE_ZONE_NAME}`);
+    expect(Object.keys(lastBody()).sort()).toEqual(["hostname", "service", "zone_id"]);
+  });
+
+  it("never sends `environment`, whatever the SDK's example shows", async () => {
+    // The schema marks it `deprecated, readOnly`. The generated SDK's doc
+    // comment shows it anyway. The schema has been right every previous time
+    // this project has caught the two disagreeing.
+    await attach({ id: FAKE_ZONE_ID });
+    expect(lastBody()).not.toHaveProperty("environment");
+  });
+
+  it("never sends any override flag, which is the whole safety argument", async () => {
+    // `override_existing_dns_record` is what wrangler sends on its own,
+    // undocumented spelling of this call. The documented endpoint has no such
+    // field, so a conflict FAILS instead of replacing something on a zone that
+    // may host other things. The fake rejects the flag outright if it ever
+    // appears.
+    await attach({ id: FAKE_ZONE_ID });
+    expect(Object.keys(lastBody()).filter((k) => k.startsWith("override_"))).toEqual([]);
+  });
+
+  it("sends zone_name instead when the zones could not be listed", async () => {
+    await attach({ name: FAKE_ZONE_NAME });
+    expect(lastBody()).toMatchObject({ zone_name: FAKE_ZONE_NAME });
+    expect(lastBody()).not.toHaveProperty("zone_id");
+  });
+
+  it("reads the certificate id back without needing it", async () => {
+    const domain = await attach({ id: FAKE_ZONE_ID });
+    expect(domain.certId).not.toBe("");
+    expect(domain.zoneName).toBe(FAKE_ZONE_NAME);
+  });
+
+  it("refuses rather than replacing when a DNS record is already there", async () => {
+    cloud.dnsRecords.push(`wwb.${FAKE_ZONE_NAME}`);
+    const err = await attach({ id: FAKE_ZONE_ID }).then(() => null, (e: unknown) => e);
+    expect(isConflictingDnsRecord(err)).toBe(true);
+    // And nothing was created.
+    expect(cloud.workerDomains).toEqual([]);
+  });
+
+  it.each([401, 403] as const)(
+    "names Workers Scripts: Edit at the Account level under a %i",
+    async (status) => {
+      cloud.denied.add("Workers Scripts: Edit");
+      cloud.denyStatus = status;
+      const api1 = createCloudflareApi({
+        apiToken: FAKE_API_TOKEN,
+        fetchImpl: cloud.fetch,
+        baseUrl: FAKE_BASE,
+      });
+      // Verify first, so Rule A applies the way it does in a real run.
+      await api1.verifyToken();
+      const err = await api1
+        .attachWorkerDomain(FAKE_ACCOUNT_ID, {
+          hostname: `wwb.${FAKE_ZONE_NAME}`,
+          service: "wwb-sync",
+          zone: { id: FAKE_ZONE_ID },
+        })
+        .then(() => null, (e: unknown) => e);
+      expect((err as Error).message).toContain("Workers Scripts: Edit");
+      expect((err as Error).message).toContain("at the Account level");
+    },
+  );
+});
+
+describe("the conflict predicate reads the code, never the message", () => {
+  it("is true for 100117 and false for prose that merely mentions DNS", () => {
+    const real = new CloudflareApiError({
+      operation: "x",
+      status: 400,
+      errors: [{ code: CONFLICTING_DNS_RECORD, message: "anything at all" }],
+    });
+    const impostor = new CloudflareApiError({
+      operation: "x",
+      status: 400,
+      errors: [{ code: 1234, message: "already has externally managed DNS records" }],
+    });
+    // Cloudflare has already changed this message once, and the current text
+    // recommends a flag the documented endpoint does not have.
+    expect(isConflictingDnsRecord(real)).toBe(true);
+    expect(isConflictingDnsRecord(impostor)).toBe(false);
+    expect(isConflictingDnsRecord(new Error("100117"))).toBe(false);
+  });
+});
+
+describe("the two halves of a custom address", () => {
+  it("composes the URL from a label and a zone", () => {
+    expect(customDomainUrl("wwb", "example.test")).toBe("https://wwb.example.test");
+    expect(customDomainUrl(" wwb ", " example.test ")).toBe("https://wwb.example.test");
+  });
+
+  it.each([
+    ["", /A name is needed/],
+    ["Wwb", /lowercase letters/],
+    ["w b", /lowercase letters/],
+    ["w.b", /lowercase letters/],
+    ["wwb-", /start or end with a dash/],
+    ["-wwb", /start or end with a dash/],
+    ["a".repeat(64), /63 characters/],
+  ])("refuses the label %j", (label, expected) => {
+    expect(hostnameLabelError(label)).toMatch(expected);
+  });
+
+  it("accepts the ordinary ones", () => {
+    expect(hostnameLabelError("wwb")).toBeNull();
+    expect(hostnameLabelError("w")).toBeNull();
+    expect(hostnameLabelError("a".repeat(63))).toBeNull();
+    expect(hostnameLabelError("work-week-buddy-2")).toBeNull();
+  });
+
+  it("refuses the zone apex by refusing an empty label", () => {
+    // Cloudflare permits "either the zone apex or a subdomain", which is
+    // exactly why this refuses it: the apex is the name most likely to already
+    // be wanted for something else, and taking it over is not a mistake this
+    // wizard gets to make on the owner's behalf.
+    expect(hostnameLabelError("")).toMatch(/will not take over the domain itself/);
+    expect(hostnameLabelError("   ")).toMatch(/will not take over the domain itself/);
+  });
+
+  it.each([
+    ["", /Type the domain/],
+    ["example", /does not look like a domain/],
+    ["exa mple.test", /does not look like a domain/],
+    ["example..test", /does not look like a domain/],
+  ])("refuses the domain %j", (name, expected) => {
+    expect(zoneNameError(name)).toMatch(expected);
+  });
+
+  it("accepts an ordinary domain, however it was typed", () => {
+    expect(zoneNameError("example.test")).toBeNull();
+    expect(zoneNameError(" Example.Test ")).toBeNull();
+    expect(zoneNameError("a.b.example.test")).toBeNull();
   });
 });

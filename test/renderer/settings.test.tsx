@@ -50,7 +50,7 @@ beforeEach(() => {
 interface Fixture {
   bridge: StubBridge;
   /** Every `setConfig` payload, in order. The token is only ever HERE. */
-  writes: Array<{ workerUrl?: string; token?: string }>;
+  writes: Array<{ workerUrl?: string; workerUrlAlt?: string; token?: string }>;
   tests: Array<{ workerUrl?: string; token?: string }>;
   settingsWrites: Array<Partial<UiSettings>>;
   /** One entry per time the card asked main to open the wizard window. */
@@ -89,6 +89,7 @@ function mount(
       writes.push(patch);
       config = syncConfigState({
         workerUrl: patch.workerUrl ?? config.workerUrl,
+        workerUrlAlt: patch.workerUrlAlt ?? config.workerUrlAlt,
         tokenPresent: patch.token !== undefined ? true : config.tokenPresent,
         error: null,
       });
@@ -105,6 +106,7 @@ function mount(
           status: 200,
           ms: 41,
           error: null,
+          alt: null,
         }
       );
     },
@@ -225,6 +227,7 @@ describe("turning sync on", () => {
     const f = mount({
       config: {
         workerUrl: "https://old.workers.dev",
+        workerUrlAlt: "",
         tokenPresent: true,
         configured: true,
       },
@@ -349,6 +352,7 @@ describe("test connection", () => {
         status: 401,
         ms: 30,
         error: "the Worker is reachable but rejected this token",
+        alt: null,
       },
     });
     await screen.findByText("Cloud sync");
@@ -437,6 +441,7 @@ describe("one primary path, and the expert fields behind a disclosure", () => {
     act(() => {
       f.bridge.emit("wwb:push:sync-config", {
         workerUrl: "https://wwb-sync.example.workers.dev",
+        workerUrlAlt: "",
         tokenPresent: true,
         configured: true,
         error: null,
@@ -681,5 +686,187 @@ describe("the settings window after the safety-check card was removed", () => {
     } finally {
       spy.mockRestore();
     }
+  });
+});
+
+/**
+ * Two addresses, in Settings.
+ *
+ * Setup can turn on both a `workers.dev` address and one on a domain the owner
+ * has, and a given Mac may reach one and not the other. So the card has to say
+ * which one is in use, be able to test both, and — when the evidence is on
+ * screen — offer the one click that fixes it.
+ */
+describe("both addresses", () => {
+  const twoAddresses = {
+    workerUrl: "https://wwb.example.test",
+    workerUrlAlt: "https://x.workers.dev",
+    tokenPresent: true,
+    configured: true,
+  };
+
+  it("names the one in use and the one that is not", async () => {
+    mount({ config: twoAddresses });
+    await screen.findByText("Cloud sync");
+    expect(document.body.textContent).toContain("https://wwb.example.test");
+    expect(
+      document.querySelector('[data-slot="sync-alt-address"]')?.textContent,
+    ).toMatch(/https:\/\/x\.workers\.dev.*not in use/);
+  });
+
+  it("relabels the button when there IS a second address", async () => {
+    mount({ config: twoAddresses });
+    await screen.findByText("Cloud sync");
+    expect(syncButton(/Test both addresses/)).toBeTruthy();
+  });
+
+  it("keeps the old label when there is not", async () => {
+    // One address is the ordinary case and must not grow language about a
+    // second one that does not exist.
+    mount({
+      config: { workerUrl: "https://x.workers.dev", tokenPresent: true, configured: true },
+    });
+    await screen.findByText("Cloud sync");
+    expect(syncButton(/Test connection/)).toBeTruthy();
+    expect(document.querySelector('[data-slot="sync-alt-address"]')).toBeNull();
+  });
+
+  it("says both answered, without turning the second one into a second verdict", async () => {
+    mount({
+      config: twoAddresses,
+      testResult: {
+        ok: true,
+        reachable: true,
+        authorized: true,
+        status: 200,
+        ms: 184,
+        error: null,
+        alt: {
+          url: "https://x.workers.dev",
+          reachable: true,
+          status: 200,
+          ms: 90,
+          error: null,
+        },
+      },
+    });
+    await screen.findByText("Cloud sync");
+    act(() => syncButton(/Test both addresses/).click());
+    await waitFor(() =>
+      expect(document.querySelector('[data-slot="sync-test-result"]')?.textContent).toMatch(
+        /Reached both addresses/,
+      ),
+    );
+    // Nothing to switch to, so nothing is offered.
+    expect(document.querySelector('[data-slot="sync-use-alt"]')).toBeNull();
+  });
+
+  it("says NOTHING IS WRONG when the alternate is the one that fails", async () => {
+    // The commonest two-address state on a healthy Mac, and it must not read
+    // as a fault: the address in use works, and the other one is a spare.
+    mount({
+      config: twoAddresses,
+      testResult: {
+        ok: true,
+        reachable: true,
+        authorized: true,
+        status: 200,
+        ms: 184,
+        error: null,
+        alt: {
+          url: "https://x.workers.dev",
+          reachable: false,
+          status: null,
+          ms: null,
+          error: "that hostname does not resolve from this Mac",
+        },
+      },
+    });
+    await screen.findByText("Cloud sync");
+    act(() => syncButton(/Test both addresses/).click());
+    const line = await waitFor(() => {
+      const el = document.querySelector('[data-slot="sync-test-result"]');
+      expect(el?.textContent).toMatch(/did not answer/);
+      return el!;
+    });
+    expect(line.getAttribute("data-ok")).toBe("true");
+    expect(line.textContent).toMatch(/Nothing is wrong/);
+    expect(document.querySelector('[data-slot="sync-use-alt"]')).toBeNull();
+  });
+
+  it("offers the switch when the address IN USE is the one that fails", async () => {
+    const f = mount({
+      config: twoAddresses,
+      testResult: {
+        ok: false,
+        reachable: false,
+        authorized: false,
+        status: null,
+        ms: 20,
+        error:
+          "could not reach https://wwb.example.test (the connection was closed mid-request)",
+        alt: {
+          url: "https://x.workers.dev",
+          reachable: true,
+          status: 200,
+          ms: 90,
+          error: null,
+        },
+      },
+    });
+    await screen.findByText("Cloud sync");
+    act(() => syncButton(/Test both addresses/).click());
+
+    const swap = await waitFor(() => {
+      const el = document.querySelector('[data-slot="sync-use-alt"]') as HTMLButtonElement;
+      expect(el).not.toBeNull();
+      return el;
+    });
+    expect(swap.textContent).toContain("https://x.workers.dev");
+
+    await act(async () => {
+      swap.click();
+    });
+    // THE TWO URLS, EXCHANGED, through the ordinary write path — so main
+    // rebuilds the flusher and every window hears about it. No new channel and
+    // no special case.
+    await waitFor(() => expect(f.writes).toHaveLength(1));
+    expect(f.writes[0]).toEqual({
+      workerUrl: "https://x.workers.dev",
+      workerUrlAlt: "https://wwb.example.test",
+    });
+  });
+
+  it("says so plainly when neither address answered", async () => {
+    mount({
+      config: twoAddresses,
+      testResult: {
+        ok: false,
+        reachable: false,
+        authorized: false,
+        status: null,
+        ms: 20,
+        error: "could not reach https://wwb.example.test",
+        alt: {
+          url: "https://x.workers.dev",
+          reachable: false,
+          status: null,
+          ms: null,
+          error: "that hostname does not resolve from this Mac",
+        },
+      },
+    });
+    await screen.findByText("Cloud sync");
+    act(() => syncButton(/Test both addresses/).click());
+    await waitFor(() =>
+      expect(document.querySelector('[data-slot="sync-test-result"]')?.textContent).toMatch(
+        /Neither address answered/,
+      ),
+    );
+    // Nothing is lost, and the card says so rather than leaving it implied.
+    expect(document.querySelector('[data-slot="sync-test-result"]')?.textContent).toMatch(
+      /every hour stays here until an upload is confirmed/i,
+    );
+    expect(document.querySelector('[data-slot="sync-use-alt"]')).toBeNull();
   });
 });

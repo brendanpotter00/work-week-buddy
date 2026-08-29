@@ -83,7 +83,7 @@ export function TokenStep({
         </div>
         {deepLinkAvailable ? (
           <p className="mt-1.5 text-xs text-muted-foreground">
-            That link opens <b>Create Custom Token</b> with these three permissions already
+            That link opens <b>Create Custom Token</b> with these permissions already
             ticked. Check the summary matches before you press <b>Create Token</b>.
           </p>
         ) : (
@@ -96,11 +96,24 @@ export function TokenStep({
 
       <section>
         <h2 className="text-sm font-medium">What it needs</h2>
-        <p className="mt-1 text-xs text-muted-foreground">
-          All three rows are <b>Account</b> scope.
-        </p>
+        {/* GROUPED BY WHETHER IT IS OPTIONAL, not by scope. Four permissions
+            reads like four chances to get it wrong; two plus two you can skip
+            reads like two. The owner has already lost an evening to one
+            missing permission, so which of these he is allowed to leave out is
+            the load-bearing part of this screen. */}
+        <p className="mt-1 text-xs text-muted-foreground">Required:</p>
         <ul data-slot="permission-list" className="mt-2 flex flex-col gap-1.5">
-          {TOKEN_PERMISSIONS.map((p) => (
+          {TOKEN_PERMISSIONS.filter((p) => !p.optional).map((p) => (
+            <li key={p.key} className="flex items-baseline gap-2 text-xs">
+              <code className="shrink-0 rounded bg-muted px-1 py-0.5">{p.label}</code>
+              <CopyButton value={p.label} />
+              <span className="min-w-0 text-muted-foreground">— {p.why}</span>
+            </li>
+          ))}
+        </ul>
+        <p className="mt-3 text-xs text-muted-foreground">Optional — both can be left out:</p>
+        <ul data-slot="optional-permission-list" className="mt-2 flex flex-col gap-1.5">
+          {TOKEN_PERMISSIONS.filter((p) => p.optional).map((p) => (
             <li key={p.key} className="flex items-baseline gap-2 text-xs">
               <code className="shrink-0 rounded bg-muted px-1 py-0.5">{p.label}</code>
               <CopyButton value={p.label} />
@@ -111,7 +124,12 @@ export function TokenStep({
         <p className="mt-2 text-xs text-muted-foreground">
           The dashboard says <b>Edit</b> where Cloudflare’s API docs say <i>Write</i>. They
           are the same permission. Under <b>Account Resources</b>, choose{" "}
-          <b>Include → the account you want this on</b>.
+          <b>Include → the account you want this on</b>. If you added the Zone row, also set{" "}
+          <b>Zone Resources → Include → All zones</b>.
+        </p>
+        <p className="mt-2 text-xs text-muted-foreground">
+          Setup still works without either optional row, and still puts the Worker on your
+          own domain if you want one — it will just ask you to type the domain name.
         </p>
       </section>
 

@@ -61,6 +61,9 @@ describe("a settings file written by an older build", () => {
     expect(loaded.heatmapThresholdsH).toEqual([2, 5, 8]);
     // …and the defaults still filled in what the old file never had.
     expect(loaded.syncWorkerUrl).toBe(SETTINGS_DEFAULTS.syncWorkerUrl);
+    // The second address defaults to "", which is the state of every install
+    // that has one address — most of them.
+    expect(loaded.syncWorkerUrlAlt).toBe("");
     expect(loaded.lastSelfTest).toBeNull();
   });
 

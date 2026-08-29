@@ -767,3 +767,112 @@ describe("a failed request says why", () => {
     expect(service.snapshot().sync.lastPullError).not.toMatch(/fetch failed/);
   });
 });
+
+/**
+ * The other address, on the Test-connection button.
+ *
+ * `/health` only, and it may never change the verdict. The alternate answering
+ * does not make a broken configuration pass, and the alternate failing does not
+ * make a working one fail — it is a REPORT, and the moment it starts deciding
+ * things it becomes a second way for sync to break.
+ */
+describe("probing the second address", () => {
+  const ALT_URL = "https://wwb.example.test";
+
+  const twoHosts = (over: { altBlocked?: boolean; mainBlocked?: boolean } = {}) => {
+    const cloud = new FakeCloud();
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = new URL(typeof input === "string" ? input : String(input));
+      const blocked =
+        (url.origin === ALT_URL && over.altBlocked === true) ||
+        (url.origin !== ALT_URL && over.mainBlocked === true);
+      if (blocked) {
+        throw Object.assign(new TypeError("fetch failed"), {
+          cause: { code: "ENOTFOUND" },
+        });
+      }
+      if (url.origin === ALT_URL) {
+        // The alternate answers `/health` and nothing else is ever asked of it.
+        if (url.pathname !== "/health") throw new Error(`unexpected ${url.pathname} on the alternate`);
+        return new Response(JSON.stringify({ ok: true, ms: 1 }), { status: 200 });
+      }
+      return await cloud.fetch(input, init);
+    };
+    return { cloud, fetchImpl };
+  };
+
+  it("is null when there is no second address, which is the ordinary case", async () => {
+    const cloud = new FakeCloud();
+    const r = await probeSyncConfig(BASE_URL, TOKEN_A, {
+      fetchImpl: cloud.fetch,
+      now: () => NOW,
+    });
+    expect(r.alt).toBeNull();
+  });
+
+  it("asks it for /health and nothing else — the token is the Worker's, not the host's", async () => {
+    const { fetchImpl } = twoHosts();
+    const r = await probeSyncConfig(BASE_URL, TOKEN_A, {
+      fetchImpl,
+      now: () => NOW,
+      altUrl: ALT_URL,
+    });
+    // The fetch above throws if anything but `/health` is asked of the
+    // alternate, so reaching here proves it.
+    expect(r.alt).toMatchObject({ url: ALT_URL, reachable: true, status: 200 });
+    expect(r.ok).toBe(true);
+  });
+
+  it("does not fail a working configuration when the alternate is dead", async () => {
+    const { fetchImpl } = twoHosts({ altBlocked: true });
+    const r = await probeSyncConfig(BASE_URL, TOKEN_A, {
+      fetchImpl,
+      now: () => NOW,
+      altUrl: ALT_URL,
+    });
+    expect(r.ok).toBe(true);
+    expect(r.authorized).toBe(true);
+    expect(r.alt?.reachable).toBe(false);
+    // And it says WHY, in the same words everything else does.
+    expect(r.alt?.error).toMatch(/does not resolve from this Mac/);
+  });
+
+  it("does not pass a broken configuration when the alternate is fine", async () => {
+    // This is the case the button exists for — and the one it must not paper
+    // over. The verdict stays `ok: false`; the alternate is evidence for the
+    // owner, not a substitute for a working address.
+    const { fetchImpl } = twoHosts({ mainBlocked: true });
+    const r = await probeSyncConfig(BASE_URL, TOKEN_A, {
+      fetchImpl,
+      now: () => NOW,
+      altUrl: ALT_URL,
+    });
+    expect(r.ok).toBe(false);
+    expect(r.reachable).toBe(false);
+    expect(r.alt?.reachable).toBe(true);
+  });
+
+  it("ignores an alternate that is the address already in use", async () => {
+    const cloud = new FakeCloud();
+    const r = await probeSyncConfig(BASE_URL, TOKEN_A, {
+      fetchImpl: cloud.fetch,
+      now: () => NOW,
+      altUrl: `  ${BASE_URL}  `,
+    });
+    // Testing the same host twice and calling it two addresses would be a
+    // report that lies.
+    expect(r.alt).toBeNull();
+  });
+
+  it("is reported even when the configuration cannot be used at all", async () => {
+    const { fetchImpl } = twoHosts();
+    const r = await probeSyncConfig("", null, {
+      fetchImpl,
+      now: () => NOW,
+      altUrl: ALT_URL,
+    });
+    expect(r.ok).toBe(false);
+    expect(r.error).toBe("enter the Worker URL first");
+    expect(r.alt?.reachable).toBe(true);
+  });
+});

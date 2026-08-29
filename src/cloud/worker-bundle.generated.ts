@@ -13,7 +13,7 @@
  */
 
 /** sha256 over worker/src/*.ts + schema.sql + wrangler.toml. */
-export const WORKER_INPUTS_SHA256 = "263968f31fcf8d046f7c4e8e345b79bf9719e10268084c0aeb6f845e1bbf94ad";
+export const WORKER_INPUTS_SHA256 = "f23aaf2cb332679c3b32b9200deb9da81b90b4995313e4be785d7472916d0eac";
 
 /** `name` from worker/wrangler.toml — the Worker's name on Cloudflare. */
 export const WORKER_NAME = "wwb-sync";

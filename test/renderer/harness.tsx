@@ -361,6 +361,7 @@ export function uiSettings(over: Partial<UiSettings> = {}): UiSettings {
     countJigglerTime: 0,
     graceS: 0,
     syncWorkerUrl: "",
+    syncWorkerUrlAlt: "",
     ...over,
   };
 }
@@ -374,6 +375,10 @@ export function uiSettings(over: Partial<UiSettings> = {}): UiSettings {
 export function syncConfigState(over: Partial<SyncConfigState> = {}): SyncConfigState {
   return {
     workerUrl: "",
+    // "" by default, and that is the ordinary state: most installs have one
+    // address, and the two-address path must never be the one that is exercised
+    // just because a fixture made it the default.
+    workerUrlAlt: "",
     tokenPresent: false,
     configured: false,
     error: null,

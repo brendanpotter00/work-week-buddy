@@ -22,6 +22,7 @@ is lost, run setup again on that Mac — there is nothing to hunt for.
 | Thing | Value |
 |---|---|
 | Worker URL | `https://wwb-sync.work-week-buddy.workers.dev` |
+| A second address | optional — setup can also put the Worker on a domain you own. Both are live; each Mac uses the one it can reach |
 | Worker name | `wwb-sync` |
 | D1 database | `wwb` |
 | Account | `brendanpotter00@gmail.com` |
@@ -57,6 +58,26 @@ If that fails right after first deploy, it is almost certainly the workers.dev
 certificate still being issued — DNS resolves before TLS is ready. It took about
 two minutes on first setup. `curl` on macOS ships an old LibreSSL that reports
 this as `sslv3 alert handshake failure`, which reads like a real error and is not.
+
+**If you set up a second address, check both** — that is the whole reason there
+are two. A hostname that answers from one Mac and not from another is the
+expected outcome on a filtered network, not a fault:
+
+```bash
+curl https://wwb-sync.work-week-buddy.workers.dev/health
+curl https://<your-name>.<your-domain>/health
+```
+
+A brand-new custom domain has no documented issuance SLA for its certificate.
+Setup waits about three minutes and then gives up WITHOUT failing — it falls
+back to the address that answered and says the other may work later. **Settings
+→ Cloud sync → Test both addresses** re-asks, and offers to switch in one click.
+
+The app itself now names the reason rather than reporting `fetch failed`: a
+hostname that does not resolve, a connection a proxy dropped, a certificate
+signed by an authority it does not trust, and a certificate that is merely still
+being issued are four different problems with four different fixes, and they
+used to produce one identical string.
 
 Authenticated check, without putting the token in your shell history:
 
@@ -106,9 +127,35 @@ unconfigured), or **Settings…** → **Cloud sync** → **Set up cloud sync…*
 opens its own window.
 
 It adopts or creates the `wwb` database, applies `worker/schema.sql`, **enrols
-this Mac**, deploys the Worker, turns on the workers.dev address, proves the
-Worker answers, and stores this Mac's token in the Keychain — over the
-Cloudflare REST API, no wrangler involved.
+this Mac**, deploys the Worker, turns on its addresses, proves they answer, and
+stores this Mac's token in the Keychain — over the Cloudflare REST API, no
+wrangler involved.
+
+**Addresses, plural, and that is the interesting part.** The workers.dev address
+is always turned on. On the review screen you can also put the Worker on a
+domain that is already on the same Cloudflare account — `wwb.your-domain.com`,
+say. Setup then turns on **both**, asks **both** from the Mac it is running on,
+saves whichever one that Mac can actually reach (preferring your own domain) and
+remembers the other one.
+
+Why: some work networks block `*.workers.dev` because everybody's Workers share
+it. A domain you own usually gets through. Nothing is traded away for that —
+both hostnames reach the same script, the same database and the same machine
+registry, and the Worker stamps machine identity from the credential rather than
+from the host, so which address a request arrives on is invisible to
+correctness. A Mac on one network can use one address while a Mac on another
+uses the other, and nothing needs changing when that happens.
+
+Cloudflare creates the DNS record and issues the certificate. Setup **refuses**
+a hostname that already has a DNS record or already belongs to a different
+Worker — it never overrides one — and any of that failing costs a sentence
+rather than a setup: the workers.dev address is already on by then.
+
+**One thing to know about a custom domain:** it routes through your ZONE and
+workers.dev does not. Anything configured on that domain — Bot Fight Mode, WAF
+rules, rate limiting, Cloudflare Access — now applies to sync traffic. If the
+custom address starts answering `403` on a token that works elsewhere, that is
+where to look, and the app says so by name rather than blaming the token.
 
 It is safe to run again. An existing database is adopted, never duplicated; the
 Worker is redeployed with the same single `DB` binding; and only **this Mac's**
@@ -122,18 +169,28 @@ For a terminal escape hatch, see [If the app cannot do it](#if-the-app-cannot-do
    (My Profile → API Tokens).
 2. **Create Token** → scroll to the bottom → **Create Custom Token** → *Get started*.
 3. Give it a name — `work-week-buddy setup` is fine.
-4. Under **Permissions**, add these rows. All three are **Account** scope:
+4. Under **Permissions**, add these rows. **Two are required and two can be
+   skipped**, and neither optional one costs you a feature:
 
-   | Scope | Permission | Level | Needed for |
-   |---|---|---|---|
-   | Account | **Workers Scripts** | **Edit** | uploading the Worker, and putting it on workers.dev |
-   | Account | **D1** | **Edit** | creating the database and applying the schema |
-   | Account | **Account Settings** | **Read** | *optional* — lets the app list your accounts instead of asking for the ID |
+   | Scope | Permission | Level | Needed for | Optional? |
+   |---|---|---|---|---|
+   | Account | **Workers Scripts** | **Edit** | uploading the Worker, **and both of its addresses** | no |
+   | Account | **D1** | **Edit** | creating the database and applying the schema | no |
+   | Account | **Account Settings** | **Read** | lets the app list your accounts instead of asking for the ID | **yes** |
+   | **Zone** | **Zone** | **Read** | lets the app list the domains you own instead of asking you to type one | **yes** |
 
    The dashboard says **Edit** where the API docs say *Write*. They are the same
    permission.
 
+   **Putting the Worker on your own domain needs NO new permission.** It is
+   authorised by `Workers Scripts · Edit`, which is already required — Cloudflare
+   creates the DNS record with its own privileges, so no `DNS` permission, and a
+   custom domain is not a route, so no `Workers Routes` permission either. The
+   `Zone · Read` row buys a domain picker instead of a text field and nothing
+   else: without it the app sends the domain by name.
+
 5. Under **Account Resources**, choose **Include → the account you want this on**.
+   If you added the `Zone` row, also set **Zone Resources → Include → All zones**.
 6. **Continue to summary** → **Create Token** → copy the token.
 7. Paste it into the wizard. Nothing is created yet: the app runs a **read-only
    probe** first and shows you what is already on that account — an existing

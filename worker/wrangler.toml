@@ -1,10 +1,16 @@
 name = "wwb-sync"
 main = "src/index.ts"
 compatibility_date = "2026-08-01"
-# Both Macs reach this over the internet and there is no custom domain, so the
-# workers.dev subdomain IS the deployment. Stated rather than left to the
-# default, because "the deploy succeeded and there is no URL" is a confusing
-# half-hour.
+# The workers.dev subdomain is ALWAYS on, and it is never traded away. Setup can
+# additionally put the Worker on a domain you own, and then both addresses reach
+# the same script and the same D1 — a Mac uses whichever one it can reach, which
+# is the whole point on a network that filters workers.dev. Stated rather than
+# left to the default, because "the deploy succeeded and there is no URL" is a
+# confusing half-hour.
+#
+# A custom domain is NOT configured here. It is attached over the REST API by
+# the in-app wizard, per account, and naming a live hostname in a tracked file
+# in a public repo is a habit worth not starting.
 workers_dev = true
 
 # ── DO NOT DEPLOY THIS FILE DIRECTLY. ───────────────────────────────────────

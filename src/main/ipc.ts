@@ -207,6 +207,7 @@ function uiSettingsOf(s: Readonly<MainSettings>): UiSettings {
     countJigglerTime: s.countJigglerTime,
     graceS: s.graceS,
     syncWorkerUrl: s.syncWorkerUrl,
+    syncWorkerUrlAlt: s.syncWorkerUrlAlt,
   };
 }
 
@@ -267,6 +268,9 @@ export function sanitizeUiSettings(patch: Partial<UiSettings>): Partial<UiSettin
     out.graceS = Math.max(0, Math.round(patch.graceS));
   }
   if (typeof patch.syncWorkerUrl === "string") out.syncWorkerUrl = patch.syncWorkerUrl.trim();
+  if (typeof patch.syncWorkerUrlAlt === "string") {
+    out.syncWorkerUrlAlt = patch.syncWorkerUrlAlt.trim();
+  }
 
   return out;
 }
@@ -328,11 +332,14 @@ export function registerIpcHandlers(runtime: AppRuntime, deps: IpcDeps): void {
     error: "this build cannot set up cloud sync",
     ok: false,
     workerUrl: null,
+    altWorkerUrl: null,
+    addresses: [],
     unstoredToken: null,
   });
 
   const noSyncConfig = (): SyncConfigState => ({
     workerUrl: deps.settings.get("syncWorkerUrl"),
+    workerUrlAlt: deps.settings.get("syncWorkerUrlAlt"),
     tokenPresent: false,
     configured: false,
     error: null,
@@ -354,6 +361,7 @@ export function registerIpcHandlers(runtime: AppRuntime, deps: IpcDeps): void {
         status: null,
         ms: null,
         error: "this build cannot store a sync configuration",
+        alt: null,
       };
     }
     // Nothing is written here, on purpose: the whole value of the button is

@@ -68,6 +68,7 @@ function bridgeFor(s: Setup = {}): StubBridge {
       countJigglerTime: 0 as 0 | 1,
       graceS: 0,
       syncWorkerUrl: "",
+      syncWorkerUrlAlt: "",
     }),
   });
 }

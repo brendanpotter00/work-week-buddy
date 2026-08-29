@@ -38,7 +38,8 @@ import { AlertBanner } from "@/renderer/components/alert-banner";
 import { AccountStep } from "@/renderer/components/cloud-setup/account-step";
 import { DoneStep } from "@/renderer/components/cloud-setup/done-step";
 import { IntroStep } from "@/renderer/components/cloud-setup/intro-step";
-import { ReviewStep } from "@/renderer/components/cloud-setup/review-step";
+import { hostnameLabelError, zoneNameError } from "@/cloud/api";
+import { ReviewStep, type AddressChoice } from "@/renderer/components/cloud-setup/review-step";
 import { StepList } from "@/renderer/components/cloud-setup/step-list";
 import { TokenStep } from "@/renderer/components/cloud-setup/token-step";
 import { TitleBar } from "@/renderer/components/title-bar";
@@ -51,7 +52,12 @@ import {
   useSyncConfig,
 } from "@/renderer/lib/ipc";
 import { useThemeMirror } from "@/renderer/lib/use-theme-mirror";
-import type { CloudDeployment, CloudProbeResult, CloudSetupResult } from "@/shared/ipc-types";
+import type {
+  CloudCustomDomainRequest,
+  CloudDeployment,
+  CloudProbeResult,
+  CloudSetupResult,
+} from "@/shared/ipc-types";
 
 type Phase = "intro" | "token" | "account" | "review" | "running" | "done";
 
@@ -74,6 +80,19 @@ export function CloudSetup(): React.ReactElement {
   const [probe, setProbe] = React.useState<CloudProbeResult | null>(null);
   const [accountId, setAccountId] = React.useState("");
   const [subdomain, setSubdomain] = React.useState("");
+  /**
+   * The optional second address.
+   *
+   * Ticked by default only when there is a domain to prefill — a ticked box
+   * over an empty field is a decision the owner did not make. Settled once,
+   * from the probe, so typing into it is never fought by a re-render.
+   */
+  const [address, setAddress] = React.useState<AddressChoice>({
+    enabled: false,
+    label: "wwb",
+    zoneId: "",
+    zoneName: "",
+  });
   const [revoking, setRevoking] = React.useState<string | null>(null);
   const [machines, setMachines] = React.useState<CloudDeployment["machines"] | null>(null);
   const [result, setResult] = React.useState<CloudSetupResult | null>(null);
@@ -177,9 +196,27 @@ export function CloudSetup(): React.ReactElement {
     );
   };
 
+  /**
+   * Prefill the address from whatever the probe found, exactly once per probe.
+   *
+   * `enabled` follows the DATA: a domain to offer means the box starts ticked,
+   * and no domain to offer means it starts unticked, because there is nothing to
+   * prefill and a ticked box over an empty field is not a default, it is a trap.
+   */
+  React.useEffect(() => {
+    const zones = probe?.deployment?.zones ?? [];
+    const first = [...zones].sort((a, b) => a.name.localeCompare(b.name))[0];
+    setAddress((a) =>
+      a.zoneName === "" && first !== undefined
+        ? { ...a, enabled: true, zoneId: first.id, zoneName: first.name }
+        : a,
+    );
+  }, [probe]);
+
   const run = (): void => {
     const apiToken = readToken();
     if (apiToken === "" || accountId === "") return;
+    const customDomain = customDomainRequest(address);
     setBusy(true);
     setError(null);
     setProgress(null);
@@ -189,6 +226,11 @@ export function CloudSetup(): React.ReactElement {
         apiToken,
         accountId,
         ...(subdomain.trim() === "" ? {} : { subdomain: subdomain.trim() }),
+        // Sent only when the box is ticked AND what is in it is usable. An
+        // address the owner cannot have is not a reason to refuse to run —
+        // `Set it up` is never disabled by anything in that section — so a bad
+        // one is simply not sent and setup goes ahead on workers.dev alone.
+        ...(customDomain === null ? {} : { customDomain }),
       })
       .then(
         (r) => {
@@ -281,11 +323,14 @@ export function CloudSetup(): React.ReactElement {
         {phase === "review" && deployment !== null ? (
           <ReviewStep
             deployment={deployment}
+            zonesScope={probe?.scopes?.zones ?? "unknown"}
             machineLabel={info.data?.machineLabel ?? "This Mac"}
             subdomain={subdomain}
+            address={address}
             busy={busy}
             revoking={revoking}
             onSubdomain={setSubdomain}
+            onAddress={setAddress}
             onRevoke={revoke}
             onRun={run}
             onCancel={finish}
@@ -303,6 +348,25 @@ export function CloudSetup(): React.ReactElement {
       </div>
     </div>
   );
+}
+
+/**
+ * The address, as the run request wants it — or null when there is nothing to
+ * send.
+ *
+ * Null covers both "not ticked" and "ticked but not usable", and both mean the
+ * same thing to `run()`: send nothing and let setup do the workers.dev address
+ * alone. A `zoneId` is included only when it came from the PICKER; a typed
+ * domain sends `zone_name` instead, which is what makes `Zone · Read` optional.
+ */
+function customDomainRequest(a: AddressChoice): CloudCustomDomainRequest | null {
+  const label = a.label.trim().toLowerCase();
+  const zoneName = a.zoneName.trim().toLowerCase();
+  if (!a.enabled) return null;
+  if (hostnameLabelError(label) !== null || zoneNameError(zoneName) !== null) return null;
+  return a.zoneId === ""
+    ? { label, zone: { name: zoneName } }
+    : { label, zone: { id: a.zoneId, name: zoneName } };
 }
 
 export default CloudSetup;

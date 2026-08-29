@@ -281,6 +281,7 @@ describe("the sync configuration channels", () => {
       syncConfig: {
         read: () => ({
           workerUrl: "https://wwb-sync.example.workers.dev",
+          workerUrlAlt: "",
           tokenPresent,
           configured: tokenPresent,
           error: null,
@@ -291,6 +292,7 @@ describe("the sync configuration channels", () => {
           if (patch.token !== undefined) tokenPresent = true;
           return {
             workerUrl: patch.workerUrl ?? "https://wwb-sync.example.workers.dev",
+            workerUrlAlt: "",
             tokenPresent,
             configured: tokenPresent,
             error: null,
@@ -304,6 +306,7 @@ describe("the sync configuration channels", () => {
           status: 200,
           ms: 12,
           error: null,
+          alt: null,
         }),
       },
     });
@@ -334,6 +337,7 @@ describe("the sync configuration channels", () => {
     const deps = await register();
     const updated = await invoke("wwb:settings:set", {
       syncWorkerUrl: "https://wwb-sync.example.workers.dev",
+      syncWorkerUrlAlt: "",
     });
     // A URL is not a credential, so it lives in settings.json like any other.
     expect(updated).toMatchObject({ syncWorkerUrl: "https://wwb-sync.example.workers.dev" });
@@ -347,6 +351,7 @@ describe("the sync configuration channels", () => {
       syncConfig: {
         read: () => ({
           workerUrl: "https://wwb-sync.example.workers.dev",
+          workerUrlAlt: "",
           tokenPresent: vaulted.length > 0,
           configured: vaulted.length > 0,
           error: null,
@@ -356,6 +361,7 @@ describe("the sync configuration channels", () => {
           if (patch.token !== undefined) vaulted.push(patch.token);
           return {
             workerUrl: "https://wwb-sync.example.workers.dev",
+            workerUrlAlt: "",
             tokenPresent: true,
             configured: true,
             error: null,
@@ -369,6 +375,7 @@ describe("the sync configuration channels", () => {
           status: 200,
           ms: 1,
           error: null,
+          alt: null,
         }),
       },
     });
@@ -398,6 +405,7 @@ describe("the sync configuration channels", () => {
       syncConfig: {
         read: () => ({
           workerUrl: "",
+          workerUrlAlt: "",
           tokenPresent: false,
           configured: false,
           error: null,
@@ -407,6 +415,7 @@ describe("the sync configuration channels", () => {
           written.push(patch);
           return {
             workerUrl: "",
+            workerUrlAlt: "",
             tokenPresent: false,
             configured: false,
             error: null,
@@ -422,6 +431,7 @@ describe("the sync configuration channels", () => {
             status: 401,
             ms: 30,
             error: "the Worker is reachable but rejected this token",
+            alt: null,
           };
         },
       },

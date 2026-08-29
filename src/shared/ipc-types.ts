@@ -429,6 +429,15 @@ export interface UiSettings {
    * exists (`SyncConfigState.tokenPresent`).
    */
   syncWorkerUrl: string;
+  /**
+   * The OTHER address the Worker answers on, when setup turned two on.
+   *
+   * NEVER USED TO SYNC. It exists so Settings can test both and offer to switch
+   * in one click when the one in use stops answering — so a Mac that lands on
+   * the wrong address is a click away from the right one rather than a re-run
+   * of setup. A URL, like `syncWorkerUrl`, and equally not a credential.
+   */
+  syncWorkerUrlAlt: string;
 }
 
 /**
@@ -439,6 +448,8 @@ export interface UiSettings {
  */
 export interface SyncConfigState {
   workerUrl: string;
+  /** The other address setup turned on, or "". Never used to sync. */
+  workerUrlAlt: string;
   tokenPresent: boolean;
   /** Both halves present and usable. This is the `configured` in the doctor. */
   configured: boolean;
@@ -478,6 +489,23 @@ export interface SyncTestResult {
   ms: number | null;
   /** Plain words. Never a token, never a raw response body. */
   error: string | null;
+  /**
+   * The same question asked of the OTHER address, when there is one.
+   *
+   * `/health` ONLY — unauthenticated. The token has already been proved against
+   * the address in use, and it is a property of the Worker rather than of the
+   * hostname, so asking twice buys nothing and costs a second authenticated
+   * round trip on a button somebody is waiting on.
+   *
+   * Null when no alternate is configured, which is the ordinary case.
+   */
+  alt: {
+    url: string;
+    reachable: boolean;
+    status: number | null;
+    ms: number | null;
+    error: string | null;
+  } | null;
 }
 
 // ── in-app cloud setup ──────────────────────────────────────────────────────
@@ -532,6 +560,12 @@ export interface CloudScopes {
   workers: CloudScopeState;
   /** Optional — it only decides whether setup can list accounts. */
   accountRead: CloudScopeState;
+  /**
+   * Optional, and it decides less than it looks like it does: whether the
+   * review screen shows a DOMAIN PICKER or a text field. Attaching a custom
+   * domain is authorised by Workers Scripts, which is already required.
+   */
+  zones: CloudScopeState;
 }
 
 /** One Mac already in the registry. */
@@ -563,6 +597,20 @@ export interface CloudDeployment {
   machines: EnrolledMachine[];
   accountSubdomain: string | null;
   rowsInCloud: number | null;
+  /**
+   * The domains on this account, for the address picker.
+   *
+   * EMPTY MEANS TWO THINGS and `CloudScopes.zones` separates them: `ok` with an
+   * empty list is an account with no domains on it; `missing` is a token that
+   * may not look. The screen says something different for each.
+   */
+  zones: Array<{ id: string; name: string }>;
+  /**
+   * Hostnames already pointed at a Worker on this account, and which Worker.
+   * Lets the review screen refuse a name that belongs to something else before
+   * anything is created.
+   */
+  workerDomains: Array<{ hostname: string; service: string }>;
 }
 
 /**
@@ -587,9 +635,26 @@ export interface CloudProbeResult {
   error: string | null;
 }
 
+/** One address setup turned on, and what it did when THIS Mac asked it. */
+export interface CloudAddressProbe {
+  url: string;
+  kind: "workers.dev" | "custom";
+  reachable: boolean;
+  /** Null when reachable. Plain words — never a token, never a response body. */
+  error: string | null;
+  ms: number | null;
+}
+
 export interface CloudSetupResult extends CloudSetupProgress {
   ok: boolean;
   workerUrl: string | null;
+  /**
+   * EVERY address, and what each one did from this Mac. Present on failure too:
+   * a run that could not reach anything is exactly when this is worth most.
+   */
+  addresses: CloudAddressProbe[];
+  /** The other live address. Diagnostics and a one-click switch; never synced to. */
+  altWorkerUrl: string | null;
   /**
    * This Mac's token, surfaced ONLY when the keychain refused to store it.
    *
@@ -611,11 +676,27 @@ export interface CloudProbeRequest {
   accountId?: string;
 }
 
+/** The second address, as the review screen collected it. */
+export interface CloudCustomDomainRequest {
+  /** One DNS label, e.g. `wwb`. Never a full hostname. */
+  label: string;
+  /**
+   * By id when setup could list the domains, by name when it could not. The
+   * by-name form is what makes `Zone · Read` optional.
+   */
+  zone: { id: string; name: string } | { name: string };
+}
+
 export interface CloudSetupRunRequest {
   apiToken: string;
   accountId: string;
   /** Only used when the account has no workers.dev subdomain at all. */
   subdomain?: string;
+  /**
+   * Also put the Worker on a domain the owner already has. ADDITIVE — the
+   * workers.dev address is turned on either way and never switched off.
+   */
+  customDomain?: CloudCustomDomainRequest;
 }
 
 /**
@@ -662,7 +743,13 @@ export interface InvokeContract {
   "wwb:sync:config": { req: void; res: SyncConfigState };
   /** Either half may be omitted. The token is write-only; it never comes back. */
   "wwb:sync:setConfig": {
-    req: { workerUrl?: string; token?: string };
+    /**
+     * `workerUrlAlt` is how the two addresses are SWAPPED — send both, with the
+     * values exchanged. Deliberately not a channel of its own: a swap is an
+     * ordinary configuration change and must go through the one funnel that
+     * rebuilds the flusher and tells every window.
+     */
+    req: { workerUrl?: string; workerUrlAlt?: string; token?: string };
     res: SyncConfigState;
   };
   /**
