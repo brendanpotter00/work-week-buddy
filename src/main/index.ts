@@ -39,6 +39,7 @@ import {
 import { readCliMode } from "./cli";
 import { tokenCreateUrl } from "../cloud/token-url";
 import { createCloudSetupGateway } from "./cloud-setup";
+import { appFetch } from "./net";
 import { disposeIpc, pushAll, pushToAllWindows, registerIpcHandlers } from "./ipc";
 import { log, logToDirectory } from "./log";
 import { watchMainThread, type StallWatch } from "./stall";
@@ -158,6 +159,10 @@ app.whenReady().then(async () => {
       isPackaged: app.isPackaged,
       vault: safeStorage,
       osVersion: process.getSystemVersion(),
+      // The same stack the app itself uses. A doctor report that measured a
+      // different network layer than the running app is a doctor report that
+      // says the patient is fine.
+      fetchImpl: appFetch,
     });
     const report = await services.runtime.doctor();
     process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
@@ -224,6 +229,10 @@ app.whenReady().then(async () => {
     isPackaged: app.isPackaged,
     vault: safeStorage,
     osVersion: process.getSystemVersion(),
+    // Chromium's network stack for everything the sync layer sends — see
+    // `./net`. Safe here: `createCoreServices` runs inside `whenReady`, and
+    // nothing it builds makes a request before `afterBoot()`.
+    fetchImpl: appFetch,
     // The wizard has its own window now, so a setup finishing in one window has
     // to reach the Settings card in another. `write()` is the single funnel
     // both the wizard's commit and the manual Save already pass through.
@@ -265,6 +274,11 @@ app.whenReady().then(async () => {
     cloudSetup: createCloudSetupGateway({
       machineId: services.machineId,
       syncConfig: services.syncConfig,
+      // Chromium's network stack, not Node's — see `./net`. This is the path
+      // that talks to api.cloudflare.com and then to the deployed Worker, and
+      // it is the one a managed Mac's proxy and MITM root CA are invisible to
+      // under undici.
+      fetchImpl: appFetch,
       onProgress: (progress) =>
         pushAll("wwb:push:cloud-setup", {
           steps: progress.steps.map((s) => ({ ...s })),
