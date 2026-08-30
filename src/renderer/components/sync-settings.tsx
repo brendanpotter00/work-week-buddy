@@ -47,6 +47,7 @@ import { Button } from "@/renderer/components/ui/button";
 import { Separator } from "@/renderer/components/ui/separator";
 import { ipc, messageOf, type Query } from "@/renderer/lib/ipc";
 import { syncHealthView, workerUrlError, type SyncTone } from "@/renderer/lib/sync-health";
+import { useFlush } from "@/renderer/lib/use-flush";
 import { classifyCredential, type CredentialShape } from "@/shared/credentials";
 import { formatAgo, formatCount } from "@/shared/format";
 import type { DoctorReport, SyncConfigState, SyncTestResult } from "@/shared/ipc-types";
@@ -64,7 +65,12 @@ function Ago({ ms, nowMs }: { ms: number | null; nowMs: number }): React.ReactEl
   return <span title={new Date(ms).toLocaleString()}>{formatAgo(nowMs - ms)} ago</span>;
 }
 
-type Busy = "idle" | "testing" | "saving" | "flushing";
+/**
+ * `flushing` is gone: the flush is `useFlush()` now, shared byte for byte with
+ * the dashboard's status-strip button. One implementation, so the two cannot
+ * come to differ about what a partial upload or a failed one is called.
+ */
+type Busy = "idle" | "testing" | "saving";
 
 export function SyncSettings({
   config,
@@ -227,27 +233,19 @@ export function SyncSettings({
     );
   };
 
-  const flush = (): void => {
-    setBusy("flushing");
-    setError(null);
-    ipc.flush().then(
-      (r) => {
-        setBusy("idle");
-        setSavedNote(
-          r.ok
-            ? `Sent ${formatCount(r.confirmed)} row${r.confirmed === 1 ? "" : "s"}.`
-            : null,
-        );
-        if (!r.ok) setError(r.error ?? "the flush failed with no reason given");
-        reloadDoctor();
-        config.reload();
-      },
-      (e: unknown) => {
-        setError(messageOf(e));
-        setBusy("idle");
-      },
-    );
-  };
+  /**
+   * The shared flush. The numbers a manual sync produces are re-read after it
+   * settles — "Waiting to upload" and "Last upload" are exactly what it just
+   * changed, and leaving them stale is a card that disagrees with the sentence
+   * printed underneath it.
+   */
+  const { reload: reloadConfig } = config;
+  const flush = useFlush(
+    React.useCallback(() => {
+      reloadDoctor();
+      reloadConfig();
+    }, [reloadDoctor, reloadConfig]),
+  );
 
   const openWizard = (): void => {
     void ipc.openCloudSetup().catch((e: unknown) => setError(messageOf(e)));
@@ -255,6 +253,9 @@ export function SyncSettings({
 
   const dirty = urlDraft !== null || tokenTyped;
   const vaultMissing = saved !== null && !saved.vaultAvailable;
+  // ONE "is anything running" for the whole card, so a flush started here
+  // cannot be raced by a Save started two pixels away.
+  const idle = busy === "idle" && !flush.running;
 
   return (
     <SettingsCard
@@ -330,7 +331,7 @@ export function SyncSettings({
                 size="sm"
                 variant="outline"
                 onClick={runTest}
-                disabled={busy !== "idle" || urlProblem !== null}
+                disabled={!idle || urlProblem !== null}
               >
                 {busy === "testing"
                   ? "Testing…"
@@ -338,10 +339,15 @@ export function SyncSettings({
                     ? "Test both addresses"
                     : "Test connection"}
               </Button>
-              <Button size="sm" variant="outline" onClick={flush} disabled={busy !== "idle"}>
-                {busy === "flushing" ? "Syncing…" : "Sync now"}
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={flush.run}
+                disabled={!idle}
+              >
+                {flush.running ? "Syncing…" : "Sync now"}
               </Button>
-              <Button size="sm" variant="ghost" onClick={openWizard} disabled={busy !== "idle"}>
+              <Button size="sm" variant="ghost" onClick={openWizard} disabled={!idle}>
                 Set up again…
               </Button>
             </div>
@@ -356,7 +362,7 @@ export function SyncSettings({
               account, on the free plan.
             </p>
             <div className="mt-3">
-              <Button size="sm" onClick={openWizard} disabled={busy !== "idle"}>
+              <Button size="sm" onClick={openWizard} disabled={!idle}>
                 Set up cloud sync…
               </Button>
             </div>
@@ -452,14 +458,14 @@ export function SyncSettings({
                 onClick={runTest}
                 // Nothing to test at all is the one state where this button
                 // would be decoration: no stored config and nothing typed.
-                disabled={busy !== "idle" || urlProblem !== null || (!dirty && !configured)}
+                disabled={!idle || urlProblem !== null || (!dirty && !configured)}
               >
                 {busy === "testing" ? "Testing…" : "Test connection"}
               </Button>
               <Button
                 size="sm"
                 onClick={save}
-                disabled={busy !== "idle" || !dirty || urlProblem !== null}
+                disabled={!idle || !dirty || urlProblem !== null}
               >
                 {busy === "saving" ? "Saving…" : "Save"}
               </Button>
@@ -489,7 +495,7 @@ export function SyncSettings({
                 size="sm"
                 variant="outline"
                 data-slot="sync-use-alt"
-                disabled={busy !== "idle"}
+                disabled={!idle}
                 onClick={useAlternate}
               >
                 Use {test.alt.url} instead
@@ -497,6 +503,23 @@ export function SyncSettings({
             </div>
           ) : null}
         </>
+      )}
+      {/* THE FLUSH'S OWN LINE. It is not folded into `sync-error` /
+          `sync-saved` because those two are about SAVING, and "the upload
+          failed" and "what you typed could not be stored" want different
+          fixes. This pane has room for the long form; the status strip's copy
+          of the same button prints `text` and keeps `detail` in a title. */}
+      {flush.outcome === null ? null : (
+        <p
+          data-slot="sync-flush-result"
+          data-ok={String(flush.outcome.ok)}
+          role={flush.outcome.ok ? "status" : "alert"}
+          className={`mt-3 text-xs ${
+            flush.outcome.ok ? "text-muted-foreground" : "text-destructive"
+          }`}
+        >
+          {flush.outcome.detail}
+        </p>
       )}
       {error === null ? null : (
         <p data-slot="sync-error" role="alert" className="mt-3 text-xs text-destructive">

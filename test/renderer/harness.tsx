@@ -11,6 +11,7 @@
 import * as React from "react";
 import { render, type RenderResult } from "@testing-library/react";
 
+import { apportion } from "@/core";
 import { ThemeProvider } from "@/renderer/lib/theme-provider";
 import type { WwbBridge } from "@/renderer/lib/ipc";
 import type {
@@ -140,8 +141,15 @@ export function installBridge(bridge: StubBridge | undefined): void {
   else delete (window as { wwb?: unknown }).wwb;
 }
 
-export function renderApp(ui: React.ReactElement): RenderResult {
-  return render(<ThemeProvider defaultTheme="light">{ui}</ThemeProvider>);
+export function renderApp(
+  ui: React.ReactElement,
+  theme: "light" | "dark" = "light",
+): RenderResult {
+  // The provider is what writes `.dark` onto <html>, and `useResolvedTheme()`
+  // reads it back off there — so a test that wants the dark palette has to go
+  // through the provider rather than setting the class itself, which the
+  // provider would immediately overwrite.
+  return render(<ThemeProvider defaultTheme={theme}>{ui}</ThemeProvider>);
 }
 
 // ── fixtures ────────────────────────────────────────────────────────────────
@@ -264,12 +272,53 @@ export function heatmapDays(
 
 const DAY_NAMES: WeekBar["day"][] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
-export function weekBars(weekStart: string, hours: readonly number[]): WeekBar[] {
-  return DAY_NAMES.map((day, i) => ({
-    day,
-    date: addLocalDays(weekStart, i),
-    hours: hours[i] ?? 0,
-  }));
+export interface BarMachine {
+  machineId: string;
+  label: string;
+  /** Relative share of each day. The bar's own total is `hours`, not this. */
+  weight: number;
+}
+
+/**
+ * The two Macs `metricsBundle()` puts in `byMachine`, in the same order — so a
+ * fixture bar and a fixture breakdown describe the same week.
+ */
+export const BAR_MACHINES: readonly BarMachine[] = [
+  { machineId: "machine-a", label: "Work laptop", weight: 2 },
+  { machineId: "machine-b", label: "Home iMac", weight: 1 },
+];
+
+/**
+ * The bars, split per machine THROUGH `apportion()` — the same function main
+ * uses.
+ *
+ * Not a convenience. `WeekBar.machines` has to sum to `WeekBar.hours` exactly,
+ * and a fixture that split the hours by hand would be free to violate the one
+ * invariant the chart depends on, which would make every test written against
+ * it agree with a bundle main could never produce.
+ */
+export function weekBars(
+  weekStart: string,
+  hours: readonly number[],
+  machines: readonly BarMachine[] = BAR_MACHINES,
+): WeekBar[] {
+  return DAY_NAMES.map((day, i) => {
+    const h = hours[i] ?? 0;
+    const parts = apportion(
+      machines.map((m) => m.weight),
+      Math.round(h * 100),
+    );
+    return {
+      day,
+      date: addLocalDays(weekStart, i),
+      hours: h,
+      machines: machines.map((m, k) => ({
+        machineId: m.machineId,
+        label: m.label,
+        hours: (parts[k] ?? 0) / 100,
+      })),
+    };
+  });
 }
 
 /** A populated bundle — the numbers the mockup shows, over the real contract. */
@@ -497,6 +546,10 @@ export function defaultHandlers(metrics: MetricsBundle, status = liveStatus()): 
     "wwb:toggles:get": () => toggles(),
     "wwb:toggles:set": (c) => toggles({ [c.key]: c.value }),
     "wwb:settings:set": () => uiSettings(),
+    // The status strip's Sync now button reads this. The default is NOT
+    // configured, which is the state a real install is in — see
+    // `syncConfigState()`.
+    "wwb:sync:config": () => syncConfigState(),
   };
 }
 
