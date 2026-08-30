@@ -7,6 +7,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { MIN, T0, makeHarness, rows, type Harness } from "../../test/helpers/runtime";
+import { IDLE_TIMEOUT_MIN_RANGE } from "../shared/constants";
 import { countIntervals, readJournal } from "../store";
 import { NOT_CONFIGURED } from "./sync-seam";
 
@@ -125,6 +126,35 @@ describe("changing the idle timeout while an interval is open", () => {
     advance(5 * MIN);
     expect(h.runtime.liveStatus().state).toBe("idle");
     expect(rows(h.db)[0]!.ended_at_ms).toBe(T0);
+  });
+
+  it("still ends the interval at the last real signal at the SHORTEST allowed timeout", async () => {
+    // The rule that outranks everything, checked at the new bottom of the
+    // range. Widening the slider must not buy a value where the end stamp
+    // starts creeping towards the moment the countdown fired — at 2 minutes
+    // that error would be small enough to look like real data.
+    h = await makeHarness();
+    h.source.key(Date.now());
+
+    advance(30_000);
+    h.source.key(Date.now());
+    const lastSignal = T0 + 30_000;
+
+    h.runtime.setIdleTimeoutMs(IDLE_TIMEOUT_MIN_RANGE.min * MIN);
+    expect(h.runtime.liveStatus().deadlineMs).toBe(lastSignal + IDLE_TIMEOUT_MIN_RANGE.min * MIN);
+
+    // Well past the fire instant, so `deadlineFired` is delivered late — the
+    // shape that would expose a `now()` creeping into the stored row.
+    advance(IDLE_TIMEOUT_MIN_RANGE.min * MIN + 90_000);
+    const stored = rows(h.db);
+    expect(stored).toHaveLength(1);
+    expect(stored[0]!.ended_at_ms).toBe(lastSignal);
+    expect(stored[0]!.end_reason).toBe("idle_timeout");
+    // And it is 30 seconds long — SHORTER than the 90-second `v_countable`
+    // floor, which is exactly the interaction the 2-minute floor is about. The
+    // row is still written; it is the query that excludes it, never the tracker
+    // (AGENTS.md: rows are never deleted, exclusion is a query-time filter).
+    expect(stored[0]!.duration_s).toBe(30);
   });
 
   it("ignores a value that could not be a timeout, rather than arming nothing", async () => {

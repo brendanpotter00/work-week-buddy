@@ -910,7 +910,7 @@ export type Effect =
 ```ts
 // src/core/config.ts
 export interface Config {
-  idleTimeoutMs: number;     // 900_000; adjustable 600_000–900_000 without touching history
+  idleTimeoutMs: number;     // 900_000; adjustable 120_000–900_000 without touching history
   levelHoldCapMs: number;    // 14_400_000 (4h) — a forgotten Zoom cannot log a 14-hour day
   machineId: string;
   appVersion: string;

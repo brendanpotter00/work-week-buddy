@@ -20,8 +20,9 @@ import {
 import { disposeIpc, isTrustedSenderUrl, pushToAllWindows, registerIpcHandlers } from "./ipc";
 import { privacyPaneUrl } from "./onboarding";
 import { APP_ORIGIN } from "./protocol";
+import { IDLE_TIMEOUT_MIN_RANGE } from "../shared/constants";
 import { DEFAULT_METRICS_POLICY, INVOKE_CHANNELS } from "../shared/ipc-types";
-import { T0, fakeSettings, makeHarness, type Harness } from "../../test/helpers/runtime";
+import { MIN, T0, fakeSettings, makeHarness, type Harness } from "../../test/helpers/runtime";
 import type { SettingsStore } from "./settings";
 
 let h: Harness;
@@ -466,13 +467,68 @@ describe("the settings channel validates before it persists", () => {
     h = await makeHarness();
     const deps = await register();
 
-    // PRD §7: "15 minutes, adjustable 10–15 without touching history".
+    // PRD §7: "15 minutes, adjustable 2–15 without touching history".
     await invoke("wwb:settings:set", { idleTimeoutMin: 90 });
     expect(deps.settings.get("idleTimeoutMin")).toBe(15);
     await invoke("wwb:settings:set", { idleTimeoutMin: 1 });
-    expect(deps.settings.get("idleTimeoutMin")).toBe(10);
+    expect(deps.settings.get("idleTimeoutMin")).toBe(2);
     await invoke("wwb:settings:set", { idleTimeoutMin: 12 });
     expect(deps.settings.get("idleTimeoutMin")).toBe(12);
+  });
+
+  it("lets a value below the OLD 10-minute floor through unchanged", async () => {
+    // THE TEST THAT PROVES THE DOUBLE BOUND IS ACTUALLY GONE.
+    //
+    // The range lived in two places: the slider in `src/renderer/Settings.tsx`
+    // and `IDLE_TIMEOUT_MIN_RANGE` here. Widening only the slider would have
+    // looked completely correct in the pane — drag to 3, watch it snap back to
+    // 10 on the next render, with nothing logged and nothing thrown, because
+    // this sanitiser had quietly clamped it. Every value the slider can now
+    // reach has to survive the round trip through main, and this is the one
+    // that would not have.
+    h = await makeHarness();
+    const deps = await register();
+
+    for (const min of [2, 3, 5, 9]) {
+      const back = (await invoke("wwb:settings:set", { idleTimeoutMin: min })) as {
+        idleTimeoutMin: number;
+      };
+      // Both halves of the round trip: what was stored, and what came back to
+      // the renderer that will re-render the slider from it.
+      expect(deps.settings.get("idleTimeoutMin")).toBe(min);
+      expect(back.idleTimeoutMin).toBe(min);
+    }
+  });
+
+  it("clamps below the NEW floor rather than accepting a sub-countable timeout", async () => {
+    // 1 minute is 60 s, under the 90-second `v_countable` floor — accepting it
+    // would let a session be closed by a gap shorter than the shortest session
+    // the app will ever count. Clamped, never taken.
+    h = await makeHarness();
+    const deps = await register();
+
+    for (const min of [0, 1, -5]) {
+      await invoke("wwb:settings:set", { idleTimeoutMin: min });
+      expect(deps.settings.get("idleTimeoutMin")).toBe(IDLE_TIMEOUT_MIN_RANGE.min);
+    }
+    expect(IDLE_TIMEOUT_MIN_RANGE.min * 60).toBeGreaterThanOrEqual(
+      deps.settings.get("minIntervalS"),
+    );
+  });
+
+  it("re-arms the live deadline from the last real signal when the timeout shortens", async () => {
+    // "Without touching history" is the promise in PRD §7, and it is what makes
+    // widening the range safe: a new value re-arms the NEXT deadline from the
+    // last real signal and moves no `ended_at_ms` that has already been
+    // written. Asserted through the channel, not through the runtime method, so
+    // the wiring in the handler is what is under test.
+    h = await makeHarness();
+    await register();
+    h.source.key(Date.now());
+    expect(h.runtime.liveStatus().deadlineMs).toBe(T0 + 15 * MIN);
+
+    await invoke("wwb:settings:set", { idleTimeoutMin: 3 });
+    expect(h.runtime.liveStatus().deadlineMs).toBe(T0 + 3 * MIN);
   });
 
   it("drops a NaN idle timeout instead of arming a timer that never fires", async () => {

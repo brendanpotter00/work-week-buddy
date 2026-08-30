@@ -18,6 +18,7 @@
  */
 import { BrowserWindow, ipcMain, type IpcMainInvokeEvent } from "electron";
 
+import { IDLE_TIMEOUT_MIN_RANGE } from "../shared/constants";
 import type {
   AppInfo,
   CloudProbeRequest,
@@ -211,8 +212,15 @@ function uiSettingsOf(s: Readonly<MainSettings>): UiSettings {
   };
 }
 
-/** PRD §7: "15 minutes, adjustable 10–15 without touching history". */
-export const IDLE_TIMEOUT_MIN_RANGE = { min: 10, max: 15 } as const;
+/**
+ * PRD §7: "15 minutes, adjustable 2–15 without touching history".
+ *
+ * RE-EXPORTED, NOT REDEFINED. The bound lives in `src/shared/constants.ts`
+ * because the renderer's slider needs the same two numbers, and for one
+ * release it had its own copy — which is exactly how a widened slider ends up
+ * clamped back to the old range here on save, with nothing to show for it.
+ */
+export { IDLE_TIMEOUT_MIN_RANGE };
 
 /**
  * The renderer's patch, reduced to values that cannot produce a wrong number.

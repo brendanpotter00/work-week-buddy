@@ -160,7 +160,7 @@ That one rule buys both properties we need:
 
 | Requirement | Decision |
 |---|---|
-| Idle timeout | 15 minutes, adjustable 10–15 without touching history |
+| Idle timeout | 15 minutes, adjustable 2–15 without touching history. ↺ Revised — the range was 10–15 until the owner asked to go shorter |
 | Two machines active at once | Counts **once** (union of wall-clock time). Per-machine breakdown shown separately with the overlap visible |
 | Camera alone opens an interval | Yes |
 | The 15 idle minutes | Not counted. Dashboard shows what crediting 2/5/10 minutes would do, so it can be decided from real data later |
@@ -169,6 +169,14 @@ That one rule buys both properties we need:
 | Machines | User-extensible. Each install names itself on first run; nothing is hardcoded to two |
 | Deleting history | Never. Rows are excluded, never removed |
 | Editing history | Not in v1 |
+
+### Why the idle timeout's floor is 2 minutes and not 1
+
+The two rows above are coupled, and the coupling is the whole reason there is a floor at all. **Minimum interval** says `v_countable` drops anything under 90 seconds. So an idle timeout under 90 seconds would make the setting contradict itself: the app would decide a session was over after a gap *shorter than the shortest session it is willing to count*, and a burst of real typing would be written to disk and then filtered straight back out of every headline number — no error, no warning, just hours that are quietly low. Two minutes is the smallest whole minute that clears 90 seconds.
+
+The range is one constant, `IDLE_TIMEOUT_MIN_RANGE` in `src/shared/constants.ts`, read by both the slider and main's sanitiser. It was two, and a range that lives twice is a slider that silently snaps back on save. `src/core/types.test.ts` pins `min × 60_000 ≥ minIntervalMs`, so the floor cannot drift under the countable floor from either side.
+
+**"Without touching history" still holds, at every value.** The timeout is read in exactly one place — `settleEffects` in `src/core/reduce.ts`, to work out when the *next* deadline should fire. Shortening it re-arms from the last real signal; it never re-cuts a stored row, and no `ended_at_ms` moves. What a shorter timeout does change is what gets recorded *from now on*: more, smaller intervals, and the pauses between them no longer counted as work. §3.2's rule is unaffected — an interval still ends at the last real signal at 2 minutes exactly as it does at 15.
 
 ## 8. Acceptance — the honest bar
 
