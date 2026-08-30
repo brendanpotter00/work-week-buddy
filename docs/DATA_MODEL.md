@@ -165,6 +165,33 @@ WHERE local_date >= wk.mon AND local_date < date(wk.mon, '+7 days');
 SELECT ROUND(SUM(e_ms - s_ms) / 3600000.0, 2) AS hours
 FROM v_merged_day WHERE local_date = :d;
 
+-- 1c) THE WEEKLY STRIP — MetricsBundle.weekSeries, the sixteen bars under the
+--     heatmap. Query 1 again, sixteen times, with each week's own bounds. There
+--     is no new SQL and there is deliberately no new view.
+--
+--     DO NOT BUILD IT BY SUMMING QUERY 4. The heatmap is right there in the same
+--     bundle and it looks like seven days of a week add up to the week, but it
+--     rounds each DAY to 2dp where query 1 rounds the WEEK'S SUM: seven rounded
+--     days land up to 0.035 h out, which is enough for the newest bar to print a
+--     different tenth from the "This week" card on the same screen, with nothing
+--     anywhere reporting an error.
+--
+--     The walk back is in CALENDAR weeks. k × 7 × 86_400_000 is seven 24-hour
+--     days, and a DST transition inside the window slides every earlier anchor
+--     by an hour — enough to drop a week from the middle of the strip while
+--     still drawing sixteen bars. src/main/metrics.ts anchors midweek first.
+--
+--     A week before MIN(local_date) is NULL and is not drawn at all. A tracked
+--     week with nothing countable in it is 0 and IS drawn. PRD §4.
+--
+--     THE NULL DOES NOT COME FROM THIS SQL. SUM() over no rows is NULL here, but
+--     hoursThisWeek() normalises that to 0 (nOrZero) exactly as the "This week"
+--     card needs it to — so an untracked week and a zero week would arrive
+--     identical. The NULL is put back in TypeScript, by comparing the week's
+--     bounds against MIN(local_date): src/main/metrics.ts, buildWeekSeries().
+SELECT ROUND(SUM(e_ms - s_ms) / 3600000.0, 2) AS hours
+FROM v_merged_day WHERE local_date >= :week_from AND local_date < :week_to;
+
 -- 2) AVERAGE INTERVAL LENGTH — over raw intervals, NOT merged islands.
 --    The interval is the unit; merging would blend two machines into one "interval".
 WITH wk AS (SELECT date('now','localtime','-6 days','weekday 1') AS mon)

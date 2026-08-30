@@ -204,6 +204,32 @@ export interface WeekBar {
   machines: WeekBarMachine[];
 }
 
+/**
+ * One week of `MetricsBundle.weekSeries` — the strip under the heatmap.
+ *
+ * `hours` is `number | null`, and the two are NOT interchangeable here. That is
+ * the whole reason this is a list of objects rather than a list of numbers:
+ *
+ *   `null` — the week ended before the first countable interval this database
+ *            holds. Nothing was observed, so the strip draws NO BAR. A
+ *            zero-height bar would claim a week off that nobody ever measured.
+ *   `0`    — a tracked week in which nothing countable happened. That IS a week
+ *            off, it is a fact, and the strip draws it.
+ *
+ * The owner has two weeks of history, so the first case is today's reality and
+ * not an edge case — the same `—` versus `0` rule every other metric obeys
+ * (PRD §4).
+ *
+ * `weekStart` is the Monday (or Sunday, per `Policy.weekStart`) that opens the
+ * week, in the display timezone: the same boundary `MetricsBundle.weekStart`
+ * names for the current week, so the LAST entry's `weekStart` is exactly
+ * `MetricsBundle.weekStart`.
+ */
+export interface WeekPoint {
+  weekStart: LocalDate;
+  hours: number | null;
+}
+
 export interface MachineBreakdown {
   machineId: MachineId;
   label: string;
@@ -259,6 +285,26 @@ export interface MetricsBundle {
   heatmap: HeatmapDay[];
   /** 7 rows, Mon-first, zero-filled */
   weekBars: WeekBar[];
+  /**
+   * Query 1 again, once per week, OLDEST FIRST — `WEEK_SERIES_WEEKS` entries,
+   * the last of which is the week `week.hours` describes and carries the same
+   * number by construction. The owner's ask: "I need a way to see how many
+   * hours I worked the past few weeks."
+   *
+   * BUILT BY CALLING `hoursThisWeek()` PER WEEK, never by summing `heatmap`.
+   * `heatmap` rounds each DAY to 2dp while `hoursThisWeek` rounds the WEEK'S
+   * SUM, so seven rounded days land up to 0.035 h out — enough for the newest
+   * bar to print a different tenth from the "This week" stat card a few inches
+   * above it on the same screen. Two visible figures disagreeing is the exact
+   * failure this project keeps having to remove, so `src/main/metrics.test.ts`
+   * pins the agreement against the independent call rather than trusting the
+   * argument.
+   *
+   * The length is FIXED even when most of it is `null`: the strip's pitch is
+   * one sixteenth of the heatmap's grid, and a renderer handed a short list
+   * would silently widen its bars instead of leaving the untracked weeks empty.
+   */
+  weekSeries: WeekPoint[];
   /** query 5 */
   byMachine: MachineBreakdown[];
   /** query 6, today */

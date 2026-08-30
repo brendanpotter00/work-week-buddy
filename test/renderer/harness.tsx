@@ -30,6 +30,7 @@ import type {
   Toggles,
   UiSettings,
   WeekBar,
+  WeekPoint,
 } from "@/shared/ipc-types";
 
 /**
@@ -321,6 +322,28 @@ export function weekBars(
   });
 }
 
+/**
+ * `n` weekly points ending on `lastWeekStart`, oldest first — the shape
+ * `buildWeekSeries()` puts on the wire.
+ *
+ * `hoursFor` returns `null` for a week before tracking began and a number for a
+ * tracked one, INCLUDING `0`. The two are different pixels and the fixture has
+ * to be able to say either, which is why it is a callback and not an array of
+ * numbers with a length.
+ */
+export function weekSeriesPoints(
+  lastWeekStart: string,
+  n: number,
+  hoursFor: (fromNewest: number, weekStart: string) => number | null,
+): WeekPoint[] {
+  const out: WeekPoint[] = [];
+  for (let back = n - 1; back >= 0; back--) {
+    const weekStart = addLocalDays(lastWeekStart, -7 * back);
+    out.push({ weekStart, hours: hoursFor(back, weekStart) });
+  }
+  return out;
+}
+
 /** A populated bundle — the numbers the mockup shows, over the real contract. */
 export function metricsBundle(over: Partial<MetricsBundle> = {}): MetricsBundle {
   const heatmap = heatmapDays("2025-08-18", 371, (i) => (i % 7 >= 5 ? 0 : 6.5 + (i % 3)));
@@ -348,6 +371,13 @@ export function metricsBundle(over: Partial<MetricsBundle> = {}): MetricsBundle 
     },
     heatmap,
     weekBars: weekBars("2026-08-17", [7.8, 8.6, 6.1, 9.2, 4.3, 0, 0.5]),
+    // Sixteen tracked weeks, newest last, and the newest is 36.5 — the same
+    // figure `week.hours` above carries, because main builds both from
+    // `hoursThisWeek()` over the same bounds and the strip prints the newest
+    // one a few inches under the "This week" card.
+    weekSeries: weekSeriesPoints("2026-08-17", 16, (back) =>
+      back === 0 ? 36.5 : Math.round((28 + ((back * 7) % 17)) * 10) / 10,
+    ),
     byMachine: [
       {
         machineId: "machine-a",
@@ -395,6 +425,10 @@ export function emptyMetricsBundle(): MetricsBundle {
     },
     heatmap: [],
     weekBars: weekBars("2026-08-17", [0, 0, 0, 0, 0, 0, 0]),
+    // Sixteen entries and every one of them `null`, which is what main sends
+    // when nothing has been tracked: the length is fixed so the strip's pitch
+    // is, and "no data" is the absence of a bar rather than a bar of zero.
+    weekSeries: weekSeriesPoints("2026-08-17", 16, () => null),
     byMachine: [],
     honesty: { date: "2026-08-19", naiveSumH: null, unionH: null },
   });

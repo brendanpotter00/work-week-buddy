@@ -20,6 +20,7 @@ import {
   avgIntervalThisWeek,
   byMachine,
   countIntervals,
+  dayOfWeek,
   heatmap,
   hoursOnDate,
   hoursThisWeek,
@@ -39,10 +40,28 @@ import type {
   MetricsPolicy,
   WeekBar,
   WeekBarMachine,
+  WeekPoint,
 } from "../shared/ipc-types";
 
 const DAY_NAMES: WeekBar["day"][] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
-const WEEK_MS = 7 * 86_400_000;
+const DAY_MS = 86_400_000;
+const WEEK_MS = 7 * DAY_MS;
+
+/**
+ * How many bars the strip under the heatmap draws.
+ *
+ * SIXTEEN, NOT FIFTY-THREE, AND THE NUMBER IS THE DESIGN. The strip is the
+ * width of the heatmap's grid, which is fixed at 53 × 14 − 3 = 739 px however
+ * wide the window is. Fifty-three weeks is therefore a 14 px pitch, and `44.1`
+ * set at 11 px measures 24.31 px — the labels would overlap and the strip would
+ * be a picture again, which is the one thing it is not for. Sixteen weeks gives
+ * a 46.2 px pitch, so every bar can carry a printed value AND a date.
+ *
+ * The accepted cost, which the owner chose with the mockup in front of him: at
+ * sixteen the bars no longer line up with the 53 columns above. Do not "fix"
+ * that by going back to 53 — it costs the numbers, which are the feature.
+ */
+export const WEEK_SERIES_WEEKS = 16;
 
 /**
  * `MetricsPolicy` (the wire) → `Policy` (the view).
@@ -172,6 +191,71 @@ function buildWeekBars(
   });
 }
 
+/**
+ * The strip's sixteen weeks, OLDEST FIRST.
+ *
+ * ── ONE SOURCE FOR EVERY WEEKLY FIGURE ON THE PAGE ──────────────────────────
+ * Each entry is a call to `hoursThisWeek()`: the same function, the same
+ * `policyCte()`, the same `v_merged_day` union that fills `week.hours` and
+ * `week.prevHours` two lines apart in `buildMetrics()`. Summing `heatmap`
+ * instead is the tempting version and it is quietly wrong — `heatmap` rounds
+ * each DAY to 2dp while `hoursThisWeek` rounds the WEEK'S SUM, so seven rounded
+ * days land up to 0.035 h out. That is enough for the newest bar to print a
+ * different tenth from the "This week" stat card four inches above it, and
+ * nothing would report an error.
+ *
+ * ── THE ANCHOR IS DRAGGED TO MIDWEEK BEFORE THE WALK STARTS ─────────────────
+ * `k * WEEK_MS` is seven 24-HOUR days, not seven calendar days. A DST
+ * transition anywhere in the window slides every earlier anchor by an hour, and
+ * an anchor sitting at 00:30 on a Monday slides into the week BEFORE it: one
+ * week printed twice, another dropped, no error anywhere. Three days from
+ * either boundary an hour cannot reach the edge, so the anchor is moved to
+ * midweek first. It stays inside the CURRENT week, so `k = 0` still resolves to
+ * exactly the bounds `week.hours` was measured over.
+ *
+ * ── `null` IS NOT `0` ───────────────────────────────────────────────────────
+ * A week that ended before tracking began was never observed and gets `null`,
+ * so the strip draws no bar; a zero-height bar would claim a week off nobody
+ * measured. A week inside the tracked range with nothing countable in it gets
+ * the `0` the query returns and IS drawn — that is a week off, and it is a
+ * fact. The owner has two weeks of history, so the first case is most of this
+ * list today.
+ *
+ * "Tracking began" is `allTime.sinceDate`, the same date the heatmap card
+ * prints as "… h tracked since …" — so the strip starts where the card beside
+ * it says it should. A database holding rows that are all sub-floor or all
+ * jiggler has no such date but is not empty, and `week.hours` is `0` for it;
+ * this week's own start stands in for those, so the newest bar and the "This
+ * week" card cannot disagree in ANY state.
+ */
+function buildWeekSeries(
+  db: DatabaseSync,
+  p: Policy,
+  tz: string,
+  nowMs: number,
+  empty: boolean,
+  sinceDate: LocalDate | null,
+): WeekPoint[] {
+  const thisWeek = weekBounds(nowMs, tz, p.weekStart);
+  const trackedFrom = empty ? null : (sinceDate ?? thisWeek.from);
+
+  const dow = (dayOfWeek(localDateOf(nowMs, tz)) - p.weekStart + 7) % 7;
+  const midweek = nowMs + (3 - dow) * DAY_MS;
+
+  const out: WeekPoint[] = [];
+  for (let k = WEEK_SERIES_WEEKS - 1; k >= 0; k--) {
+    const at = midweek - k * WEEK_MS;
+    const wk = weekBounds(at, tz, p.weekStart);
+    // 'YYYY-MM-DD' sorts lexicographically exactly as it sorts chronologically,
+    // which is why every date bound in this codebase is a string comparison.
+    // `toExclusive <= trackedFrom` is "the whole week is before the first day
+    // we have anything for".
+    const untracked = trackedFrom === null || wk.toExclusive <= trackedFrom;
+    out.push({ weekStart: wk.from, hours: untracked ? null : hoursThisWeek(db, p, tz, at) });
+  }
+  return out;
+}
+
 export function buildMetrics(
   db: DatabaseSync,
   wire: MetricsPolicy,
@@ -209,6 +293,7 @@ export function buildMetrics(
 
   const byDate = new Map(days.map((d) => [d.date, d.count]));
   const weekBars = buildWeekBars(db, p, wk.from, machines, byDate);
+  const weekSeries = buildWeekSeries(db, p, tz, nowMs, empty, totals.sinceDate);
 
   const honesty = unionVsSum(db, p, todayDate);
 
@@ -247,6 +332,7 @@ export function buildMetrics(
     },
     heatmap: days,
     weekBars,
+    weekSeries,
     byMachine: machines.map((m) => ({
       machineId: m.machineId,
       label: m.label,

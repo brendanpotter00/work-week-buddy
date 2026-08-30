@@ -46,6 +46,7 @@ import { LastSignal } from "@/renderer/components/last-signal";
 import { LiveStopwatch } from "@/renderer/components/live-stopwatch";
 import { SyncNow } from "@/renderer/components/sync-now";
 import { TitleBar } from "@/renderer/components/title-bar";
+import { WeekStrip } from "@/renderer/components/week-strip";
 import { Badge } from "@/renderer/components/ui/badge";
 import { Button } from "@/renderer/components/ui/button";
 import {
@@ -660,6 +661,24 @@ export function App(): React.ReactElement {
               theme={HEATMAP_RAMP}
               labels={{ legend: { less: "0h", more: "8h+" } }}
               tooltips={{ activity: { text: (a) => `${a.count.toFixed(1)} h on ${a.date}` } }}
+            />
+            {/* WEEKLY HOURS, IN THIS CARD RATHER THAN A NEW ONE.
+                The owner asked for "how many hours I worked the past few
+                weeks", and the question it answers is the one the heatmap
+                already raises — the calendar shows the shape of a year, this
+                puts a number on each of the last sixteen weeks of it. A card
+                of its own would have separated the two and cost the page a
+                block of vertical space it does not have at 880px.
+
+                Inside the SAME `overflow-x-auto` wrapper as the calendar, and
+                that is load-bearing: the strip is 739px like the grid, the
+                dashboard's minimum window leaves 776px of card, and content
+                that overflowed the page body rather than this box is exactly
+                the "why is it so squishy" failure `npm run smoke` measures at
+                that minimum. */}
+            <WeekStrip
+              weeks={metrics?.weekSeries ?? []}
+              ramp={HEATMAP_RAMP[resolvedTheme]}
             />
           </div>
         </section>
