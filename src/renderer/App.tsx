@@ -64,6 +64,7 @@ import {
 import { Separator } from "@/renderer/components/ui/separator";
 import { Switch } from "@/renderer/components/ui/switch";
 import { formatLocalDate, formatMonthYear } from "@/renderer/lib/format-date";
+import { useWeekdayGutter } from "@/renderer/lib/heatmap-gutter";
 import { machineShades, type Ramp } from "@/renderer/lib/machine-shades";
 import { useTheme } from "@/renderer/lib/theme-provider";
 import {
@@ -108,6 +109,20 @@ const HEATMAP_RAMP: { light: Ramp; dark: Ramp } = {
   light: ["#F1F0EE", "#D3D1CB", "#A8A49C", "#6B6862", "#37352F"],
   dark: ["#242424", "#3A3A3A", "#5C5C5C", "#8A8A8A", "#D4D4D4"],
 };
+
+/**
+ * The two `<ActivityCalendar>` props the weekday gutter is computed from, held
+ * here rather than written inline, because `useWeekdayGutter()` below has to be
+ * given the SAME two values. Change the font size on the calendar alone and the
+ * strip under it slides out of line with the grid by a couple of pixels, in the
+ * packaged app only, with every test still green.
+ *
+ * A module constant, not an inline literal: the hook takes `shown` as a
+ * dependency, and a fresh array on every render would re-measure on every
+ * render.
+ */
+const HEATMAP_FONT_SIZE = 11;
+const HEATMAP_WEEKDAY_LABELS = ["mon", "wed", "fri"] as const;
 
 /** The fallback series: no machine has a countable interval this week. */
 const chartConfig = {
@@ -365,6 +380,11 @@ export function App(): React.ReactElement {
   const togglesQ = useToggles();
   const metricsQ = useMetrics();
   const resolvedTheme = useResolvedTheme();
+  // How far right of its box `<ActivityCalendar>` starts drawing, so the strip
+  // under it can start in the same place. It measures its "Mon / Wed / Fri"
+  // gutter from the real font at runtime, so this is a measurement and not a
+  // constant. `lib/heatmap-gutter.ts`.
+  const weekdayGutter = useWeekdayGutter(HEATMAP_WEEKDAY_LABELS, HEATMAP_FONT_SIZE);
 
   const status = statusQ.data;
   const metrics = metricsQ.data;
@@ -653,10 +673,10 @@ export function App(): React.ReactElement {
               blockSize={11}
               blockMargin={3}
               blockRadius={2}
-              fontSize={11}
+              fontSize={HEATMAP_FONT_SIZE}
               weekStart={1}
               maxLevel={4}
-              showWeekdayLabels={["mon", "wed", "fri"]}
+              showWeekdayLabels={[...HEATMAP_WEEKDAY_LABELS]}
               showTotalCount={false}
               theme={HEATMAP_RAMP}
               labels={{ legend: { less: "0h", more: "8h+" } }}
@@ -675,10 +695,19 @@ export function App(): React.ReactElement {
                 dashboard's minimum window leaves 776px of card, and content
                 that overflowed the page body rather than this box is exactly
                 the "why is it so squishy" failure `npm run smoke` measures at
-                that minimum. */}
+                that minimum.
+
+                `gutterPx` is the last piece of "under the heatmap": the
+                calendar pushes everything it draws right by the width of its
+                "Mon / Wed / Fri" labels — 33px on this Mac, measured from the
+                real font at runtime — so a sibling that started at 0 started
+                33px left of the grid's first column. Invisible while the bars were
+                anchored to the right; the first thing you see now that they
+                start at the left. */}
             <WeekStrip
               weeks={metrics?.weekSeries ?? []}
               ramp={HEATMAP_RAMP[resolvedTheme]}
+              gutterPx={weekdayGutter}
             />
           </div>
         </section>

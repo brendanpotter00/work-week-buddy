@@ -3,7 +3,7 @@
  * The weekly strip under the heatmap — the owner's *"I need a way to see how
  * many hours I worked the past few weeks"*.
  *
- * Three failures are being held off here, and none of them throws.
+ * Five failures are being held off here, and none of them throws.
  *
  *  1. **THE HEADING LIES.** Main always sends sixteen entries so the pitch
  *     stays constant, and fourteen of them are `null` on the owner's machine.
@@ -19,6 +19,22 @@
  *     are asserted as CONTRAST RATIOS against the real `--card` in both themes,
  *     read out of `index.css`, rather than as hex strings that would pass just
  *     as happily on a palette nobody can see.
+ *
+ *  4. **THE BARS DRIFT BACK TO THE RIGHT EDGE, OR SPREAD OUT.** Those are the
+ *     two ways to lay this strip out wrong, and they are opposite mistakes: a
+ *     fixed sixteen slots puts two weeks of history at the far right of a card
+ *     whose heatmap starts at the left (the bug the owner reported), and a pitch
+ *     of `width / drawn` puts them 369px apart as two slabs. So the anchor and
+ *     the pitch are asserted separately: bar zero at x = 0, and the same `left`
+ *     for the same slot whether two weeks are drawn or sixteen.
+ *
+ *  5. **THE STRIP IS 35PX LEFT OF THE GRID IT SITS UNDER.** `<ActivityCalendar>`
+ *     shifts everything it draws right by the width of its "Mon / Wed / Fri"
+ *     labels, measured from the real font at runtime.
+ *     `lib/heatmap-gutter.ts` recomputes that number rather than reading it out
+ *     of a third party's DOM, and a transcription is a thing that rots — so the
+ *     margin the strip applies is asserted against the one the calendar
+ *     actually applied, in the same mounted DOM.
  */
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -26,7 +42,14 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { waitFor } from "@testing-library/react";
 
 import { App } from "@/renderer/App";
-import { HEATMAP_GRID_W, weekCountLabel } from "@/renderer/components/week-strip";
+import {
+  HEATMAP_GRID_W,
+  MAX_WEEKS,
+  WEEK_PITCH,
+  drawnWeeks,
+  weekCountLabel,
+} from "@/renderer/components/week-strip";
+import { measureWeekdayGutter } from "@/renderer/lib/heatmap-gutter";
 import { contrastRatio, type Ramp } from "@/renderer/lib/machine-shades";
 import { WINDOW_SIZE } from "@/shared/constants";
 import type { MetricsBundle, WeekPoint } from "@/shared/ipc-types";
@@ -56,6 +79,19 @@ function rampFromApp(theme: "light" | "dark"): Ramp {
   const stops = m[1]!.split(",").map((s) => s.trim().replace(/"/g, ""));
   expect(stops).toHaveLength(5);
   return stops as unknown as Ramp;
+}
+
+/**
+ * `WEEK_SERIES_WEEKS` out of main, READ FROM SOURCE rather than imported: this
+ * suite runs in jsdom, and importing `src/main/metrics.ts` drags `node:sqlite`
+ * into a browser environment that cannot bundle it. The point stands either
+ * way — how many weeks main sends decides the strip's pitch, so the two numbers
+ * are not allowed to drift apart quietly.
+ */
+function weekSeriesWeeksInMain(): number {
+  const m = /export const WEEK_SERIES_WEEKS = (\d+);/.exec(read("src/main/metrics.ts"));
+  if (!m) throw new Error("no WEEK_SERIES_WEEKS in src/main/metrics.ts");
+  return Number(m[1]);
 }
 
 /** `--card` out of `:root` (light) and `.dark`. */
@@ -168,18 +204,95 @@ describe("a week before tracking began", () => {
     }
   });
 
-  it("keeps its slot, so the two bars do not spread over the whole strip", async () => {
-    // Sixteen slots however few are filled: the pitch is the geometry, and a
-    // renderer that re-spaced to fit two bars would redraw the strip every time
-    // a week rolled over.
+  it("does not reserve a slot at the LEFT, where it would push the bars off the edge", async () => {
+    // The bug the owner reported: sixteen slots were laid out however few were
+    // filled, so his two weeks sat at the far right of a card whose heatmap
+    // starts at the far left. The oldest week there IS goes at x = 0.
+    const c = await mount(TWO_WEEKS);
+    const bars = part(c, "bar");
+
+    expect(bars).toHaveLength(2);
+    expect(bars[0]!.style.left).toBe(`${String(WEEK_PITCH / 2)}px`);
+    expect(bars[1]!.style.left).toBe(`${String(WEEK_PITCH + WEEK_PITCH / 2)}px`);
+    // …and nothing is anywhere near the right-hand end of the 739px plot.
+    for (const bar of bars) expect(Number.parseFloat(bar.style.left)).toBeLessThan(HEATMAP_GRID_W / 2);
+  });
+});
+
+describe("the pitch, which is the one thing that may not move", () => {
+  // The opposite mistake to the one above, and the reason the first version
+  // anchored right: drop the empty slots, divide the width by what is left, and
+  // two weeks of history come out as two slabs 369px apart that re-space
+  // themselves every time a week rolls over.
+  it("puts slot n in the same place whether two weeks are drawn or sixteen", async () => {
     const two = await mount(TWO_WEEKS);
     const full = await mount(metricsBundle());
 
     const left = (el: HTMLElement): string => el.style.left;
     const twoBars = part(two, "bar");
     const fullBars = part(full, "bar");
-    expect(left(twoBars[1]!)).toBe(left(fullBars[15]!));
-    expect(left(twoBars[0]!)).toBe(left(fullBars[14]!));
+    expect(twoBars).toHaveLength(2);
+    expect(fullBars).toHaveLength(16);
+    expect(left(twoBars[0]!)).toBe(left(fullBars[0]!));
+    expect(left(twoBars[1]!)).toBe(left(fullBars[1]!));
+  });
+
+  it("draws a bar the same width at two weeks and at sixteen", async () => {
+    const two = part(await mount(TWO_WEEKS), "bar");
+    const full = part(await mount(metricsBundle()), "bar");
+    expect(two[0]!.style.width).toBe(full[0]!.style.width);
+    // The gap between neighbours is the pitch, in both strips.
+    const gap = (bars: HTMLElement[]): number =>
+      Number.parseFloat(bars[1]!.style.left) - Number.parseFloat(bars[0]!.style.left);
+    expect(gap(two)).toBeCloseTo(WEEK_PITCH, 10);
+    expect(gap(full)).toBeCloseTo(WEEK_PITCH, 10);
+  });
+
+  it("is the pitch sixteen weeks would give, because sixteen is what main sends", () => {
+    // If main ever sent a different number of weeks, the bars would silently
+    // change width. The renderer may not import from main, so the two constants
+    // are two constants — and this is what stops them drifting apart.
+    expect(MAX_WEEKS).toBe(weekSeriesWeeksInMain());
+    expect(WEEK_PITCH).toBeCloseTo(46.19, 2);
+  });
+});
+
+describe("more history than the strip can hold", () => {
+  const twentyWeeks = (): MetricsBundle => {
+    const series = weekSeriesPoints(THIS_WEEK, 20, (back) => 20 + back);
+    return metricsBundle({
+      weekSeries: series,
+      week: { hours: series.at(-1)!.hours, prevHours: series.at(-2)!.hours },
+    });
+  };
+
+  it("draws the most recent sixteen, still oldest-left", async () => {
+    const c = await mount(twentyWeeks());
+    const drawn = part(c, "bar").map((el) => el.dataset["week"]);
+
+    expect(drawn).toHaveLength(MAX_WEEKS);
+    // The four oldest of the twenty are dropped, not squeezed in: the newest is
+    // still last, and the first bar is fifteen weeks before it.
+    expect(drawn.at(-1)).toBe(THIS_WEEK);
+    expect(drawn[0]).toBe("2026-05-04");
+    expect([...drawn].sort()).toEqual(drawn);
+    expect(part(c, "bar")[0]!.style.left).toBe(`${String(WEEK_PITCH / 2)}px`);
+  });
+
+  it("counts sixteen in the heading, not twenty", async () => {
+    expect(caption(await mount(twentyWeeks()))).toBe("Week totals · last 16 weeks");
+  });
+
+  it("keeps an untracked week in the MIDDLE, because that is a hole and not a start", () => {
+    // Only the LEADING run of `null`s is dropped. Closing a gap in the middle
+    // would slide every week after it one column left of where the calendar
+    // puts the same date.
+    const pts = (hours: readonly (number | null)[]): WeekPoint[] =>
+      hours.map((h, i) => ({ weekStart: `2026-01-${String(i + 1).padStart(2, "0")}`, hours: h }));
+
+    expect(drawnWeeks(pts([null, null, 12, null, 8]))).toEqual(pts([null, null, 12, null, 8]).slice(2));
+    expect(drawnWeeks(pts([null, null]))).toEqual([]);
+    expect(drawnWeeks([])).toEqual([]);
   });
 });
 
@@ -285,21 +398,28 @@ describe("the geometry, at the width the window can actually be", () => {
     expect(app).toContain("blockMargin={3}");
   });
 
-  it("fits the card at the window's 880px minimum", () => {
+  it("fits the card at the window's 880px minimum, gutter included", () => {
     // 880 − 64 (page px-8) − 40 (card px-5) = 776px of card. The strip is 739,
     // so it fits with 37px to spare at the narrowest the window can be — which
     // is the only width worth checking, since it is the one that fails.
     expect(WINDOW_SIZE.dashboard.minWidth).toBe(880);
     const card = WINDOW_SIZE.dashboard.minWidth - 64 - 40;
     expect(HEATMAP_GRID_W).toBeLessThan(card);
+    // Those 37px are now a BUDGET, and the weekday gutter spends them: "Wed" at
+    // 11px measures 25px, +8px of `LABEL_MARGIN`, so the strip starts 33px in
+    // and clears the card's right edge by four. jsdom cannot measure text,
+    // so this pins the budget rather than the spend — if the card ever gets
+    // narrower, or the grid wider, the strip starts scrolling sideways at the
+    // minimum window and this is the assertion that says so first.
+    expect(card - HEATMAP_GRID_W).toBe(37);
   });
 
   it("leaves each bar room for a printed value, which 53 weeks would not", () => {
     // The measurement that chose sixteen: `44.1` set at 11px is 24.31px wide.
     // 53 weeks is a 14px pitch and the values collide; 16 gives 46.19px.
-    const pitch = HEATMAP_GRID_W / WEEKS;
-    expect(pitch).toBeCloseTo(46.19, 2);
-    expect(pitch).toBeGreaterThan(24.31 * 1.5);
+    expect(WEEK_PITCH).toBeCloseTo(46.19, 2);
+    expect(WEEK_PITCH).toBe(HEATMAP_GRID_W / WEEKS);
+    expect(WEEK_PITCH).toBeGreaterThan(24.31 * 1.5);
     expect(HEATMAP_GRID_W / 53).toBeLessThan(24.31);
   });
 
@@ -324,5 +444,44 @@ describe("the geometry, at the width the window can actually be", () => {
       Number.parseFloat(normal!.style.height),
     );
     expect(Number.parseFloat(long!.style.height)).toBeLessThanOrEqual(34);
+  });
+});
+
+describe("the first bar and the heatmap's first column", () => {
+  /** The `<svg>` the calendar draws its grid into. Column zero is its x = 0. */
+  const grid = (c: HTMLElement): HTMLElement => {
+    const el = c.querySelector<HTMLElement>(".react-activity-calendar__calendar");
+    if (el === null) throw new Error("no calendar svg rendered");
+    return el;
+  };
+
+  it("start in the same place, gutter and all", async () => {
+    // `<ActivityCalendar>` renders "Mon / Wed / Fri" to the LEFT of its svg and
+    // pushes the svg right by their measured width + 8. Everything it draws is
+    // therefore inset by that much, and a sibling starting at 0 is inset by
+    // nothing. Measured on this Mac, the difference is 33px — small enough to
+    // have shipped unnoticed while the bars were pinned to the right edge, and
+    // the first thing anyone sees now that they start at the left.
+    const c = await mount(TWO_WEEKS);
+
+    // Both numbers are COMPUTED — the calendar's by the library, the strip's by
+    // `lib/heatmap-gutter.ts` re-deriving the same arithmetic without reaching
+    // into the calendar's DOM. jsdom's `getBBox` stub reports a zero-width
+    // label, so both come out at the bare `LABEL_MARGIN`; what is pinned here
+    // is that they are the SAME expression, which is what rots when the library
+    // changes its gutter.
+    expect(strip(c).style.marginLeft).toBe(grid(c).style.marginLeft);
+    expect(strip(c).style.marginLeft).not.toBe("");
+    expect(strip(c).style.marginLeft).not.toBe("0px");
+  });
+
+  it("stay together when the calendar reserves no gutter at all", async () => {
+    // `measureWeekdayGutter([])` is the `shouldShow === false` branch: no
+    // labels, no gutter, and a strip that must NOT invent an 8px indent of its
+    // own. Pure, so it needs no calendar to assert against.
+    expect(measureWeekdayGutter([], 11)).toBe(0);
+    // With labels there is always at least the 8px margin between them and the
+    // grid, whatever the font measures.
+    expect(measureWeekdayGutter(["mon", "wed", "fri"], 11)).toBeGreaterThanOrEqual(8);
   });
 });
