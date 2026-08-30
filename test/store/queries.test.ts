@@ -20,6 +20,7 @@ import {
   hoursOnDate,
   hoursThisWeek,
   longestInterval,
+  machineDaySlices,
   unionVsSum,
 } from "../../src/store/queries";
 import { upsertMachine } from "../../src/store/sync-state";
@@ -241,5 +242,95 @@ describe("week boundaries come from the display timezone, not from SQLite", () =
     expect(hoursThisWeek(db, P, "UTC", NOW_IN_WEEK)).toBe(1);
     const sundayStart: Policy = { ...P, weekStart: 0 };
     expect(hoursThisWeek(db, sundayStart, "UTC", NOW_IN_WEEK)).toBe(2);
+  });
+});
+
+/**
+ * 5b) The union SPLIT — query 5's sibling, and not query 5.
+ *
+ * The property that matters is one line long: **for every day, the slices add
+ * up to `hoursOnDate()`**. Everything the stacked bar chart claims rests on it,
+ * so it is asserted against the independent union query rather than against
+ * anything this function computes for itself.
+ */
+describe("5b) per-machine, per-day — the union split", () => {
+  const H = 3_600_000;
+  const msOn = (
+    slices: ReturnType<typeof machineDaySlices>,
+    date: string,
+  ): number => slices.filter((s) => s.localDate === date).reduce((a, s) => a + s.ms, 0);
+
+  it("credits overlap to whichever Mac was already working", () => {
+    const db = openTestDb();
+    seedWeek(db);
+    const slices = machineDaySlices(db, P, "2026-08-17", "2026-08-24");
+
+    expect(slices.filter((s) => s.localDate === "2026-08-17")).toEqual([
+      // personal 09:00–10:00 started first and keeps all of it…
+      { localDate: "2026-08-17", machineId: "personal", ms: 1 * H },
+      // …so work 09:30–10:30 is credited only 10:00–10:30.
+      { localDate: "2026-08-17", machineId: "work", ms: 0.5 * H },
+    ]);
+  });
+
+  it("adds up to the day's union, which is the whole contract", () => {
+    const db = openTestDb();
+    seedWeek(db);
+    const slices = machineDaySlices(db, P, "2026-08-17", "2026-08-24");
+    for (const date of ["2026-08-17", "2026-08-18", "2026-08-19", "2026-08-20", "2026-08-21"]) {
+      expect(msOn(slices, date) / H).toBeCloseTo(hoursOnDate(db, P, date), 6);
+    }
+    // …and the excluded rows really are excluded: Wednesday's 60-second bump
+    // and Thursday's jiggler-covered four hours contribute nothing.
+    expect(msOn(slices, "2026-08-19")).toBe(0);
+    expect(msOn(slices, "2026-08-20")).toBe(0);
+  });
+
+  it("stays equal to the union across nesting, touching and disjoint intervals", () => {
+    // Every shape the sweep has to get right, on one day: a nested interval, a
+    // partial overlap, two that touch exactly, and a gap.
+    const db = openTestDb();
+    seed(db, [
+      { id: "1", machineId: "a", start: "2026-08-17T08:00:00Z", end: "2026-08-17T12:00:00Z" },
+      { id: "2", machineId: "b", start: "2026-08-17T09:00:00Z", end: "2026-08-17T10:00:00Z" },
+      { id: "3", machineId: "c", start: "2026-08-17T11:00:00Z", end: "2026-08-17T13:00:00Z" },
+      { id: "4", machineId: "b", start: "2026-08-17T13:00:00Z", end: "2026-08-17T14:00:00Z" },
+      { id: "5", machineId: "a", start: "2026-08-17T16:00:00Z", end: "2026-08-17T17:00:00Z" },
+    ]);
+    const slices = machineDaySlices(db, P, "2026-08-17", "2026-08-18");
+
+    // 08:00–14:00 is one island (6 h), 16:00–17:00 another (1 h). 7 h.
+    expect(hoursOnDate(db, P, "2026-08-17")).toBe(7);
+    expect(msOn(slices, "2026-08-17")).toBe(7 * H);
+    expect(slices).toEqual([
+      // a: 08:00–12:00 and 16:00–17:00 = 5 h. b's nested hour is credited zero
+      // and its 13:00–14:00 hour in full; c gets 12:00–13:00.
+      { localDate: "2026-08-17", machineId: "a", ms: 5 * H },
+      { localDate: "2026-08-17", machineId: "b", ms: 1 * H },
+      { localDate: "2026-08-17", machineId: "c", ms: 1 * H },
+    ]);
+  });
+
+  it("counts the idle-timeout grace exactly the way the union does", () => {
+    // `grace_s` extends an interval's end inside `v_countable`, so a policy
+    // that turns it on must move the split and the union together — or the
+    // stack stops matching the bar the moment the knob is touched.
+    const db = openTestDb();
+    seed(db, [
+      { id: "g", machineId: "a", start: "2026-08-17T09:00:00Z", end: "2026-08-17T10:00:00Z" },
+    ]);
+    const graced: Policy = { ...P, graceS: 900 };
+    expect(hoursOnDate(db, graced, "2026-08-17")).toBe(1.25);
+    expect(msOn(machineDaySlices(db, graced, "2026-08-17", "2026-08-18"), "2026-08-17")).toBe(
+      1.25 * H,
+    );
+  });
+
+  it("is bounded by the dates it was asked for", () => {
+    const db = openTestDb();
+    seedWeek(db);
+    const monOnly = machineDaySlices(db, P, "2026-08-17", "2026-08-18");
+    expect(new Set(monOnly.map((s) => s.localDate))).toEqual(new Set(["2026-08-17"]));
+    expect(machineDaySlices(db, P, "2026-09-01", "2026-09-08")).toEqual([]);
   });
 });

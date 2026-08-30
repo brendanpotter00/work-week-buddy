@@ -44,6 +44,7 @@ import { AlertBanner } from "@/renderer/components/alert-banner";
 import { DeviceName } from "@/renderer/components/device-name";
 import { LastSignal } from "@/renderer/components/last-signal";
 import { LiveStopwatch } from "@/renderer/components/live-stopwatch";
+import { SyncNow } from "@/renderer/components/sync-now";
 import { TitleBar } from "@/renderer/components/title-bar";
 import { Badge } from "@/renderer/components/ui/badge";
 import { Button } from "@/renderer/components/ui/button";
@@ -62,6 +63,7 @@ import {
 import { Separator } from "@/renderer/components/ui/separator";
 import { Switch } from "@/renderer/components/ui/switch";
 import { formatLocalDate, formatMonthYear } from "@/renderer/lib/format-date";
+import { machineShades, type Ramp } from "@/renderer/lib/machine-shades";
 import { useTheme } from "@/renderer/lib/theme-provider";
 import {
   ipc,
@@ -73,7 +75,11 @@ import {
 } from "@/renderer/lib/ipc";
 import { useResolvedTheme } from "@/renderer/lib/use-resolved-theme";
 import { useThemeMirror } from "@/renderer/lib/use-theme-mirror";
-import { DEFAULT_METRICS_POLICY, type DegradedReason } from "@/shared/ipc-types";
+import {
+  DEFAULT_METRICS_POLICY,
+  type DegradedReason,
+  type WeekBar,
+} from "@/shared/ipc-types";
 import {
   formatCount,
   formatDayDelta,
@@ -84,9 +90,185 @@ import {
   hoursToday,
 } from "@/shared/format";
 
+/**
+ * THE 5-STOP RAMP, and it is now shared.
+ *
+ * It used to be inline on `<ActivityCalendar>`. It is hoisted because the "This
+ * week" bars are stacked per machine and take their greys from the SAME ramp —
+ * one grey vocabulary on this page, not two that drift apart the first time
+ * either is touched. `lib/machine-shades.ts` says which stops the bars use and
+ * why it throws the first one away.
+ *
+ * The literals are unchanged and are pinned verbatim by
+ * `test/renderer/port-fidelity.test.ts`: a 2-stop ramp renders a realistic
+ * full-time year as one unreadable near-black block.
+ */
+const HEATMAP_RAMP: { light: Ramp; dark: Ramp } = {
+  light: ["#F1F0EE", "#D3D1CB", "#A8A49C", "#6B6862", "#37352F"],
+  dark: ["#242424", "#3A3A3A", "#5C5C5C", "#8A8A8A", "#D4D4D4"],
+};
+
+/** The fallback series: no machine has a countable interval this week. */
 const chartConfig = {
   hours: { label: "Hours", color: "var(--foreground)" },
 } satisfies ChartConfig;
+
+/**
+ * One stacked `<Bar>`. `key` is `m0`, `m1`… rather than the machine id, because
+ * an id is a UUID and shadcn turns a config key straight into a
+ * `--color-<key>` custom property.
+ */
+interface WeekSeries {
+  key: string;
+  machineId: string;
+  label: string;
+}
+
+/**
+ * The machines to stack, in the order `MetricsBundle.byMachine` returns them —
+ * hours-descending, and tie-broken on the id in SQL — so the strongest grey
+ * lands on the Mac that did the most work and stays there between renders.
+ */
+function weekSeries(bars: readonly WeekBar[]): WeekSeries[] {
+  const seen = new Map<string, string>();
+  for (const bar of bars) {
+    for (const m of bar.machines) if (!seen.has(m.machineId)) seen.set(m.machineId, m.label);
+  }
+  return [...seen].map(([machineId, label], i) => ({ key: `m${String(i)}`, machineId, label }));
+}
+
+/** Recharts wants one flat object per bar; `machines` is a list. */
+function weekRows(
+  bars: readonly WeekBar[],
+  series: readonly WeekSeries[],
+): Array<Record<string, string | number>> {
+  return bars.map((bar) => {
+    const by = new Map(bar.machines.map((m) => [m.machineId, m.hours]));
+    const row: Record<string, string | number> = { day: bar.day, date: bar.date, hours: bar.hours };
+    for (const s of series) row[s.key] = by.get(s.machineId) ?? 0;
+    return row;
+  });
+}
+
+/**
+ * "This week", stacked per machine.
+ *
+ * ── THE SEGMENTS SUM TO THE BAR, AND NOT BY ARITHMETIC DONE HERE ────────────
+ * `WeekBar.machines` already comes to `WeekBar.hours`: main splits the day's
+ * UNION with `machineDaySlices()` and hands it out in integer hundredths with
+ * `apportion()`. So the stack cannot stand taller than the day it describes and
+ * cannot contradict the "This week" stat card a few inches above it.
+ *
+ * Stacking `byMachine[].hours` instead — the obvious thing — would do exactly
+ * that: those are per-machine TOTALS, and an hour when both Macs were awake is
+ * in both of them. `docs/DATA_MODEL.md` measured that at 10% on a single
+ * three-interval day.
+ */
+function WeekChart({
+  bars,
+  resolvedTheme,
+}: {
+  bars: readonly WeekBar[];
+  /**
+   * For the LEGEND only. shadcn scopes `--color-<key>` to the chart container,
+   * and the legend sits outside it — measured: the swatches came out
+   * `rgba(0,0,0,0)`, three invisible squares next to three machine names, with
+   * no error anywhere. So the legend resolves its own hex, the same way
+   * `<ActivityCalendar colorScheme=…>` does, off the same `machineShades()`
+   * call the bars use.
+   */
+  resolvedTheme: "light" | "dark";
+}): React.ReactElement {
+  const series = React.useMemo(() => weekSeries(bars), [bars]);
+  const rows = React.useMemo(() => weekRows(bars, series), [bars, series]);
+  const legendShades = React.useMemo(
+    () => machineShades(series.length, HEATMAP_RAMP[resolvedTheme]),
+    [series.length, resolvedTheme],
+  );
+
+  const config = React.useMemo<ChartConfig>(() => {
+    const light = machineShades(series.length, HEATMAP_RAMP.light);
+    const dark = machineShades(series.length, HEATMAP_RAMP.dark);
+    const out: ChartConfig = { ...chartConfig };
+    series.forEach((s, i) => {
+      // Both themes declared together: shadcn emits `--color-<key>` twice, once
+      // bare and once under `.dark`, which is the class this app actually
+      // toggles. A single `color` would leave one theme wearing the other's
+      // greys — the same failure `colorScheme={resolvedTheme}` fixes for the
+      // heatmap, and just as silent.
+      out[s.key] = { label: s.label, theme: { light: light[i] ?? "", dark: dark[i] ?? "" } };
+    });
+    return out;
+  }, [series]);
+
+  return (
+    <>
+      <ChartContainer config={config} className="mt-4 h-[180px] w-full">
+        <BarChart data={rows} margin={{ left: 0, right: 0, top: 4 }}>
+          <CartesianGrid vertical={false} strokeOpacity={0.35} />
+          <XAxis dataKey="day" tickLine={false} axisLine={false} tickMargin={8} fontSize={11} />
+          <ChartTooltip content={<ChartTooltipContent />} />
+          {series.length === 0 ? (
+            // First run: nothing countable this week, so there is nothing to
+            // stack. The bar this dashboard has always had, unchanged — an
+            // empty chart with no <Bar> at all would lose the zero baseline.
+            <Bar dataKey="hours" fill="var(--color-hours)" radius={3} maxBarSize={34} />
+          ) : (
+            series.map((s, i) => (
+              <Bar
+                key={s.key}
+                dataKey={s.key}
+                stackId="week"
+                fill={`var(--color-${s.key})`}
+                // Only the top of the stack is rounded; rounding every segment
+                // notches the middle of the bar. ONE machine keeps the old
+                // all-four-corners bar exactly, which is today's reality.
+                radius={series.length === 1 ? 3 : i === series.length - 1 ? [3, 3, 0, 0] : 0}
+                // A hairline in the CARD colour between segments. The ramp's
+                // weakest adjacent pair is 1.6:1 — enough to tell apart, not
+                // enough to be sure of at a 34px bar's width — and a separator
+                // the same colour as the ground behind the chart is invisible
+                // everywhere except exactly where two segments meet.
+                stroke={series.length === 1 ? undefined : "var(--card)"}
+                strokeWidth={series.length === 1 ? 0 : 1}
+                maxBarSize={34}
+              />
+            ))
+          )}
+        </BarChart>
+      </ChartContainer>
+
+      {series.length === 0 ? null : (
+        <div
+          data-slot="week-legend"
+          className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs text-muted-foreground"
+        >
+          {series.map((s, i) => (
+            <span key={s.key} data-slot="week-legend-item" className="flex items-center gap-1.5">
+              <span
+                aria-hidden="true"
+                data-slot="week-legend-swatch"
+                data-shade={legendShades[i]}
+                className="size-2 shrink-0 rounded-[2px]"
+                style={{ backgroundColor: legendShades[i] }}
+              />
+              {s.label}
+            </span>
+          ))}
+        </div>
+      )}
+      {series.length > 1 ? (
+        // The rule, said out loud. Without it the stack reads as a sum, and a
+        // Mac that worked only inside the other one's session reads as a Mac
+        // that did nothing. `docs/DATA_MODEL.md` is why the hours are a union;
+        // this is where that stops being invisible.
+        <p data-slot="week-union-note" className="mt-2 text-xs text-muted-foreground">
+          Time both Macs were awake counts once, credited to whichever was already working.
+        </p>
+      ) : null}
+    </>
+  );
+}
 
 /** §4.5 — every degraded reason says what is wrong with the numbers, in words. */
 const DEGRADED_COPY: Record<DegradedReason, string> = {
@@ -296,15 +478,27 @@ export function App(): React.ReactElement {
           data-slot="status-strip"
           className="mt-4 flex items-center gap-3 rounded-lg border border-border bg-card px-4 py-3"
         >
-          <span className="flex items-center gap-1.5 text-sm text-muted-foreground">
-            <Laptop className="size-3.5" />
-            {status?.machineLabel || "this Mac"}
+          {/* `min-w-0 truncate`, both halves. A Mac called "Brendan’s MacBook
+              Pro 16-inch (work)" is not exotic, and a strip that cannot shrink
+              pushes the page's scrollWidth past its viewport — which is the
+              "why is it so squishy" failure `npm run smoke` exists to catch,
+              measured at the window's own 880px minimum. */}
+          <span className="flex min-w-0 items-center gap-1.5 text-sm text-muted-foreground">
+            <Laptop className="size-3.5 shrink-0" />
+            <span className="truncate">{status?.machineLabel || "this Mac"}</span>
           </span>
-          <Separator orientation="vertical" className="mx-1 !h-4" />
+          <Separator orientation="vertical" className="mx-1 !h-4 shrink-0" />
           <LastSignal lastSignalMs={status?.lastSignalMs ?? null} asOfMs={status?.asOfMs ?? 0} />
-          <div className="ml-auto flex items-center gap-4">
+          <div className="ml-auto flex min-w-0 items-center gap-4">
+            {/* SYNC NOW, beside the two switches because that is where the
+                owner asked for it ("a sync now button to the top of the
+                dashboard where the jiggler and keep awake are"). It is the
+                only elastic cell in the row: it holds the outcome sentence, so
+                it is the one allowed to give width back to the toggles rather
+                than making the strip wider. */}
+            <SyncNow />
             <label
-              className="flex items-center gap-2 text-xs text-muted-foreground"
+              className="flex shrink-0 items-center gap-2 text-xs text-muted-foreground"
               title={toggles?.jigglerUnavailableReason ?? undefined}
             >
               <MousePointer2 className="size-3.5" />
@@ -317,7 +511,7 @@ export function App(): React.ReactElement {
                 onCheckedChange={(v) => togglesQ.setToggle("jiggler", v)}
               />
             </label>
-            <label className="flex items-center gap-2 text-xs text-muted-foreground">
+            <label className="flex shrink-0 items-center gap-2 text-xs text-muted-foreground">
               <Coffee className="size-3.5" />
               {/* "Keep awake" everywhere: `caffeinate` is a banned implementation
                   (MACOS.md §5) and two names for one toggle is a bug factory. */}
@@ -463,10 +657,7 @@ export function App(): React.ReactElement {
               maxLevel={4}
               showWeekdayLabels={["mon", "wed", "fri"]}
               showTotalCount={false}
-              theme={{
-                light: ["#F1F0EE", "#D3D1CB", "#A8A49C", "#6B6862", "#37352F"],
-                dark: ["#242424", "#3A3A3A", "#5C5C5C", "#8A8A8A", "#D4D4D4"],
-              }}
+              theme={HEATMAP_RAMP}
               labels={{ legend: { less: "0h", more: "8h+" } }}
               tooltips={{ activity: { text: (a) => `${a.count.toFixed(1)} h on ${a.date}` } }}
             />
@@ -477,20 +668,7 @@ export function App(): React.ReactElement {
         <section className="mt-4 grid grid-cols-1 gap-3 lg:grid-cols-[1.4fr_1fr]">
           <div className="rounded-lg border border-border bg-card px-5 py-5">
             <h2 className="font-heading text-sm font-medium">This week</h2>
-            <ChartContainer config={chartConfig} className="mt-4 h-[180px] w-full">
-              <BarChart data={metrics?.weekBars ?? []} margin={{ left: 0, right: 0, top: 4 }}>
-                <CartesianGrid vertical={false} strokeOpacity={0.35} />
-                <XAxis
-                  dataKey="day"
-                  tickLine={false}
-                  axisLine={false}
-                  tickMargin={8}
-                  fontSize={11}
-                />
-                <ChartTooltip content={<ChartTooltipContent />} />
-                <Bar dataKey="hours" fill="var(--color-hours)" radius={3} maxBarSize={34} />
-              </BarChart>
-            </ChartContainer>
+            <WeekChart bars={metrics?.weekBars ?? []} resolvedTheme={resolvedTheme} />
           </div>
 
           <div className="rounded-lg border border-border bg-card px-5 py-5">

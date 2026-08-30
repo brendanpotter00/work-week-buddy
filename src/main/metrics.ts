@@ -13,6 +13,7 @@
  */
 import type { DatabaseSync } from "node:sqlite";
 
+import { apportion } from "../core";
 import {
   addDays,
   avgIntervalAllTime,
@@ -24,6 +25,7 @@ import {
   hoursThisWeek,
   localDateOf,
   longestInterval,
+  machineDaySlices,
   policyCte,
   unionVsSum,
   weekBounds,
@@ -36,6 +38,7 @@ import type {
   MetricsBundle,
   MetricsPolicy,
   WeekBar,
+  WeekBarMachine,
 } from "../shared/ipc-types";
 
 const DAY_NAMES: WeekBar["day"][] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
@@ -106,6 +109,69 @@ function machineMeta(db: DatabaseSync): Map<string, MachineMeta> {
   return out;
 }
 
+/**
+ * The seven bars, each carrying its own per-machine split of the union.
+ *
+ * TWO SOURCES, ONE NUMBER, ON PURPOSE. `hours` stays the heatmap's figure for
+ * that date — `ROUND(SUM(e_ms - s_ms)/3600000, 2)` over `v_merged_day` — which
+ * is what the bar has always been and is the same union `hoursOnDate()` and the
+ * "This week" card are built on. The split comes from `machineDaySlices()`,
+ * which sweeps the same rows. The two agree because they measure the same
+ * union in the same milliseconds, and `apportion()` then hands out exactly
+ * `hours` so the stack cannot come to anything else even if they ever stopped
+ * agreeing. `src/main/metrics.test.ts` pins the agreement itself against
+ * `hoursOnDate()` rather than trusting the argument.
+ *
+ * The machine ORDER is `byMachine`'s, which is hours-descending — so the
+ * dashboard's darkest shade lands on the Mac that did the most work, every
+ * render, whichever day you look at.
+ */
+function buildWeekBars(
+  db: DatabaseSync,
+  p: Policy,
+  weekFrom: LocalDate,
+  machines: ReadonlyArray<{ machineId: string; label: string }>,
+  hoursByDate: ReadonlyMap<string, number>,
+): WeekBar[] {
+  const slices = machineDaySlices(db, p, weekFrom, addDays(weekFrom, 7));
+
+  const msByDate = new Map<string, Map<string, number>>();
+  for (const sl of slices) {
+    const day = msByDate.get(sl.localDate) ?? new Map<string, number>();
+    day.set(sl.machineId, (day.get(sl.machineId) ?? 0) + sl.ms);
+    msByDate.set(sl.localDate, day);
+  }
+
+  const known = new Set(machines.map((m) => m.machineId));
+  const labels = new Map(machines.map((m) => [m.machineId, m.label]));
+
+  return DAY_NAMES.map((day, i) => {
+    const date = addDays(weekFrom, i);
+    const hours = hoursByDate.get(date) ?? 0;
+    const ms = msByDate.get(date) ?? new Map<string, number>();
+
+    // `byMachine` and `machineDaySlices` read the same `v_countable` rows over
+    // the same seven days, so an id here that is not there cannot happen. It is
+    // appended rather than dropped anyway: a dropped id would be hours credited
+    // to a machine the stack never draws, and that is a stack quietly shorter
+    // than its bar — the one failure this whole path exists to rule out.
+    const extra = [...ms.keys()].filter((id) => !known.has(id)).sort();
+    const ids = [...machines.map((m) => m.machineId), ...extra];
+
+    const parts = apportion(
+      ids.map((id) => ms.get(id) ?? 0),
+      Math.round(hours * 100),
+    );
+    const split: WeekBarMachine[] = ids.map((id, k) => ({
+      machineId: id,
+      label: labels.get(id) ?? id,
+      hours: (parts[k] ?? 0) / 100,
+    }));
+
+    return { day, date, hours, machines: split };
+  });
+}
+
 export function buildMetrics(
   db: DatabaseSync,
   wire: MetricsPolicy,
@@ -137,15 +203,12 @@ export function buildMetrics(
   const longest = longestInterval(db, p);
   const days = applyThresholds(heatmap(db, p, tz, nowMs), wire.heatmapThresholdsH);
 
-  const byDate = new Map(days.map((d) => [d.date, d.count]));
-  const weekBars: WeekBar[] = DAY_NAMES.map((day, i) => {
-    const date = addDays(wk.from, i);
-    return { day, date, hours: byDate.get(date) ?? 0 };
-  });
-
   const machines = byMachine(db, p, tz, nowMs);
   const totalMachineHours = machines.reduce((a, m) => a + m.hours, 0);
   const meta = machineMeta(db);
+
+  const byDate = new Map(days.map((d) => [d.date, d.count]));
+  const weekBars = buildWeekBars(db, p, wk.from, machines, byDate);
 
   const honesty = unionVsSum(db, p, todayDate);
 

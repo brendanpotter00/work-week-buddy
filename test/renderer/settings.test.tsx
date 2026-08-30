@@ -22,6 +22,7 @@ import { Settings } from "@/renderer/Settings";
 import { IDLE_TIMEOUT_MIN_RANGE } from "@/shared/constants";
 import { INVOKE_CHANNELS } from "@/shared/ipc-types";
 import type {
+  FlushResult,
   InvokeChannel,
   SyncConfigState,
   SyncTestResult,
@@ -42,6 +43,13 @@ import {
 
 /** A token shaped like a real one, so a substring search cannot pass by luck. */
 const TOKEN = "wwb_9f3c1d7a54e84b0da2c6f18e7b3a09d5";
+
+/** A finished setup — both halves stored and usable. */
+const CONFIGURED_SYNC: Partial<SyncConfigState> = {
+  workerUrl: "https://x.workers.dev",
+  tokenPresent: true,
+  configured: true,
+};
 
 beforeEach(() => {
   installDomStubs();
@@ -65,6 +73,8 @@ function mount(
     doctor?: Parameters<typeof doctorReport>[0];
     settings?: Partial<UiSettings>;
     testResult?: SyncTestResult;
+    /** Overrides `wwb:sync:flush`; the default below is a clean 2-row upload. */
+    flushResult?: Partial<FlushResult>;
   } = {},
 ): Fixture {
   const writes: Fixture["writes"] = [];
@@ -118,6 +128,7 @@ function mount(
       pendingAfter: 0,
       error: null,
       atMs: Date.now(),
+      ...over.flushResult,
     }),
     "wwb:machine:rename": ({ label }) => appInfo({ machineLabel: label.trim() }),
     "wwb:window:openDashboard": () => undefined,
@@ -402,9 +413,7 @@ describe("one primary path, and the expert fields behind a disclosure", () => {
   });
 
   it("configured shows the URL, Test, Sync now and Set up again", async () => {
-    const f = mount({
-      config: { workerUrl: "https://x.workers.dev", tokenPresent: true, configured: true },
-    });
+    const f = mount({ config: CONFIGURED_SYNC });
     await screen.findByText("Cloud sync");
 
     const primary = card("sync").querySelector('[data-slot="sync-primary"]');
@@ -416,6 +425,54 @@ describe("one primary path, and the expert fields behind a disclosure", () => {
 
     act(() => syncButton(/set up again/i).click());
     await waitFor(() => expect(f.wizardOpens).toHaveLength(1));
+  });
+
+  it("says what Sync now did, in the same words the dashboard's button uses", async () => {
+    // Same `useFlush()` as the status strip — one implementation, so the two
+    // cannot come to disagree about what a partial upload is called. This pane
+    // has room, so it prints the long form.
+    mount({ config: CONFIGURED_SYNC, flushResult: { attempted: 5, confirmed: 5 } });
+    await screen.findByText("Cloud sync");
+
+    act(() => syncButton(/sync now/i).click());
+    const line = (): HTMLElement | null =>
+      card("sync").querySelector('[data-slot="sync-flush-result"]');
+    await waitFor(() => expect(line()?.textContent).toContain("Sent 5 rows"));
+    expect(line()?.getAttribute("data-ok")).toBe("true");
+    expect(line()?.getAttribute("role")).toBe("status");
+  });
+
+  it("does not swallow a failed Sync now", async () => {
+    mount({
+      config: CONFIGURED_SYNC,
+      flushResult: { ok: false, attempted: 5, confirmed: 0, pendingAfter: 5, error: "403 forbidden" },
+    });
+    await screen.findByText("Cloud sync");
+
+    act(() => syncButton(/sync now/i).click());
+    const line = (): HTMLElement | null =>
+      card("sync").querySelector('[data-slot="sync-flush-result"]');
+    await waitFor(() => expect(line()?.textContent).toContain("403 forbidden"));
+    expect(line()?.getAttribute("data-ok")).toBe("false");
+    expect(line()?.getAttribute("role")).toBe("alert");
+    expect(line()?.className).toContain("text-destructive");
+    // Nothing was lost: the local mirror IS the outbox (docs/DATA_MODEL.md).
+    expect(line()?.textContent).toContain("nothing has been lost");
+  });
+
+  it("will not start a second Sync now while one is running", async () => {
+    const f = mount({ config: CONFIGURED_SYNC });
+    await screen.findByText("Cloud sync");
+
+    // Two clicks in one frame: `disabled` has not been painted yet, so what
+    // holds is the in-flight ref inside `useFlush()`.
+    act(() => {
+      syncButton(/sync now/i).click();
+      syncButton(/sync now/i).click();
+    });
+    expect(f.bridge.calls.filter((c) => c.channel === "wwb:sync:flush")).toHaveLength(1);
+    // …and Save and Test are held too, so nothing races the upload.
+    await waitFor(() => expect(syncButton(/test connection/i).disabled).toBe(true));
   });
 
   it("opens the fields BY ITSELF when only one half is present", async () => {

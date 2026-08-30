@@ -168,10 +168,40 @@ export interface HeatmapDay {
   level: 0 | 1 | 2 | 3 | 4;
 }
 
+/**
+ * One machine's share of one day's bar.
+ *
+ * The label rides along rather than being looked up against `byMachine`,
+ * because the two lists are built from the same rows and a renderer that has to
+ * join them is a renderer that can drop a segment when the join misses — a
+ * stack visibly shorter than its own bar, with nothing throwing.
+ */
+export interface WeekBarMachine {
+  machineId: MachineId;
+  label: string;
+  hours: number;
+}
+
 export interface WeekBar {
   day: "Mon" | "Tue" | "Wed" | "Thu" | "Fri" | "Sat" | "Sun";
   date: LocalDate;
+  /** The day's UNION across machines. Two Macs awake at once count once. */
   hours: number;
+  /**
+   * `hours` split per machine, and the split SUMS TO `hours` EXACTLY — same
+   * order as `byMachine`, zero-filled, in hundredths-exact arithmetic
+   * (`src/core/apportion.ts`).
+   *
+   * That equality is the contract. A stacked bar whose segments were each
+   * machine's own total (`MachineBreakdown.hours`) would stand taller than the
+   * day it describes whenever two Macs overlapped, and would contradict the
+   * "This week" stat card on the same screen. Overlap is credited to whichever
+   * Mac was already working — `machineDaySlices()` in `src/store/queries.ts`
+   * argues why — so these are shares of the union, NOT per-machine totals, and
+   * a machine that worked only inside another's session shows 0 h here while
+   * `byMachine` still reports its hours.
+   */
+  machines: WeekBarMachine[];
 }
 
 export interface MachineBreakdown {

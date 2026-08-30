@@ -103,6 +103,10 @@ describe("stat cards render the values the IPC client returned", () => {
         "wwb:metrics:get",
         "wwb:toggles:get",
         "wwb:settings:set",
+        // The status strip's Sync now button. It reads the config so it can be
+        // DISABLED WITH A REASON on a Mac that never set cloud sync up, rather
+        // than live and answering the click with a failure.
+        "wwb:sync:config",
       ]),
     );
   });

@@ -57,7 +57,10 @@ export const LastSignal = React.memo(function LastSignal({
   asOfMs,
 }: LastSignalProps): React.ReactElement {
   return (
-    <span data-slot="last-signal" className="text-sm text-muted-foreground">
+    // `shrink-0`: the strip is a flex row that has to be able to give width
+    // back at the window's 880px minimum, and this cell is four words long. The
+    // machine label and the sync note shrink; this and the two switches do not.
+    <span data-slot="last-signal" className="shrink-0 text-sm text-muted-foreground">
       last signal{" "}
       {/* `tabular-nums` for the same reason as everywhere else on this row:
           '9m ago' → '10m ago' must not shove the two switches to its right. */}

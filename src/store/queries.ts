@@ -212,7 +212,13 @@ export function byMachine(
               ROUND(SUM(i.jiggler_s)/3600.0, 2)         AS hours_with_jiggler_on
        FROM v_countable i LEFT JOIN machine m ON m.machine_id = i.machine_id
        WHERE i.local_date >= ? AND i.local_date < ?
-       GROUP BY i.machine_id ORDER BY hours DESC`,
+       -- machine_id is a TIEBREAK docs/DATA_MODEL.md does not have. Two Macs
+       -- on the same hours is not exotic, and without it SQLite's order is
+       -- arbitrary — which used to be invisible, and stopped being so the
+       -- moment this order started choosing the bar chart's shades. A legend
+       -- that swaps its greys between two renders of the same week is worse
+       -- than no legend.
+       GROUP BY i.machine_id ORDER BY hours DESC, i.machine_id`,
     )
     .all(wk.from, wk.toExclusive);
   return rows.map((raw) => {
@@ -224,6 +230,79 @@ export function byMachine(
       intervals: nOrZero(row, "intervals"),
       meetingHours: nOrZero(row, "meeting_hours"),
       jigglerHours: nOrZero(row, "hours_with_jiggler_on"),
+    };
+  });
+}
+
+export interface MachineDaySlice {
+  readonly localDate: string;
+  readonly machineId: string;
+  /** Milliseconds of that day's UNION credited to this machine. Never a sum. */
+  readonly ms: number;
+}
+
+/**
+ * 5b) PER-MACHINE, PER-DAY — the union SPLIT, which is not the same query as 5.
+ *
+ * Query 5 sums each machine's own intervals, and `docs/DATA_MODEL.md` is right
+ * that a plain SUM is correct for that question: one machine's intervals are
+ * disjoint, so nothing needs merging. But the totals it produces are the NAIVE
+ * SUM — add them up and you get the honesty widget's `naive_sum_h`, which is
+ * larger than the day's union whenever two Macs were awake at once.
+ *
+ * A stacked bar cannot use those numbers. Its segments have to come to the
+ * bar's own height, and the bar is the union.
+ *
+ * So this splits the union instead of summing the intervals, by the one rule
+ * that is both deterministic and explicable: **a moment belongs to whichever
+ * Mac was already working**. Walking the day's intervals in start order, an
+ * interval is credited only with the part of itself that reaches past
+ * everything before it — `e - MAX(s, prev_max)`, floored at zero, where
+ * `prev_max` is the furthest any earlier interval reached. That is the same
+ * sweep `v_merged_day` performs, with the same window frame; it just keeps the
+ * per-row contributions rather than collapsing them into islands. Summing them
+ * back up therefore lands on exactly the union, per day, by construction.
+ *
+ * The visible consequence, and it is intended: an interval that ran entirely
+ * inside another Mac's is credited zero here, while query 5 still shows its
+ * hours. The two answer different questions and the dashboard says so.
+ *
+ * `ORDER BY started_at_ms, machine_id, id` — the tiebreak does not change the
+ * total (any start-ordered sweep gives the union) but it does decide who gets
+ * an exactly-simultaneous minute, and that must not vary between runs.
+ */
+export function machineDaySlices(
+  db: DatabaseSync,
+  p: Policy,
+  fromDate: string,
+  toExclusive: string,
+): MachineDaySlice[] {
+  const rows = db
+    .prepare(
+      `${policyCte(p)},
+       o AS (
+         SELECT machine_id, local_date,
+                started_at_ms                     AS s_ms,
+                ended_at_ms + grace_s*1000        AS e_ms,
+                MAX(ended_at_ms + grace_s*1000) OVER (
+                  PARTITION BY local_date ORDER BY started_at_ms, machine_id, id
+                  ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS prev_max
+         FROM v_countable
+         WHERE local_date >= ? AND local_date < ?
+       )
+       SELECT local_date, machine_id,
+              SUM(MAX(0, e_ms - MAX(s_ms, COALESCE(prev_max, s_ms)))) AS ms
+       FROM o
+       GROUP BY local_date, machine_id
+       ORDER BY local_date, machine_id`,
+    )
+    .all(fromDate, toExclusive);
+  return rows.map((raw) => {
+    const row = raw as Row;
+    return {
+      localDate: s(row, "local_date"),
+      machineId: s(row, "machine_id"),
+      ms: nOrZero(row, "ms"),
     };
   });
 }
