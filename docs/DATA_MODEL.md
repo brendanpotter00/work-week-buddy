@@ -183,6 +183,12 @@ FROM v_merged_day WHERE local_date = :d;
 --
 --     A week before MIN(local_date) is NULL and is not drawn at all. A tracked
 --     week with nothing countable in it is 0 and IS drawn. PRD §4.
+--
+--     THE NULL DOES NOT COME FROM THIS SQL. SUM() over no rows is NULL here, but
+--     hoursThisWeek() normalises that to 0 (nOrZero) exactly as the "This week"
+--     card needs it to — so an untracked week and a zero week would arrive
+--     identical. The NULL is put back in TypeScript, by comparing the week's
+--     bounds against MIN(local_date): src/main/metrics.ts, buildWeekSeries().
 SELECT ROUND(SUM(e_ms - s_ms) / 3600000.0, 2) AS hours
 FROM v_merged_day WHERE local_date >= :week_from AND local_date < :week_to;
 
