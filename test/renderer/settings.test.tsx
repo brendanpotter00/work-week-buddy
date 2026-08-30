@@ -19,6 +19,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 
 import { Settings } from "@/renderer/Settings";
+import { IDLE_TIMEOUT_MIN_RANGE } from "@/shared/constants";
 import { INVOKE_CHANNELS } from "@/shared/ipc-types";
 import type {
   InvokeChannel,
@@ -592,15 +593,56 @@ describe("the settings that already existed and had no UI", () => {
     );
   });
 
-  it("writes the idle timeout, clamped to the range the PRD allows", async () => {
+  it("writes the idle timeout, over the range the PRD allows", async () => {
     const f = mount();
     const slider = (await screen.findByLabelText(/Idle timeout/)) as HTMLInputElement;
-    expect(slider.min).toBe("10");
-    expect(slider.max).toBe("15");
+    // Read off the SHARED constant, not typed out again here: a hard-coded "2"
+    // in this test would go green against a slider that had drifted away from
+    // the bound main actually enforces, which is the exact failure this change
+    // exists to remove.
+    expect(slider.min).toBe(String(IDLE_TIMEOUT_MIN_RANGE.min));
+    expect(slider.max).toBe(String(IDLE_TIMEOUT_MIN_RANGE.max));
+    expect(slider.step).toBe("1"); // whole minutes, over 14 stops
     expect(slider.value).toBe("15");
 
     type(slider, "12");
     await waitFor(() => expect(f.settingsWrites).toContainEqual({ idleTimeoutMin: 12 }));
+  });
+
+  it("sends a value below the old 10-minute floor rather than snapping it back", async () => {
+    // The renderer half of the double-bound bug. `src/main/ipc.test.ts` holds
+    // the other half — a slider that can reach 3 is worth nothing if main
+    // clamps it to 10 on arrival.
+    const f = mount();
+    const slider = (await screen.findByLabelText(/Idle timeout/)) as HTMLInputElement;
+
+    type(slider, "3");
+    await waitFor(() => expect(f.settingsWrites).toContainEqual({ idleTimeoutMin: 3 }));
+    expect(slider.value).toBe("3");
+  });
+
+  it("says what a short timeout costs, and only where it costs something", async () => {
+    // At 15 the old wording is the whole truth and stays. Below the old floor
+    // it is not: shortening the timeout does not only make the app notice
+    // sooner, it splits one session into several and a piece under the
+    // `v_countable` floor is recorded and then never counted. The owner asked
+    // for the option; the pane owes him the consequence.
+    mount();
+    const slider = (await screen.findByLabelText(/Idle timeout/)) as HTMLInputElement;
+    const hint = () => document.querySelector("#idle-timeout")!.parentElement!.textContent ?? "";
+
+    expect(hint()).toContain("ENDS at your last keystroke");
+    expect(hint()).toContain("only makes the app notice sooner");
+    expect(hint()).not.toContain("90 seconds");
+
+    type(slider, "2");
+    await waitFor(() => expect(hint()).toContain("one session becomes several"));
+    // The end stamp promise is unconditional — it is a property of the reducer,
+    // true at 2 minutes and at 15.
+    expect(hint()).toContain("ENDS at your last keystroke");
+    // Named from the stored policy, so it stays honest if `minIntervalS` moves.
+    expect(hint()).toContain("90 seconds");
+    expect(hint()).not.toContain("only makes the app notice sooner");
   });
 
   it("refuses a heatmap ramp that is not ascending, rather than applying half of it", async () => {

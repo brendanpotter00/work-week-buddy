@@ -686,7 +686,7 @@ import { dirname, join } from "node:path"
 
 export interface MainSettings {
   machineLabel: string
-  idleTimeoutMin: number                 // 10–15, PRD §7
+  idleTimeoutMin: number                 // 2–15, PRD §7 (IDLE_TIMEOUT_MIN_RANGE)
   jigglerPausePrompt: "ask" | "never"
   windowBackground: string               // '#FFFFFF' | '#191919' — mirrored from the renderer
   onboardingDismissed: boolean
@@ -2555,7 +2555,7 @@ Line numbers refer to `design/App.reference.tsx` as committed.
 | 239 | `data={weekBars}` → `data={metrics.weekBars}` | |
 | 265–283 | `MACHINES.map` → `metrics.byMachine.map`; key on `m.machineId` | |
 | 272–274 | `{m.hours}h` → `{formatHours(m.hours)}h` | |
-| 286–291 | `"15 min"` → `` `${appInfo.idleTimeoutMin} min` `` | PRD §7: adjustable 10–15 |
+| 286–291 | `"15 min"` → `` `${appInfo.idleTimeoutMin} min` `` | PRD §7: adjustable 2–15 |
 | 295–297 | **Keep** the "Press d" hint verbatim | the provider implements it |
 | — | **Insert** `<DoctorPanel />` after the bottom split, behind the header toggle | §6 |
 

@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { NO_SIGNAL, initialState } from "./types";
-import { DEFAULTS, WWB_MAGIC } from "../shared/constants";
+import { DEFAULTS, IDLE_TIMEOUT_MIN_RANGE, WWB_MAGIC } from "../shared/constants";
 
 describe("core types", () => {
   it("uses a sentinel that cannot collide with a real epoch", () => {
@@ -40,5 +40,38 @@ describe("constants", () => {
     // ignore list are gone (PRD §3.5) — so the number is load-bearing rather
     // than a belt beside a brace.
     expect(DEFAULTS.micMinCaptureMs).toBe(60_000);
+  });
+});
+
+describe("the idle timeout's adjustable range — PRD §7", () => {
+  it("never lets the floor drop below the countable floor", () => {
+    // THE WHOLE REASON THE FLOOR IS 2 AND NOT 1.
+    //
+    // `v_countable` throws away any interval shorter than `minIntervalS`. If
+    // the idle timeout could be set below that, the app would decide the owner
+    // had stopped working after a gap SHORTER than the shortest stretch of work
+    // it is willing to credit — so a burst of real typing would be closed into
+    // a row and then filtered straight back out of every headline number, with
+    // no error and no way to notice. Two minutes is the smallest whole minute
+    // that clears 90 seconds.
+    //
+    // This is the guard on the interaction, not a restatement of the value: if
+    // someone lowers `min` to 1, or raises `minIntervalMs` past two minutes,
+    // this fails.
+    expect(IDLE_TIMEOUT_MIN_RANGE.min * 60_000).toBeGreaterThanOrEqual(DEFAULTS.minIntervalMs);
+  });
+
+  it("keeps the default inside the range it offers", () => {
+    // A default outside its own slider is a setting that changes the moment the
+    // pane is opened.
+    const defaultMin = DEFAULTS.idleTimeoutMs / 60_000;
+    expect(defaultMin).toBeGreaterThanOrEqual(IDLE_TIMEOUT_MIN_RANGE.min);
+    expect(defaultMin).toBeLessThanOrEqual(IDLE_TIMEOUT_MIN_RANGE.max);
+  });
+
+  it("is 2–15, in whole minutes", () => {
+    expect(IDLE_TIMEOUT_MIN_RANGE).toEqual({ min: 2, max: 15 });
+    expect(Number.isInteger(IDLE_TIMEOUT_MIN_RANGE.min)).toBe(true);
+    expect(Number.isInteger(IDLE_TIMEOUT_MIN_RANGE.max)).toBe(true);
   });
 });

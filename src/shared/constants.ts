@@ -177,3 +177,36 @@ export const DEFAULTS = {
   countJigglerTime: false,
   heatmapThresholdsH: [3, 6, 8],
 } as const;
+
+/**
+ * How far the idle timeout may be moved, in whole minutes. THE ONE DEFINITION.
+ *
+ * It used to be two: `IDLE_MIN`/`IDLE_MAX` in `src/renderer/Settings.tsx` and
+ * `IDLE_TIMEOUT_MIN_RANGE` in `src/main/ipc.ts`. Two bounds for one invariant
+ * is a bug waiting to ship — main sanitises every incoming patch (deliberately,
+ * because a view is the wrong place to hold an invariant), so widening only the
+ * slider makes the value clamp straight back on save and the setting look
+ * broken with nothing in the log. Both halves import this now, so they cannot
+ * disagree.
+ *
+ * THE FLOOR IS 2 MINUTES, AND IT IS 2 BECAUSE OF `minIntervalMs`.
+ *
+ * `v_countable` drops any interval shorter than 90 seconds, so 120 s is the
+ * smallest whole number of minutes that is still longer than the shortest
+ * session this app will ever credit. Anything below it makes the setting
+ * contradict itself: the app would decide the owner had stopped working after a
+ * gap shorter than the shortest stretch of work it is willing to count, and a
+ * burst of real typing would be stored as a row and then silently vanish from
+ * every headline number. `src/core/types.test.ts` pins
+ * `min * 60_000 >= DEFAULTS.minIntervalMs` so the floor cannot drift under it.
+ *
+ * The ceiling stays 15 — the default, and what PRD §3.2 describes. Nobody has
+ * asked to wait longer.
+ *
+ * WIDENING THIS DOES NOT TOUCH HISTORY (PRD §7). The timeout is read in exactly
+ * one place, `settleEffects` in `src/core/reduce.ts`, to work out when the NEXT
+ * deadline should fire. Stored rows carry their own `ended_at_ms` and are never
+ * re-cut; `setIdleTimeoutMs` re-arms from the last real signal and moves no
+ * timestamp that has already been written.
+ */
+export const IDLE_TIMEOUT_MIN_RANGE = { min: 2, max: 15 } as const;

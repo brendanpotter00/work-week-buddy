@@ -13,7 +13,7 @@ import type { SelfTestResult } from "../shared/ipc-types";
 export interface MainSettings {
   machineId: string;
   machineLabel: string;
-  /** 10–15, PRD §7. */
+  /** 2–15, PRD §7. The bound is `IDLE_TIMEOUT_MIN_RANGE`. */
   idleTimeoutMin: number;
   jigglerPausePrompt: "ask" | "never";
   /** '#FFFFFF' | '#191919' — mirrored from the renderer so main can paint first. */

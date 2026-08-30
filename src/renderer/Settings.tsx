@@ -47,11 +47,48 @@ import { TitleBar } from "@/renderer/components/title-bar";
 import { Button } from "@/renderer/components/ui/button";
 import { ipc, messageOf, useDoctor, useSettings, useSyncConfig } from "@/renderer/lib/ipc";
 import { useThemeMirror } from "@/renderer/lib/use-theme-mirror";
+import { DEFAULTS, IDLE_TIMEOUT_MIN_RANGE } from "@/shared/constants";
 import type { UiSettings } from "@/shared/ipc-types";
 
-/** PRD §7: "15 minutes, adjustable 10–15 without touching history". */
-const IDLE_MIN = 10;
-const IDLE_MAX = 15;
+/**
+ * PRD §7: "15 minutes, adjustable 2–15 without touching history".
+ *
+ * IMPORTED, never redeclared. This file used to carry its own `IDLE_MIN` and
+ * `IDLE_MAX`, which meant one invariant lived in two places — and because main
+ * sanitises every patch on arrival (deliberately: a view is the wrong place to
+ * hold an invariant), widening the slider alone would have made every new value
+ * clamp silently back on save. One definition, two readers.
+ */
+const { min: IDLE_MIN, max: IDLE_MAX } = IDLE_TIMEOUT_MIN_RANGE;
+
+/**
+ * What the timeout does at the value it is currently sitting on.
+ *
+ * The first sentence has always been here, and it is a property of the reducer
+ * rather than of the number — an interval ends at the last real signal at 15
+ * minutes and at 2 alike (AGENTS.md, the rule that outranks everything). It
+ * survives the widening unchanged.
+ *
+ * The second sentence appears only BELOW the old 10-minute floor, because below
+ * it the old wording stopped being the whole truth. "Shortening it only makes
+ * the app notice sooner" is fair at 10; at 2 the dominant effect is that one
+ * working session is cut into several, the pauses between the pieces are no
+ * longer counted as work, and a piece shorter than `minIntervalS` is written to
+ * disk and then filtered straight back out of every headline number by
+ * `v_countable`. That is the owner's own original objection to a short grace —
+ * he has asked for the option anyway, so the pane states the cost instead of
+ * quietly protecting him from it.
+ */
+export function idleHint(min: number, minIntervalS: number): string {
+  const always =
+    "The interval still ENDS at your last keystroke, never at the moment this runs out.";
+  if (min >= 10) return `${always} Shortening it only makes the app notice sooner.`;
+  return (
+    `${always} But at ${String(min)} minutes a pause to think ends it too, so one ` +
+    `session becomes several — and a piece shorter than ${String(minIntervalS)} seconds ` +
+    `is still recorded and still never counted.`
+  );
+}
 
 export function Settings(): React.ReactElement {
   useThemeMirror();
@@ -142,8 +179,16 @@ export function Settings(): React.ReactElement {
             <Field
               htmlFor="idle-timeout"
               label={`Idle timeout — ${String(value?.idleTimeoutMin ?? IDLE_MAX)} minutes`}
-              hint="The interval still ENDS at your last keystroke, never at the moment this runs out. Shortening it only makes the app notice sooner."
+              hint={idleHint(
+                value?.idleTimeoutMin ?? IDLE_MAX,
+                value?.minIntervalS ?? DEFAULTS.minIntervalMs / 1000,
+              )}
             >
+              {/* STILL WHOLE MINUTES. The track is 14 stops wide now instead of
+                  5, which is coarse enough to hit any of them by drag — and a
+                  finer step would only buy fractions of a minute nobody is
+                  choosing between, while making it possible to land on a number
+                  the label above cannot say plainly. */}
               <input
                 id="idle-timeout"
                 type="range"
@@ -155,6 +200,16 @@ export function Settings(): React.ReactElement {
                 disabled={value === null}
                 onChange={(e) => write({ idleTimeoutMin: Number(e.target.value) })}
               />
+              {/* The ends, written out. A track whose range moved under the
+                  owner should say where it now starts; the input's own `min`
+                  and `max` are read by assistive tech but by nobody else. */}
+              <div
+                aria-hidden="true"
+                className="flex justify-between text-[11px] tabular-nums text-muted-foreground"
+              >
+                <span>{IDLE_MIN} min</span>
+                <span>{IDLE_MAX} min</span>
+              </div>
             </Field>
           </SettingsCard>
 

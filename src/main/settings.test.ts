@@ -95,4 +95,23 @@ describe("a settings file written by an older build", () => {
     const store = new SettingsStore(() => tmp());
     await expect(store.load()).resolves.toEqual(SETTINGS_DEFAULTS);
   });
+
+  it("loads an idle timeout that is outside the current range without throwing", async () => {
+    // `load()` does NOT sanitise, and must not start: this file is the only
+    // record of a machine's settings, and the app's job on launch is to measure
+    // hours, not to audit a JSON file. Two shapes have to survive.
+    //
+    // 15 is what is literally on the owner's disk today — inside the range, and
+    // the ordinary case. 40 is the one this widening makes possible in the
+    // other direction: a file written by a FUTURE build with a wider range, or
+    // hand-edited, opened by this one. Neither may be a reason the app declines
+    // to start; the value is clamped on the next write through
+    // `sanitizeUiSettings`, which is where the invariant lives.
+    for (const stored of [15, 40, 1, 0]) {
+      const dir = tmp();
+      write(dir, { idleTimeoutMin: stored });
+      const store = new SettingsStore(() => dir);
+      await expect(store.load()).resolves.toMatchObject({ idleTimeoutMin: stored });
+    }
+  });
 });
