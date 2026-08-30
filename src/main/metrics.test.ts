@@ -17,10 +17,17 @@
  */
 import { describe, expect, it } from "vitest";
 
-import { buildMetrics } from "./metrics";
-import { DEFAULT_POLICY, hoursOnDate } from "../store";
+import { buildMetrics, WEEK_SERIES_WEEKS } from "./metrics";
+import { addDays, DEFAULT_POLICY, hoursOnDate, hoursThisWeek } from "../store";
 import { DEFAULT_METRICS_POLICY } from "../shared/ipc-types";
-import { openTestDb, seed, seedWeek, t, NOW_IN_WEEK } from "../../test/fakes/seed-db";
+import {
+  openTestDb,
+  seed,
+  seedWeek,
+  t,
+  NOW_IN_WEEK,
+  type RowSpec,
+} from "../../test/fakes/seed-db";
 
 const WIRE = DEFAULT_METRICS_POLICY;
 const BASE = DEFAULT_POLICY;
@@ -298,5 +305,205 @@ describe("MetricsBundle.weekBars — the per-machine split", () => {
     const bar = buildMetrics(db, WIRE, BASE, "UTC", NOW_IN_WEEK).weekBars[0]!;
     expect(sum(bar)).toBe(bar.hours);
     expect(hoursOnDate(db, BASE, bar.date)).toBe(bar.hours);
+  });
+});
+
+/**
+ * `MetricsBundle.weekSeries` — the sixteen bars under the heatmap.
+ *
+ * The owner asked for it in one sentence: *"I need a way to see how many hours
+ * I worked the past few weeks."* Everything below guards one of the two ways a
+ * strip like this goes wrong without erroring.
+ *
+ * 1. IT DISAGREES WITH THE CARD ABOVE IT. The newest bar and the "This week"
+ *    stat card describe the same seven days on the same screen. Building the
+ *    strip out of `heatmap` — already in the bundle, and it saves sixteen
+ *    queries — rounds each DAY to 2dp where `hoursThisWeek()` rounds the WEEK,
+ *    and seven rounded days land up to 0.035 h out. That is a different printed
+ *    tenth, from a discrepancy nothing reports. So every entry is pinned
+ *    against an INDEPENDENT `hoursThisWeek()` call rather than against the loop
+ *    that produced it.
+ *
+ * 2. IT INVENTS WEEKS OFF. `null` (before tracking began — draw nothing) and
+ *    `0` (tracked, no work — draw a bar) are different pixels, PRD §4. The
+ *    owner has two weeks of history, so fourteen of these sixteen entries are
+ *    `null` on his machine today: the empty case IS the case.
+ */
+describe("MetricsBundle.weekSeries — the sixteen-week strip", () => {
+  /** Midweek of `weekStart`, in UTC — an instant no DST shift can move out. */
+  const midweek = (weekStart: string): number => t(`${addDays(weekStart, 3)}T12:00:00Z`);
+
+  const p2 = (n: number): string => String(n).padStart(2, "0");
+
+  /** One interval on `date`, `fromH`–`toH` UTC. */
+  function day(id: string, date: string, fromH: number, toH: number): RowSpec {
+    return {
+      id,
+      machineId: "work",
+      start: `${date}T${p2(fromH)}:00:00Z`,
+      end: `${date}T${p2(toH)}:00:00Z`,
+    };
+  }
+
+  /** Mon–Fri of the week starting `weekStart`, `hoursPerDay` each. */
+  function workWeek(weekStart: string, hoursPerDay: number): RowSpec[] {
+    return [0, 1, 2, 3, 4].map((i) =>
+      day(`${weekStart}-${String(i)}`, addDays(weekStart, i), 9, 9 + hoursPerDay),
+    );
+  }
+
+  const THIS_WEEK = "2026-08-17";
+  const OLDEST_WEEK = addDays(THIS_WEEK, -7 * (WEEK_SERIES_WEEKS - 1));
+
+  it("is sixteen consecutive weeks, oldest first, ending on the current one", () => {
+    const db = openTestDb();
+    seedWeek(db);
+    const m = buildMetrics(db, WIRE, BASE, "UTC", NOW_IN_WEEK);
+
+    expect(m.weekSeries).toHaveLength(WEEK_SERIES_WEEKS);
+    expect(m.weekSeries.map((w) => w.weekStart)).toEqual(
+      Array.from({ length: WEEK_SERIES_WEEKS }, (_, i) => addDays(OLDEST_WEEK, 7 * i)),
+    );
+    // The newest entry names the week the whole bundle is about.
+    expect(m.weekSeries.at(-1)!.weekStart).toBe(m.weekStart);
+  });
+
+  it("is `hoursThisWeek()` for every week, pinned against the call itself", () => {
+    // Twelve tracked weeks with twelve different totals, so an off-by-one in
+    // the walk shows up as a wrong number and not merely a wrong label.
+    const db = openTestDb();
+    const rows: RowSpec[] = [];
+    for (let back = 0; back < 12; back++) {
+      rows.push(...workWeek(addDays(THIS_WEEK, -7 * back), 4 + (back % 5)));
+    }
+    seed(db, rows);
+
+    const m = buildMetrics(db, WIRE, BASE, "UTC", NOW_IN_WEEK);
+
+    let drawn = 0;
+    for (const point of m.weekSeries) {
+      if (point.hours === null) continue;
+      drawn++;
+      // The independent call: a fresh `hoursThisWeek()` at an instant inside
+      // that week, reached without going through `buildWeekSeries()` at all.
+      expect(point.hours).toBe(hoursThisWeek(db, BASE, "UTC", midweek(point.weekStart)));
+    }
+    expect(drawn).toBe(12);
+  });
+
+  it("does NOT sum the heatmap's already-rounded days", () => {
+    // Seven twenty-minute days. Each rounds to 0.33 h on its own; the week is
+    // 2.3333 h and rounds to 2.33. Summing the days gives 2.31 — a number the
+    // "This week" card never shows, arrived at with nothing throwing.
+    const db = openTestDb();
+    seed(
+      db,
+      [0, 1, 2, 3, 4, 5, 6].map((i) => ({
+        id: `t${String(i)}`,
+        machineId: "work",
+        start: `${addDays(THIS_WEEK, i)}T09:00:00Z`,
+        end: `${addDays(THIS_WEEK, i)}T09:20:00Z`,
+      })),
+    );
+    const m = buildMetrics(db, WIRE, BASE, "UTC", NOW_IN_WEEK);
+
+    const inWeek = m.heatmap.filter((d) => d.date >= THIS_WEEK && d.date < addDays(THIS_WEEK, 7));
+    const summed = Math.round(inWeek.reduce((a, d) => a + d.count, 0) * 100) / 100;
+
+    expect(m.weekSeries.at(-1)!.hours).toBe(2.33);
+    expect(m.week.hours).toBe(2.33);
+    expect(summed).toBe(2.31);
+  });
+
+  it("leaves a week before tracking began `null`, never `0`", () => {
+    const db = openTestDb();
+    seed(db, workWeek(THIS_WEEK, 7));
+    const m = buildMetrics(db, WIRE, BASE, "UTC", NOW_IN_WEEK);
+
+    // Fifteen unobserved weeks and one tracked one. `null` is not `0`: nobody
+    // was measuring, so "he worked no hours" is a claim this database cannot
+    // make.
+    expect(m.weekSeries.slice(0, -1).every((w) => w.hours === null)).toBe(true);
+    expect(m.weekSeries.at(-1)!.hours).toBe(35);
+    expect(m.allTime.sinceDate).toBe(THIS_WEEK);
+  });
+
+  it("draws a tracked week with no work as `0`", () => {
+    // Worked four weeks ago and this week; nothing at all in between. Those
+    // three weeks ARE zero — he was being measured and he did not work — and
+    // the strip has to show them, or a break reads as a hole in the data.
+    const db = openTestDb();
+    seed(db, [...workWeek(addDays(THIS_WEEK, -28), 8), ...workWeek(THIS_WEEK, 6)]);
+    const m = buildMetrics(db, WIRE, BASE, "UTC", NOW_IN_WEEK);
+
+    const by = new Map(m.weekSeries.map((w) => [w.weekStart, w.hours]));
+    expect(by.get(addDays(THIS_WEEK, -28))).toBe(40);
+    for (const back of [21, 14, 7]) {
+      expect(by.get(addDays(THIS_WEEK, -back))).toBe(0);
+    }
+    expect(by.get(THIS_WEEK)).toBe(30);
+    // …and the weeks before he ever started are still absent, not zero.
+    expect(by.get(addDays(THIS_WEEK, -35))).toBeNull();
+  });
+
+  it("ends on exactly the number the This week card shows, in every state", () => {
+    const db = openTestDb();
+    seedWeek(db);
+    const m = buildMetrics(db, WIRE, BASE, "UTC", NOW_IN_WEEK);
+    expect(m.weekSeries.at(-1)).toEqual({ weekStart: m.weekStart, hours: m.week.hours });
+
+    // A database with no rows at all: the card reads `—` and so does the strip.
+    const empty = buildMetrics(openTestDb(), WIRE, BASE, "UTC", NOW_IN_WEEK);
+    expect(empty.week.hours).toBeNull();
+    expect(empty.weekSeries).toHaveLength(WEEK_SERIES_WEEKS);
+    expect(empty.weekSeries.every((w) => w.hours === null)).toBe(true);
+
+    // Rows exist but none of them count — this one is under the 90-second
+    // stray-bump floor. `week.hours` is `0` there, so the newest bar has to be
+    // `0` too rather than vanishing while the card beside it prints a number.
+    const bumps = openTestDb();
+    seed(bumps, [
+      { id: "b1", machineId: "work", start: "2026-08-17T09:00:00Z", end: "2026-08-17T09:00:30Z" },
+    ]);
+    const m2 = buildMetrics(bumps, WIRE, BASE, "UTC", NOW_IN_WEEK);
+    expect(m2.week.hours).toBe(0);
+    expect(m2.weekSeries.at(-1)).toEqual({ weekStart: m2.weekStart, hours: 0 });
+  });
+
+  it("obeys the policy knobs the same way the This week card does", () => {
+    // `seedWeek()`'s Thursday is four hours wholly covered by our own jiggler.
+    const db = openTestDb();
+    seedWeek(db);
+
+    const off = buildMetrics(db, WIRE, BASE, "UTC", NOW_IN_WEEK);
+    const on = buildMetrics(db, { ...WIRE, countJigglerTime: 1 }, BASE, "UTC", NOW_IN_WEEK);
+
+    expect(off.weekSeries.at(-1)!.hours).toBe(off.week.hours);
+    expect(on.weekSeries.at(-1)!.hours).toBe(on.week.hours);
+    expect(on.weekSeries.at(-1)!.hours).toBe((off.weekSeries.at(-1)!.hours ?? 0) + 4);
+  });
+
+  it("walks CALENDAR weeks across a DST change, not 168-hour blocks", () => {
+    // THE TRAP: `nowMs − k × 7 × 86_400_000` is seven 24-HOUR days. Chicago
+    // sprang forward on Sunday 8 March 2026, so from 00:30 on Monday 16 March
+    // the k=2 anchor lands at 23:30 on Sunday 1 March — inside the week BEFORE
+    // the one it is meant to name. The week of 2 March would be missing from
+    // the strip, with a full set of sixteen bars and no error anywhere.
+    const db = openTestDb();
+    seed(db, [day("dst", "2026-03-04", 9, 17)]);
+
+    const now = t("2026-03-16T05:30:00Z"); // 00:30 CDT, a Monday
+    const m = buildMetrics(db, WIRE, BASE, "America/Chicago", now);
+
+    expect(m.weekStart).toBe("2026-03-16");
+    expect(m.weekSeries.map((w) => w.weekStart)).toEqual(
+      Array.from({ length: WEEK_SERIES_WEEKS }, (_, i) =>
+        addDays("2026-03-16", 7 * (i - (WEEK_SERIES_WEEKS - 1))),
+      ),
+    );
+    // Every label distinct — no week printed twice, none skipped.
+    expect(new Set(m.weekSeries.map((w) => w.weekStart)).size).toBe(WEEK_SERIES_WEEKS);
+    // And the week that would have been skipped still carries its hours.
+    expect(m.weekSeries.find((w) => w.weekStart === "2026-03-02")?.hours).toBe(8);
   });
 });

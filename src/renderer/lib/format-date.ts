@@ -34,3 +34,16 @@ export function formatMonthYear(d: LocalDate | null): string | null {
   if (date === null) return d;
   return date.toLocaleDateString(undefined, { month: "short", year: "numeric" });
 }
+
+/**
+ * '2026-08-24' → 'Aug 24'. The date under a bar in the weekly strip.
+ *
+ * No year: sixteen weeks is under four months, the bars are in order, and the
+ * pitch is 46 px — a year on every one of them would be four characters of
+ * noise repeated sixteen times.
+ */
+export function formatMonthDay(d: LocalDate): string {
+  const date = toLocalDate(d);
+  if (date === null) return d;
+  return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
