@@ -211,6 +211,13 @@ export interface SignalSource {
    */
   probe(): NativeStatus;
   /**
+   * Re-take the wall-clock ↔ event-clock anchor, and nothing else. Called on
+   * wake: the event clock stops while the Mac sleeps, so a pre-sleep anchor
+   * dates every post-wake event early by the length of the sleep. Cheaper than
+   * `probe()`, which also walks the camera and mic HAL lists.
+   */
+  reanchorClock(): void;
+  /**
    * One CoreGraphics boolean: is the tap still armed?
    *
    * Split out from `probe()` because `probe()` also walks the CoreMediaIO and

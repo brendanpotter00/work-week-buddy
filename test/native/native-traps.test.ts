@@ -405,6 +405,20 @@ describe("the close rule, in the drain path", () => {
     expect(body).toMatch(/if \(ns > pending\.mouseLastNs\)/);
   });
 
+  it("re-anchoring drains the coalesced events on the OLD anchor first", () => {
+    // Events still pending at a wake were stamped before the sleep. Converting
+    // them on the new anchor would date them later by the sleep — phantom time.
+    const body = functionBody(CODE, "reanchorClock");
+    expect(body).toMatch(/drain\(\);[\s\S]*machNowNs\(\)/);
+  });
+
+  it("the self-test converts its round trip on a fresh anchor", () => {
+    // On a stale anchor the "within 2 s of wall clock" check measures how long
+    // the Mac slept since the last probe, not whether the units are right.
+    const body = functionBody(CODE, "selfTest");
+    expect(body).toMatch(/reanchorClock\(\);\s*const arrived/);
+  });
+
   it("clamps a converted timestamp forward only, so it can never invent time", () => {
     const body = functionBody(CODE, "eventEpochMs");
     // A stale anchor can push a computed time into the future; the clamp stops

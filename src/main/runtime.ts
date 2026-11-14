@@ -758,6 +758,14 @@ class Runtime implements AppRuntime {
 
   async onResume(atMs: number, suspendedAtMs: number | null): Promise<void> {
     void suspendedAtMs;
+    // The event clock stopped while we slept; the wall clock did not. Re-anchor
+    // before anything else, or every keystroke for up to five minutes after
+    // waking is dated early by the length of the sleep.
+    try {
+      this.o.source.reanchorClock();
+    } catch (err) {
+      console.error("[runtime] could not re-anchor the clock on resume", err);
+    }
     // One signal, no special case: the reducer compares the wall clock against
     // the last real signal and either closes at that signal or re-arms.
     this.dispatch({ kind: "deadlineFired", atMs });
