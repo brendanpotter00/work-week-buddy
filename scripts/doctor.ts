@@ -525,15 +525,35 @@ export interface CliOptions {
   json: boolean;
   color: boolean;
   help: boolean;
+  /**
+   * Judge the report as of this epoch ms instead of the wall clock. For
+   * re-reading a saved report as it stood when it was taken, and for tests,
+   * whose fixtures are pinned to one date and would otherwise go stale.
+   */
+  nowMs: number | null;
 }
 
 export function parseArgs(argv: readonly string[], isTty: boolean): CliOptions {
-  const o: CliOptions = { reportPath: null, bin: APP_BIN, json: false, color: isTty, help: false };
+  const o: CliOptions = {
+    reportPath: null,
+    bin: APP_BIN,
+    json: false,
+    color: isTty,
+    help: false,
+    nowMs: null,
+  };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--report") o.reportPath = argv[++i] ?? "-";
     else if (a === "--app") o.bin = `${argv[++i] ?? APP_PATH}/Contents/MacOS/Work Week Buddy`;
-    else if (a === "--json") o.json = true;
+    else if (a === "--now") {
+      const raw = argv[++i];
+      const ms = Number(raw);
+      if (raw === undefined || raw === "" || !Number.isFinite(ms)) {
+        throw new Error(`--now needs epoch milliseconds, got: ${raw ?? "nothing"}`);
+      }
+      o.nowMs = ms;
+    } else if (a === "--json") o.json = true;
     else if (a === "--no-color") o.color = false;
     else if (a === "--color") o.color = true;
     else if (a === "-h" || a === "--help") o.help = true;
@@ -542,12 +562,13 @@ export function parseArgs(argv: readonly string[], isTty: boolean): CliOptions {
   return o;
 }
 
-export const USAGE = `usage: npm run doctor -- [--report FILE|-] [--app /path/to/App.app] [--json] [--no-color]
+export const USAGE = `usage: npm run doctor -- [--report FILE|-] [--app /path/to/App.app] [--json] [--no-color] [--now MS]
 
   --report FILE   read a DoctorReport JSON instead of running the app ('-' = stdin)
   --app PATH      run a different bundle (default ${APP_PATH})
   --json          print the raw report and nothing else
   --no-color      plain output
+  --now MS        judge the report as of this epoch ms, not the wall clock
 
 exit: 0 all invariants hold (warnings allowed) · 1 at least one is red · 2 no report
 
@@ -581,7 +602,7 @@ export async function main(argv: readonly string[]): Promise<number> {
     return 2;
   }
 
-  const nowMs = Date.now();
+  const nowMs = o.nowMs ?? Date.now();
   const invariants = evaluate(report, nowMs);
 
   // --json changes the OUTPUT, never the verdict: the exit code has to mean the

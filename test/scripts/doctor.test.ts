@@ -516,6 +516,10 @@ describe("collection plumbing", () => {
     expect(parseArgs([], true).color).toBe(true);
     expect(parseArgs(["--no-color"], true).color).toBe(false);
     expect(() => parseArgs(["--wat"], false)).toThrow(/unknown argument/);
+    expect(parseArgs([], false).nowMs).toBeNull();
+    expect(parseArgs(["--now", "1755604800000"], false).nowMs).toBe(1755604800000);
+    expect(() => parseArgs(["--now"], false)).toThrow(/epoch milliseconds/);
+    expect(() => parseArgs(["--now", "yesterday"], false)).toThrow(/epoch milliseconds/);
   });
 });
 
@@ -538,6 +542,10 @@ describe("the script as a process", () => {
           "--report",
           path,
           "--no-color",
+          // The fixtures are pinned to NOW. Judged on the wall clock they age
+          // past the 30-day self-test and 15-day backup limits and go red.
+          "--now",
+          String(NOW),
         ],
         { encoding: "utf8" },
       );
@@ -584,7 +592,7 @@ describe("the script as a process", () => {
     try {
       out = execFileSync(
         process.execPath,
-        ["--experimental-strip-types", "--disable-warning=ExperimentalWarning", script, "--report", path, "--json"],
+        ["--experimental-strip-types", "--disable-warning=ExperimentalWarning", script, "--report", path, "--json", "--now", String(NOW)],
         { encoding: "utf8" },
       );
     } catch (err) {
