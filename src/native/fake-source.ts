@@ -113,6 +113,12 @@ export class FakeSignalSource implements SignalSource {
     };
   }
 
+  /** Every `reanchorClock()` call. The fake has no clock to anchor. */
+  reanchorCalls = 0;
+  reanchorClock(): void {
+    this.reanchorCalls++;
+  }
+
   tapAlive(): boolean {
     return this.started && this.tapEnabled;
   }

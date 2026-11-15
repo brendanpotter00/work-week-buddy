@@ -640,9 +640,24 @@ function machNowNs(): number {
 
 /**
  * Re-take the wall-clock ↔ mach anchor. Called at boot, on powerMonitor
- * 'resume', and on every watchdog probe. It reads two clocks and posts nothing.
+ * 'resume' (via `SignalSource.reanchorClock()` from `runtime.onResume`), at the
+ * start of the self-test's round trip, and on every watchdog probe. It reads
+ * two clocks and posts nothing.
+ *
+ * WHY 'resume' MATTERS: `mach_absolute_time` — and so `CGEventGetTimestamp` —
+ * STOPS while the Mac sleeps, and `Date.now()` does not. An anchor taken before
+ * a sleep therefore dates every post-wake event too EARLY by the length of the
+ * sleep, until the next five-minute probe. Measured: the jiggler self-test
+ * failed "within 2 s of wall clock" at −5475 ms, which switched the jiggler off
+ * and left a ⚠︎ on the menu bar for six weeks.
+ *
+ * Anything still coalesced is drained FIRST, on the old anchor. Those events
+ * were stamped before the sleep, and the old anchor is the one that converts
+ * them correctly; converting them on the new one would date them LATER by the
+ * sleep — phantom time, the one direction AGENTS.md forbids.
  */
 export function reanchorClock(): void {
+  if (pending.keyCount > 0 || pending.mouseCount > 0) drain();
   const ns = machNowNs();
   anchorEpochMs = Date.now();
   anchorMachNs = ns;
@@ -1687,6 +1702,12 @@ export async function selfTest(): Promise<SelfTestReport> {
   );
 
   // 4 ─ The round trip: a tagged jiggle must come back identified as ours.
+  //
+  // Fresh anchor first. The timestamp check below exists to prove the UNITS
+  // (nanoseconds, not mach ticks) and the conversion arithmetic. Run on a
+  // five-minute-old anchor it instead measured how long the Mac had slept since
+  // the last probe, and failed the jiggler's safety gate over that.
+  reanchorClock();
   const arrived = new Promise<SeenJiggle | null>((resolve) => {
     selfTestSaw = (ev, type) => {
       const rawUser = CGEventGetIntegerValueField(ev, kCGEventSourceUserData);

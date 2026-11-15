@@ -69,6 +69,10 @@ export class MacSignalSource implements SignalSource {
     };
   }
 
+  reanchorClock(): void {
+    native.reanchorClock();
+  }
+
   tapAlive(): boolean {
     return this.started && native.isTapEnabled();
   }

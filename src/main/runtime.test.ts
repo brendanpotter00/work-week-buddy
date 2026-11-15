@@ -581,6 +581,19 @@ describe("crash recovery and power", () => {
     expect(stored[0]!.duration_s).toBe(60);
   });
 
+  it("re-anchors the event clock on wake, before the deadline is re-evaluated", async () => {
+    // mach_absolute_time stops while the Mac sleeps. Without this, every
+    // keystroke for up to five minutes after waking is dated early by the
+    // length of the sleep — and the jiggler self-test fails its clock check.
+    h = await makeHarness();
+    h.source.key(Date.now());
+    await h.runtime.onSuspend(Date.now());
+    const before = h.source.reanchorCalls;
+    advance(3 * MIN);
+    await h.runtime.onResume(Date.now(), T0);
+    expect(h.source.reanchorCalls).toBe(before + 1);
+  });
+
   it("a short lid-close keeps one continuous interval", async () => {
     h = await makeHarness();
     h.source.key(Date.now());
